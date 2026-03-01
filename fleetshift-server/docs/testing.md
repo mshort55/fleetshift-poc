@@ -29,11 +29,11 @@ For an example of how to do this, see [this](https://github.com/alechenninger/fa
 
 ## No Mocks
 
-No "method verifying" mocks. [Not to be confused with *dummies* or *stubs*](https://martinfowler.com/bliki/TestDouble.html) (which can be perfectly fine in moderation).
+No "method verifying" mocks. [Not to be confused with *dummies* or *stubs*](https://martinfowler.com/bliki/TestDouble.html) (which can be fine in moderation, IF AND ONLY IF they are meaningfully simpler than just using a fake).
 
 Prefer simply using a real instance. If an object is not coupled to external I/O, there is no reason not to reuse it. It is the least work and the best coverage.
 
-If it is, prefer using a Fake. In memory fakes are a useful feature of an application ("Kessel in a box"), so the investment pays for itself quickly. When implementing fakes (or any second implementation of an interface), it is useful to first define a set of "[contract tests](?tab=t.0#heading=h.wzojlv149m4r)" at the interface layer.
+If it is, prefer using a Fake. In memory fakes are a useful feature of an application ("Kessel in a box"), so the investment pays for itself quickly. When implementing fakes (or any second implementation of an interface), first define a set of "[contract tests](./internal-architecture.md)" at the interface layer.
 
 Stubs or dummies can be used judiciously when the interaction is trivial.
 

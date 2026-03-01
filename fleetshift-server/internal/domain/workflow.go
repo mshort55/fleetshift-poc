@@ -2,6 +2,21 @@ package domain
 
 import "context"
 
+// Workflow types are organized as follows:
+//
+//   - workflow.go: shared primitives (Activity, DurableRunner, WorkflowHandle,
+//     RunActivity, NewActivity) and the engine contract (WorkflowEngine,
+//     WorkflowRunners). No workflow-specific runner types.
+//
+//   - Per-workflow file (orchestration.go, create_deployment.go): the workflow
+//     struct, its execution runner, and its starter. Naming:
+//     • XWorkflowRunner = execution-time capability passed to XWorkflow.Run
+//       (extends DurableRunner with workflow-specific methods).
+//     • XRunner = app-facing starter; Run(ctx, input) returns WorkflowHandle.
+//
+// So: orchestration.go has DeploymentWorkflowRunner + OrchestrationRunner;
+// create_deployment.go has CreateDeploymentWorkflowRunner + CreateDeploymentRunner.
+
 // Activity is a named, typed, idempotent operation. Implementations must
 // be safe for at-least-once invocation.
 type Activity[I any, O any] interface {
@@ -42,15 +57,16 @@ type WorkflowHandle[O any] interface {
 	AwaitResult(ctx context.Context) (O, error)
 }
 
-// OrchestrationRunner starts and awaits orchestration workflows.
-type OrchestrationRunner interface {
-	Run(ctx context.Context, deploymentID DeploymentID) (WorkflowHandle[struct{}], error)
+// WorkflowRunners holds the runners produced by [WorkflowEngine.Register].
+type WorkflowRunners struct {
+	Orchestration    OrchestrationRunner
+	CreateDeployment CreateDeploymentRunner
 }
 
-// WorkflowEngine creates runners for the workflow types known to the
-// domain. Infrastructure packages provide engine-specific implementations.
+// WorkflowEngine registers domain workflows with an execution engine
+// and returns the runners needed by the application layer.
 type WorkflowEngine interface {
-	OrchestrationRunner(wf *OrchestrationWorkflow) (OrchestrationRunner, error)
+	Register(owf *OrchestrationWorkflow, cwf *CreateDeploymentWorkflow) (WorkflowRunners, error)
 }
 
 // NewActivity creates an [Activity] from a stable name and a function.

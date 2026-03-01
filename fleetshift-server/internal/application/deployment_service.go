@@ -7,44 +7,32 @@ import (
 	"github.com/fleetshift/fleetshift-poc/fleetshift-server/internal/domain"
 )
 
-// CreateDeploymentInput is the caller-provided input for creating a deployment.
-type CreateDeploymentInput struct {
-	ID                domain.DeploymentID
-	ManifestStrategy  domain.ManifestStrategySpec
-	PlacementStrategy domain.PlacementStrategySpec
-	RolloutStrategy   *domain.RolloutStrategySpec
-}
-
 // DeploymentService manages deployment lifecycle and triggers orchestration.
 type DeploymentService struct {
 	Deployments   domain.DeploymentRepository
 	Records       domain.DeliveryRecordRepository
+	CreateWF      domain.CreateDeploymentRunner
 	Orchestration *OrchestrationService
 }
 
-// Create persists a new deployment and runs the orchestration pipeline.
-func (s *DeploymentService) Create(ctx context.Context, in CreateDeploymentInput) (domain.Deployment, error) {
+// Create starts the durable create-deployment workflow, which persists
+// the deployment and launches orchestration as a child workflow.
+func (s *DeploymentService) Create(ctx context.Context, in domain.CreateDeploymentInput) (domain.Deployment, error) {
 	if in.ID == "" {
 		return domain.Deployment{}, fmt.Errorf("%w: deployment ID is required", domain.ErrInvalidArgument)
 	}
 
-	dep := domain.Deployment{
-		ID:                in.ID,
-		ManifestStrategy:  in.ManifestStrategy,
-		PlacementStrategy: in.PlacementStrategy,
-		RolloutStrategy:   in.RolloutStrategy,
-		State:             domain.DeploymentStatePending,
+	handle, err := s.CreateWF.Run(ctx, in)
+	if err != nil {
+		return domain.Deployment{}, fmt.Errorf("start create-deployment workflow: %w", err)
 	}
 
-	if err := s.Deployments.Create(ctx, dep); err != nil {
-		return domain.Deployment{}, err
+	dep, err := handle.AwaitResult(ctx)
+	if err != nil {
+		return domain.Deployment{}, fmt.Errorf("create-deployment workflow: %w", err)
 	}
 
-	if err := s.Orchestration.Orchestrate(ctx, dep.ID); err != nil {
-		return domain.Deployment{}, fmt.Errorf("orchestrate: %w", err)
-	}
-
-	return s.Deployments.Get(ctx, dep.ID)
+	return dep, nil
 }
 
 // Get retrieves a deployment by ID.

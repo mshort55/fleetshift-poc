@@ -85,7 +85,7 @@ Tests in infrastructure are usually ["medium" or "large"](https://testing.google
 
 #### Contract Tests
 
-Tests in infrastructure often benefit from being designed as "contract tests" which are reusable for other implementations. "Contract tests" are defined *where the interface is defined, not the implementation*. They speak only in terms of a factory (to get some implementation) and clean up (cleaning up external resources). Then, they exercise that interface to demonstrate expectations. The actual test runner exists in infrastructure for a specific implementation. It invokes the contract tests, providing only the necessary factory and clean up. [Example](https://github.com/alechenninger/falcon/blob/ae638df2a195b903a76e414db00d3aa32078a09a/internal/domain/storetest.go). This makes it easy to:
+Tests in infrastructure should be designed as "contract tests" which are reusable for other implementations. "Contract tests" are defined *where the interface is defined, not the implementation*. They speak only in terms of a factory (to get some implementation) and clean up (cleaning up external resources). Then, they exercise that interface to demonstrate expectations. The actual test runner exists in infrastructure for a specific implementation. It invokes the contract tests, providing only the necessary factory and clean up. [Example](https://github.com/alechenninger/falcon/blob/ae638df2a195b903a76e414db00d3aa32078a09a/internal/domain/storetest.go). This makes it easy to:
 
 * document the expectations of an interface in terms of the business language and domain model  
 * test different implementations adhere to it  

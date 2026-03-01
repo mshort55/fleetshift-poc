@@ -75,6 +75,36 @@ type PlanRolloutInput struct {
 	Delta TargetDelta
 }
 
+// DeploymentAndPool is the result of loading a deployment and the target pool
+// in a single step. Used to avoid separate durable steps for deployment and pool.
+type DeploymentAndPool struct {
+	Deployment Deployment
+	Pool       []TargetInfo
+}
+
+// DeploymentWorkflowRunner is the execution-time capability passed into
+// [OrchestrationWorkflow.Run]. It extends [DurableRunner] with the ability
+// to block until a deployment-scoped event arrives. Engines (DBOS,
+// go-workflows, sync) implement this interface; the workflow body never
+// interacts with DurableRunner directly.
+type DeploymentWorkflowRunner interface {
+	DurableRunner
+
+	// AwaitDeploymentEvent blocks until the engine delivers the next
+	// [DeploymentEvent] for this workflow instance.
+	AwaitDeploymentEvent() (DeploymentEvent, error)
+}
+
+// OrchestrationRunner starts orchestration workflows and delivers
+// deployment events to running instances (app-facing API).
+type OrchestrationRunner interface {
+	Run(ctx context.Context, deploymentID DeploymentID) (WorkflowHandle[struct{}], error)
+
+	// SignalDeploymentEvent delivers a [DeploymentEvent] to the
+	// workflow instance identified by deploymentID.
+	SignalDeploymentEvent(ctx context.Context, deploymentID DeploymentID, event DeploymentEvent) error
+}
+
 // OrchestrationWorkflow is the deployment pipeline expressed as a
 // deterministic workflow. All I/O and strategy invocations run inside
 // activities so that placement, manifest, and rollout strategies may
@@ -95,15 +125,20 @@ func (w *OrchestrationWorkflow) Name() string { return "orchestrate-deployment" 
 // dependencies. Infrastructure adapters call these to register activities;
 // the workflow body calls them via [RunActivity].
 
-// LoadDeployment reads a deployment from the repository.
-func (w *OrchestrationWorkflow) LoadDeployment() Activity[DeploymentID, Deployment] {
-	return NewActivity("load-deployment", w.Deployments.Get)
-}
-
-// LoadTargetPool reads the full set of registered targets.
-func (w *OrchestrationWorkflow) LoadTargetPool() Activity[struct{}, []TargetInfo] {
-	return NewActivity("load-target-pool", func(ctx context.Context, _ struct{}) ([]TargetInfo, error) {
-		return w.Targets.List(ctx)
+// LoadDeploymentAndPool reads the deployment and target pool in a single
+// activity to avoid separate durable steps. Used at workflow start and when
+// reloading after a spec change.
+func (w *OrchestrationWorkflow) LoadDeploymentAndPool() Activity[DeploymentID, DeploymentAndPool] {
+	return NewActivity("load-deployment-and-pool", func(ctx context.Context, id DeploymentID) (DeploymentAndPool, error) {
+		dep, err := w.Deployments.Get(ctx, id)
+		if err != nil {
+			return DeploymentAndPool{}, err
+		}
+		pool, err := w.Targets.List(ctx)
+		if err != nil {
+			return DeploymentAndPool{}, err
+		}
+		return DeploymentAndPool{Deployment: dep, Pool: pool}, nil
 	})
 }
 
@@ -166,24 +201,96 @@ func (w *OrchestrationWorkflow) UpdateDeployment() Activity[Deployment, struct{}
 	})
 }
 
-// Run is the deterministic workflow body.
-func (w *OrchestrationWorkflow) Run(runner DurableRunner, deploymentID DeploymentID) (struct{}, error) {
-	dep, err := RunActivity(runner, w.LoadDeployment(), deploymentID)
+// Run is the deterministic workflow body. It performs initial placement
+// (load deployment and pool, resolve placement, rollout) without awaiting
+// an event, then enters a loop that blocks on
+// [DeploymentWorkflowRunner.AwaitDeploymentEvent] and re-evaluates on each
+// event (pool change, manifest invalidation, spec change, delete). The
+// workflow exits when it receives a Delete event or encounters a fatal error.
+//
+// Durable execution: On replay, the engine re-runs Run from the top.
+// Completed activities return their recorded results; each AwaitDeploymentEvent()
+// is a distinct recorded operation so replay returns the same event for that
+// iteration. So we never receive the same logical event twice across iterations.
+func (w *OrchestrationWorkflow) Run(runner DeploymentWorkflowRunner, deploymentID DeploymentID) (struct{}, error) {
+	var dep Deployment
+	var pool []TargetInfo
+
+	// Initial placement: no event required. Load, run placement pipeline, update.
+	loaded, err := RunActivity(runner, w.LoadDeploymentAndPool(), deploymentID)
 	if err != nil {
-		return struct{}{}, fmt.Errorf("load deployment: %w", err)
+		return struct{}{}, fmt.Errorf("load deployment and pool: %w", err)
+	}
+	dep, pool = loaded.Deployment, loaded.Pool
+
+	resolvedIDs, err := w.executePlacementPipeline(runner, dep, pool, deploymentID)
+	if err != nil {
+		return struct{}{}, err
+	}
+	dep.ResolvedTargets = resolvedIDs
+	dep.State = DeploymentStateActive
+	if _, err := RunActivity(runner, w.UpdateDeployment(), dep); err != nil {
+		return struct{}{}, fmt.Errorf("update deployment: %w", err)
 	}
 
-	pool, err := RunActivity(runner, w.LoadTargetPool(), struct{}{})
-	if err != nil {
-		return struct{}{}, fmt.Errorf("load target pool: %w", err)
-	}
+	for {
+		event, err := runner.AwaitDeploymentEvent()
+		if err != nil {
+			return struct{}{}, fmt.Errorf("await deployment event: %w", err)
+		}
 
+		if event.Delete {
+			if err := w.executeDelete(runner, dep, pool, deploymentID); err != nil {
+				return struct{}{}, err
+			}
+			return struct{}{}, nil
+		}
+
+		if event.SpecChanged {
+			loaded, err := RunActivity(runner, w.LoadDeploymentAndPool(), deploymentID)
+			if err != nil {
+				return struct{}{}, fmt.Errorf("reload deployment and pool: %w", err)
+			}
+			dep, pool = loaded.Deployment, loaded.Pool
+		}
+
+		if event.PoolChange != nil {
+			pool = ApplyPoolChange(pool, *event.PoolChange)
+		}
+
+		if event.ManifestInvalidated {
+			if err := w.executeManifestInvalidation(runner, dep, pool, deploymentID); err != nil {
+				return struct{}{}, err
+			}
+		} else {
+			resolvedIDs, err := w.executePlacementPipeline(runner, dep, pool, deploymentID)
+			if err != nil {
+				return struct{}{}, err
+			}
+			dep.ResolvedTargets = resolvedIDs
+		}
+
+		dep.State = DeploymentStateActive
+		if _, err := RunActivity(runner, w.UpdateDeployment(), dep); err != nil {
+			return struct{}{}, fmt.Errorf("update deployment: %w", err)
+		}
+	}
+}
+
+// executePlacementPipeline runs the full resolve → delta → plan → execute
+// pipeline and returns the new resolved target IDs.
+func (w *OrchestrationWorkflow) executePlacementPipeline(
+	runner DeploymentWorkflowRunner,
+	dep Deployment,
+	pool []TargetInfo,
+	deploymentID DeploymentID,
+) ([]TargetID, error) {
 	resolved, err := RunActivity(runner, w.ResolvePlacement(), ResolvePlacementInput{
 		Spec: dep.PlacementStrategy,
 		Pool: PlacementTargets(pool),
 	})
 	if err != nil {
-		return struct{}{}, fmt.Errorf("resolve placement: %w", err)
+		return nil, fmt.Errorf("resolve placement: %w", err)
 	}
 
 	resolvedTargets := ResolvedTargetInfos(resolved, pool)
@@ -194,9 +301,74 @@ func (w *OrchestrationWorkflow) Run(runner DurableRunner, deploymentID Deploymen
 		Delta: delta,
 	})
 	if err != nil {
-		return struct{}{}, fmt.Errorf("plan rollout: %w", err)
+		return nil, fmt.Errorf("plan rollout: %w", err)
 	}
 
+	if err := w.executeRolloutPlan(runner, dep, plan, deploymentID); err != nil {
+		return nil, err
+	}
+
+	ids := make([]TargetID, len(resolved))
+	for i, t := range resolved {
+		ids[i] = t.ID
+	}
+	return ids, nil
+}
+
+// executeManifestInvalidation re-generates and delivers manifests for
+// the currently resolved targets without re-resolving placement.
+func (w *OrchestrationWorkflow) executeManifestInvalidation(
+	runner DeploymentWorkflowRunner,
+	dep Deployment,
+	pool []TargetInfo,
+	deploymentID DeploymentID,
+) error {
+	targets := TargetInfosByID(dep.ResolvedTargets, pool)
+	delta := TargetDelta{Unchanged: targets}
+
+	plan, err := RunActivity(runner, w.PlanRollout(), PlanRolloutInput{
+		Spec:  dep.RolloutStrategy,
+		Delta: delta,
+	})
+	if err != nil {
+		return fmt.Errorf("plan rollout (manifest invalidation): %w", err)
+	}
+	return w.executeRolloutPlan(runner, dep, plan, deploymentID)
+}
+
+// executeDelete removes the deployment from all currently resolved
+// targets and updates the deployment state.
+func (w *OrchestrationWorkflow) executeDelete(
+	runner DeploymentWorkflowRunner,
+	dep Deployment,
+	pool []TargetInfo,
+	deploymentID DeploymentID,
+) error {
+	targets := TargetInfosByID(dep.ResolvedTargets, pool)
+	for _, target := range targets {
+		if _, err := RunActivity(runner, w.RemoveFromTarget(), RemoveInput{
+			Target:       target,
+			DeploymentID: deploymentID,
+		}); err != nil {
+			return fmt.Errorf("remove delivery for target %s: %w", target.ID, err)
+		}
+	}
+
+	dep.ResolvedTargets = nil
+	dep.State = DeploymentStateDeleting
+	if _, err := RunActivity(runner, w.UpdateDeployment(), dep); err != nil {
+		return fmt.Errorf("update deployment: %w", err)
+	}
+	return nil
+}
+
+// executeRolloutPlan runs each step in a [RolloutPlan].
+func (w *OrchestrationWorkflow) executeRolloutPlan(
+	runner DeploymentWorkflowRunner,
+	dep Deployment,
+	plan RolloutPlan,
+	deploymentID DeploymentID,
+) error {
 	for _, step := range plan.Steps {
 		if step.Remove != nil {
 			for _, target := range step.Remove.Targets {
@@ -204,7 +376,7 @@ func (w *OrchestrationWorkflow) Run(runner DurableRunner, deploymentID Deploymen
 					Target:       target,
 					DeploymentID: deploymentID,
 				}); err != nil {
-					return struct{}{}, fmt.Errorf("remove delivery for target %s: %w", target.ID, err)
+					return fmt.Errorf("remove delivery for target %s: %w", target.ID, err)
 				}
 			}
 			continue
@@ -216,32 +388,20 @@ func (w *OrchestrationWorkflow) Run(runner DurableRunner, deploymentID Deploymen
 					Target: target,
 				})
 				if err != nil {
-					return struct{}{}, fmt.Errorf("generate manifests for target %s: %w", target.ID, err)
+					return fmt.Errorf("generate manifests for target %s: %w", target.ID, err)
 				}
 				if _, err := RunActivity(runner, w.DeliverToTarget(), DeliverInput{
 					Target:       target,
 					DeploymentID: deploymentID,
 					Manifests:    manifests,
 				}); err != nil {
-					return struct{}{}, fmt.Errorf("deliver to target %s: %w", target.ID, err)
+					return fmt.Errorf("deliver to target %s: %w", target.ID, err)
 				}
 			}
 			continue
 		}
 	}
-
-	resolvedIDs := make([]TargetID, len(resolved))
-	for i, t := range resolved {
-		resolvedIDs[i] = t.ID
-	}
-	dep.ResolvedTargets = resolvedIDs
-	dep.State = DeploymentStateActive
-
-	if _, err := RunActivity(runner, w.UpdateDeployment(), dep); err != nil {
-		return struct{}{}, fmt.Errorf("update deployment: %w", err)
-	}
-
-	return struct{}{}, nil
+	return nil
 }
 
 // ComputeTargetDelta calculates the difference between the previous

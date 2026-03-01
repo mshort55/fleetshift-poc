@@ -8,12 +8,12 @@ import (
 	"github.com/fleetshift/fleetshift-poc/fleetshift-server/internal/domain"
 )
 
-// recordingRunner runs activities and records their names and target-related
-// inputs in order so tests can assert execution sequence.
+// recordingRunner wraps a DeploymentWorkflowRunner and records activity
+// names and target-related inputs so tests can assert execution sequence.
 type recordingRunner struct {
-	ctx     context.Context
-	records []activityRecord
-	delegate domain.DurableRunner
+	ctx      context.Context
+	records  []activityRecord
+	delegate domain.DeploymentWorkflowRunner
 }
 
 type activityRecord struct {
@@ -22,7 +22,7 @@ type activityRecord struct {
 	TargetID domain.TargetID
 }
 
-func (r *recordingRunner) ID() string { return r.delegate.ID() }
+func (r *recordingRunner) ID() string              { return r.delegate.ID() }
 func (r *recordingRunner) Context() context.Context { return r.ctx }
 
 func (r *recordingRunner) Run(activity domain.Activity[any, any], in any) (any, error) {
@@ -40,7 +40,10 @@ func (r *recordingRunner) Run(activity domain.Activity[any, any], in any) (any, 
 	return r.delegate.Run(activity, in)
 }
 
-// activityNames returns the ordered list of activity names recorded.
+func (r *recordingRunner) AwaitDeploymentEvent() (domain.DeploymentEvent, error) {
+	return r.delegate.AwaitDeploymentEvent()
+}
+
 func (r *recordingRunner) activityNames() []string {
 	names := make([]string, len(r.records))
 	for i, rec := range r.records {
@@ -63,6 +66,9 @@ func (s *stubDeploymentRepo) Create(_ context.Context, d domain.Deployment) erro
 func (s *stubDeploymentRepo) Get(_ context.Context, id domain.DeploymentID) (domain.Deployment, error) {
 	if id != s.deployment.ID {
 		return domain.Deployment{}, domain.ErrNotFound
+	}
+	if s.updated != nil {
+		return *s.updated, nil
 	}
 	return s.deployment, nil
 }
@@ -114,14 +120,34 @@ func (noopDelivery) Remove(_ context.Context, _ domain.TargetInfo, _ domain.Depl
 	return nil
 }
 
+// singleEventRunner is a minimal DeploymentWorkflowRunner that delivers
+// a single DeploymentEvent and then signals delete on the next call.
+// It runs activities synchronously.
+type singleEventRunner struct {
+	ctx       context.Context
+	event     domain.DeploymentEvent
+	delivered bool
+}
+
+func (r *singleEventRunner) ID() string              { return "test-single" }
+func (r *singleEventRunner) Context() context.Context { return r.ctx }
+func (r *singleEventRunner) Run(activity domain.Activity[any, any], in any) (any, error) {
+	return activity.Run(r.ctx, in)
+}
+
+func (r *singleEventRunner) AwaitDeploymentEvent() (domain.DeploymentEvent, error) {
+	if !r.delivered {
+		r.delivered = true
+		return r.event, nil
+	}
+	return domain.DeploymentEvent{Delete: true}, nil
+}
+
 func TestOrchestration_RemoveStepsRunBeforeDeliverSteps(t *testing.T) {
-	// Deployment was previously on "old1"; placement now resolves to "new1", "new2".
-	// Delta = Removed: [old1], Added: [new1, new2]. Plan = RemoveStep([old1]), DeliverStep([new1, new2]).
-	// We assert that remove-from-target is invoked for old1 before generate-manifests for new1.
 	deploymentID := domain.DeploymentID("d1")
 	depRepo := &stubDeploymentRepo{
 		deployment: domain.Deployment{
-			ID:       deploymentID,
+			ID:              deploymentID,
 			ResolvedTargets: []domain.TargetID{"old1"},
 			ManifestStrategy: domain.ManifestStrategySpec{
 				Type:      domain.ManifestStrategyInline,
@@ -131,17 +157,17 @@ func TestOrchestration_RemoveStepsRunBeforeDeliverSteps(t *testing.T) {
 				Type:    domain.PlacementStrategyStatic,
 				Targets: []domain.TargetID{"new1", "new2"},
 			},
-			RolloutStrategy: nil, // immediate
+			RolloutStrategy: nil,
 			State:           domain.DeploymentStatePending,
 		},
 	}
-	targetRepo := &stubTargetRepo{
-		targets: []domain.TargetInfo{
-			{ID: "old1"},
-			{ID: "new1"},
-			{ID: "new2"},
-		},
+	pool := []domain.TargetInfo{
+		{ID: "old1"},
+		{ID: "new1"},
+		{ID: "new2"},
 	}
+
+	targetRepo := &stubTargetRepo{targets: pool}
 
 	wf := &domain.OrchestrationWorkflow{
 		Deployments: depRepo,
@@ -150,15 +176,18 @@ func TestOrchestration_RemoveStepsRunBeforeDeliverSteps(t *testing.T) {
 		Strategies:  domain.DefaultStrategyFactory{},
 	}
 	ctx := context.Background()
-	syncRunner := &syncRunnerImpl{ctx: ctx}
-	recorder := &recordingRunner{ctx: ctx, delegate: syncRunner}
+
+	baseRunner := &singleEventRunner{
+		ctx:   ctx,
+		event: domain.DeploymentEvent{PoolChange: &domain.PoolChange{Set: pool}},
+	}
+	recorder := &recordingRunner{ctx: ctx, delegate: baseRunner}
 
 	_, err := wf.Run(recorder, deploymentID)
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
 
-	// Find indices of remove vs deliver/generate for the relevant targets.
 	var removeOld1At, generateNew1At int
 	removeOld1At = -1
 	generateNew1At = -1
@@ -186,9 +215,6 @@ func TestOrchestration_RemoveStepsRunBeforeDeliverSteps(t *testing.T) {
 	}
 }
 
-// TestOrchestration_PlacementAndRolloutRunAsActivities ensures placement
-// resolution and rollout planning are invoked as activities, not inline
-// in the workflow, so strategies may perform I/O or stateful behavior.
 func TestOrchestration_PlacementAndRolloutRunAsActivities(t *testing.T) {
 	deploymentID := domain.DeploymentID("d1")
 	depRepo := &stubDeploymentRepo{
@@ -201,7 +227,9 @@ func TestOrchestration_PlacementAndRolloutRunAsActivities(t *testing.T) {
 			State:             domain.DeploymentStatePending,
 		},
 	}
-	targetRepo := &stubTargetRepo{targets: []domain.TargetInfo{{ID: "t1"}}}
+	pool := []domain.TargetInfo{{ID: "t1"}}
+
+	targetRepo := &stubTargetRepo{targets: pool}
 
 	wf := &domain.OrchestrationWorkflow{
 		Deployments: depRepo,
@@ -210,8 +238,12 @@ func TestOrchestration_PlacementAndRolloutRunAsActivities(t *testing.T) {
 		Strategies:  domain.DefaultStrategyFactory{},
 	}
 	ctx := context.Background()
-	syncRunner := &syncRunnerImpl{ctx: ctx}
-	recorder := &recordingRunner{ctx: ctx, delegate: syncRunner}
+
+	baseRunner := &singleEventRunner{
+		ctx:   ctx,
+		event: domain.DeploymentEvent{PoolChange: &domain.PoolChange{Set: pool}},
+	}
+	recorder := &recordingRunner{ctx: ctx, delegate: baseRunner}
 
 	_, err := wf.Run(recorder, deploymentID)
 	if err != nil {
@@ -235,15 +267,4 @@ func TestOrchestration_PlacementAndRolloutRunAsActivities(t *testing.T) {
 	if !hasPlanRollout {
 		t.Errorf("workflow must invoke plan-rollout activity; got names: %v", names)
 	}
-}
-
-// syncRunnerImpl runs activities synchronously (no durability).
-type syncRunnerImpl struct {
-	ctx context.Context
-}
-
-func (s *syncRunnerImpl) ID() string { return "test-sync" }
-func (s *syncRunnerImpl) Context() context.Context { return s.ctx }
-func (s *syncRunnerImpl) Run(activity domain.Activity[any, any], in any) (any, error) {
-	return activity.Run(s.ctx, in)
 }

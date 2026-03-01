@@ -1,0 +1,36 @@
+package syncworkflow_test
+
+import (
+	"testing"
+	"time"
+
+	"github.com/fleetshift/fleetshift-poc/fleetshift-server/internal/domain"
+	"github.com/fleetshift/fleetshift-poc/fleetshift-server/internal/domain/workflowenginetest"
+	"github.com/fleetshift/fleetshift-poc/fleetshift-server/internal/infrastructure/sqlite"
+	"github.com/fleetshift/fleetshift-poc/fleetshift-server/internal/infrastructure/syncworkflow"
+)
+
+func syncInfra(t *testing.T) workflowenginetest.Infra {
+	t.Helper()
+	db := sqlite.OpenTestDB(t)
+	targetRepo := &sqlite.TargetRepo{DB: db}
+	deploymentRepo := &sqlite.DeploymentRepo{DB: db}
+	recordRepo := &sqlite.DeliveryRecordRepo{DB: db}
+	deliverySvc := &sqlite.RecordingDeliveryService{
+		Records: recordRepo,
+		Now:     func() time.Time { return time.Date(2026, 2, 27, 12, 0, 0, 0, time.UTC) },
+	}
+	return workflowenginetest.Infra{
+		Targets:     targetRepo,
+		Deployments: deploymentRepo,
+		Records:     recordRepo,
+		Delivery:    deliverySvc,
+	}
+}
+
+// TestWorkflowEngine runs the workflow engine contract against the sync engine.
+func TestWorkflowEngine(t *testing.T) {
+	workflowenginetest.Run(t, syncInfra, func(t *testing.T) domain.WorkflowEngine {
+		return &syncworkflow.Engine{}
+	})
+}
