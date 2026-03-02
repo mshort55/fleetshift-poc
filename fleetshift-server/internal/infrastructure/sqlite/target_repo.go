@@ -26,8 +26,8 @@ func (r *TargetRepo) Create(ctx context.Context, t domain.TargetInfo) error {
 	}
 
 	_, err = r.DB.ExecContext(ctx,
-		`INSERT INTO targets (id, name, labels, properties) VALUES (?, ?, ?, ?)`,
-		string(t.ID), t.Name, string(labels), string(props),
+		`INSERT INTO targets (id, type, name, labels, properties) VALUES (?, ?, ?, ?, ?)`,
+		string(t.ID), string(t.Type), t.Name, string(labels), string(props),
 	)
 	if err != nil {
 		if isUniqueViolation(err) {
@@ -40,14 +40,14 @@ func (r *TargetRepo) Create(ctx context.Context, t domain.TargetInfo) error {
 
 func (r *TargetRepo) Get(ctx context.Context, id domain.TargetID) (domain.TargetInfo, error) {
 	row := r.DB.QueryRowContext(ctx,
-		`SELECT id, name, labels, properties FROM targets WHERE id = ?`,
+		`SELECT id, type, name, labels, properties FROM targets WHERE id = ?`,
 		string(id),
 	)
 	return scanTarget(row)
 }
 
 func (r *TargetRepo) List(ctx context.Context) ([]domain.TargetInfo, error) {
-	rows, err := r.DB.QueryContext(ctx, `SELECT id, name, labels, properties FROM targets`)
+	rows, err := r.DB.QueryContext(ctx, `SELECT id, type, name, labels, properties FROM targets`)
 	if err != nil {
 		return nil, fmt.Errorf("list targets: %w", err)
 	}
@@ -82,14 +82,15 @@ type scanner interface {
 
 func scanTarget(s scanner) (domain.TargetInfo, error) {
 	var t domain.TargetInfo
-	var id, labelsJSON, propsJSON string
-	if err := s.Scan(&id, &t.Name, &labelsJSON, &propsJSON); err != nil {
+	var id, targetType, labelsJSON, propsJSON string
+	if err := s.Scan(&id, &targetType, &t.Name, &labelsJSON, &propsJSON); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return t, fmt.Errorf("%w", domain.ErrNotFound)
 		}
 		return t, fmt.Errorf("scan target: %w", err)
 	}
 	t.ID = domain.TargetID(id)
+	t.Type = domain.TargetType(targetType)
 	if err := json.Unmarshal([]byte(labelsJSON), &t.Labels); err != nil {
 		return t, fmt.Errorf("unmarshal labels: %w", err)
 	}

@@ -6,6 +6,7 @@ import (
 
 	"github.com/fleetshift/fleetshift-poc/fleetshift-server/internal/domain"
 	"github.com/fleetshift/fleetshift-poc/fleetshift-server/internal/domain/workflowenginetest"
+	"github.com/fleetshift/fleetshift-poc/fleetshift-server/internal/infrastructure/delivery"
 	"github.com/fleetshift/fleetshift-poc/fleetshift-server/internal/infrastructure/sqlite"
 	"github.com/fleetshift/fleetshift-poc/fleetshift-server/internal/infrastructure/syncworkflow"
 )
@@ -16,15 +17,17 @@ func syncInfra(t *testing.T) workflowenginetest.Infra {
 	targetRepo := &sqlite.TargetRepo{DB: db}
 	deploymentRepo := &sqlite.DeploymentRepo{DB: db}
 	recordRepo := &sqlite.DeliveryRecordRepo{DB: db}
-	deliverySvc := &sqlite.RecordingDeliveryService{
+	recordingAgent := &sqlite.RecordingDeliveryService{
 		Records: recordRepo,
 		Now:     func() time.Time { return time.Date(2026, 2, 27, 12, 0, 0, 0, time.UTC) },
 	}
+	router := delivery.NewRoutingDeliveryService()
+	router.Register(workflowenginetest.TestTargetType, recordingAgent)
 	return workflowenginetest.Infra{
 		Targets:     targetRepo,
 		Deployments: deploymentRepo,
 		Records:     recordRepo,
-		Delivery:    deliverySvc,
+		Delivery:    router,
 	}
 }
 

@@ -20,6 +20,7 @@ func Run(t *testing.T, factory Factory) {
 		ctx := context.Background()
 		target := domain.TargetInfo{
 			ID:         "t1",
+			Type:       "kubernetes",
 			Name:       "cluster-a",
 			Labels:     map[string]string{"env": "prod"},
 			Properties: map[string]string{"region": "us-east"},
@@ -32,6 +33,9 @@ func Run(t *testing.T, factory Factory) {
 		got, err := repo.Get(ctx, "t1")
 		if err != nil {
 			t.Fatalf("Get: %v", err)
+		}
+		if got.Type != "kubernetes" {
+			t.Errorf("Type = %q, want %q", got.Type, "kubernetes")
 		}
 		if got.Name != "cluster-a" {
 			t.Errorf("Name = %q, want %q", got.Name, "cluster-a")

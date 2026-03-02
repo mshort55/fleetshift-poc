@@ -124,13 +124,13 @@ func Run(t *testing.T, infraFactory InfraFactory, engineFactory EngineFactory) {
 		defer cancel()
 
 		must(t, infra.Targets.Create(ctx, domain.TargetInfo{
-			ID: "t1", Name: "cluster-prod", Labels: map[string]string{"env": "prod"},
+			ID: "t1", Type: TestTargetType, Name: "cluster-prod", Labels: map[string]string{"env": "prod"},
 		}))
 		must(t, infra.Targets.Create(ctx, domain.TargetInfo{
-			ID: "t2", Name: "cluster-staging", Labels: map[string]string{"env": "staging"},
+			ID: "t2", Type: TestTargetType, Name: "cluster-staging", Labels: map[string]string{"env": "staging"},
 		}))
 		must(t, infra.Targets.Create(ctx, domain.TargetInfo{
-			ID: "t3", Name: "cluster-prod-eu", Labels: map[string]string{"env": "prod"},
+			ID: "t3", Type: TestTargetType, Name: "cluster-prod-eu", Labels: map[string]string{"env": "prod"},
 		}))
 
 		_, err := runCreateDeployment(ctx, t, runners, domain.CreateDeploymentInput{
@@ -238,7 +238,7 @@ func Run(t *testing.T, infraFactory InfraFactory, engineFactory EngineFactory) {
 		dep := awaitDeploymentState(ctx, t, infra, "d1", domain.DeploymentStateActive)
 		assertResolvedTargets(t, dep, "t1", "t2")
 
-		must(t, infra.Targets.Create(ctx, domain.TargetInfo{ID: "t3", Name: "cluster-t3"}))
+		must(t, infra.Targets.Create(ctx, domain.TargetInfo{ID: "t3", Type: TestTargetType, Name: "cluster-t3"}))
 		pool, err := infra.Targets.List(ctx)
 		if err != nil {
 			t.Fatalf("List: %v", err)
@@ -431,8 +431,8 @@ func Run(t *testing.T, infraFactory InfraFactory, engineFactory EngineFactory) {
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
 
-		must(t, infra.Targets.Create(ctx, domain.TargetInfo{ID: "t1", Name: "a", Labels: map[string]string{"env": "prod"}}))
-		must(t, infra.Targets.Create(ctx, domain.TargetInfo{ID: "t2", Name: "b", Labels: map[string]string{"env": "staging"}}))
+		must(t, infra.Targets.Create(ctx, domain.TargetInfo{ID: "t1", Type: TestTargetType, Name: "a", Labels: map[string]string{"env": "prod"}}))
+		must(t, infra.Targets.Create(ctx, domain.TargetInfo{ID: "t2", Type: TestTargetType, Name: "b", Labels: map[string]string{"env": "staging"}}))
 
 		_, err := runCreateDeployment(ctx, t, runners, domain.CreateDeploymentInput{
 			ID: "d1",
@@ -591,11 +591,15 @@ func runCreateDeployment(ctx context.Context, t *testing.T, runners domain.Workf
 	return handle.AwaitResult(ctx)
 }
 
+// TestTargetType is the default target type used by contract tests.
+const TestTargetType domain.TargetType = "test"
+
 func registerTargets(ctx context.Context, t *testing.T, infra Infra, ids ...string) {
 	t.Helper()
 	for _, id := range ids {
 		must(t, infra.Targets.Create(ctx, domain.TargetInfo{
 			ID:   domain.TargetID(id),
+			Type: TestTargetType,
 			Name: "cluster-" + id,
 		}))
 	}

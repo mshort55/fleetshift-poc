@@ -7,9 +7,11 @@ import (
 	"github.com/fleetshift/fleetshift-poc/fleetshift-server/internal/domain"
 )
 
-// RecordingDeliveryService implements [domain.DeliveryService] by writing
-// delivery records to SQLite. This is the naive implementation used until
-// the real fleetlet-based delivery is available.
+// RecordingDeliveryService implements [domain.DeliveryAgent] (and
+// [domain.DeliveryService]) by writing delivery records to SQLite
+// without performing real delivery. Useful as a stub agent for
+// development, testing, or target types that have no real delivery
+// agent registered yet.
 type RecordingDeliveryService struct {
 	Records *DeliveryRecordRepo
 	Now     func() time.Time

@@ -9,6 +9,7 @@ import (
 
 	"github.com/fleetshift/fleetshift-poc/fleetshift-server/internal/application"
 	"github.com/fleetshift/fleetshift-poc/fleetshift-server/internal/domain"
+	"github.com/fleetshift/fleetshift-poc/fleetshift-server/internal/infrastructure/delivery"
 	"github.com/fleetshift/fleetshift-poc/fleetshift-server/internal/infrastructure/sqlite"
 	"github.com/fleetshift/fleetshift-poc/fleetshift-server/internal/infrastructure/syncworkflow"
 )
@@ -21,6 +22,8 @@ type testHarness struct {
 	depRepo       *sqlite.DeploymentRepo
 }
 
+const testTargetType domain.TargetType = "test"
+
 func setup(t *testing.T) testHarness {
 	t.Helper()
 	db := sqlite.OpenTestDB(t)
@@ -29,15 +32,17 @@ func setup(t *testing.T) testHarness {
 	deploymentRepo := &sqlite.DeploymentRepo{DB: db}
 	recordRepo := &sqlite.DeliveryRecordRepo{DB: db}
 
-	deliverySvc := &sqlite.RecordingDeliveryService{
+	recordingAgent := &sqlite.RecordingDeliveryService{
 		Records: recordRepo,
 		Now:     func() time.Time { return time.Date(2026, 2, 27, 12, 0, 0, 0, time.UTC) },
 	}
+	router := delivery.NewRoutingDeliveryService()
+	router.Register(testTargetType, recordingAgent)
 
 	owf := &domain.OrchestrationWorkflow{
 		Deployments: deploymentRepo,
 		Targets:     targetRepo,
-		Delivery:    deliverySvc,
+		Delivery:    router,
 		Strategies:  domain.DefaultStrategyFactory{},
 	}
 
@@ -111,7 +116,7 @@ func registerTargets(t *testing.T, h testHarness, ids ...string) {
 	t.Helper()
 	ctx := context.Background()
 	for _, id := range ids {
-		if err := h.targets.Register(ctx, domain.TargetInfo{ID: domain.TargetID(id), Name: "cluster-" + id}); err != nil {
+		if err := h.targets.Register(ctx, domain.TargetInfo{ID: domain.TargetID(id), Type: testTargetType, Name: "cluster-" + id}); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -203,9 +208,9 @@ func TestCreateDeployment_SelectorPlacement(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	must(t, h.targets.Register(ctx, domain.TargetInfo{ID: "t1", Name: "cluster-prod", Labels: map[string]string{"env": "prod"}}))
-	must(t, h.targets.Register(ctx, domain.TargetInfo{ID: "t2", Name: "cluster-staging", Labels: map[string]string{"env": "staging"}}))
-	must(t, h.targets.Register(ctx, domain.TargetInfo{ID: "t3", Name: "cluster-prod-eu", Labels: map[string]string{"env": "prod"}}))
+	must(t, h.targets.Register(ctx, domain.TargetInfo{ID: "t1", Type: testTargetType, Name: "cluster-prod", Labels: map[string]string{"env": "prod"}}))
+	must(t, h.targets.Register(ctx, domain.TargetInfo{ID: "t2", Type: testTargetType, Name: "cluster-staging", Labels: map[string]string{"env": "staging"}}))
+	must(t, h.targets.Register(ctx, domain.TargetInfo{ID: "t3", Type: testTargetType, Name: "cluster-prod-eu", Labels: map[string]string{"env": "prod"}}))
 
 	_, err := h.deployments.Create(ctx, domain.CreateDeploymentInput{
 		ID: "d1",
@@ -318,7 +323,7 @@ func TestSignalDeploymentEvent_PoolChange(t *testing.T) {
 	dep := awaitDeploymentState(ctx, t, h.depRepo, "d1", domain.DeploymentStateActive)
 	assertResolvedTargets(t, dep, "t1", "t2")
 
-	must(t, h.targets.Register(ctx, domain.TargetInfo{ID: "t3", Name: "cluster-t3"}))
+	must(t, h.targets.Register(ctx, domain.TargetInfo{ID: "t3", Type: testTargetType, Name: "cluster-t3"}))
 	pool, err := h.targets.List(ctx)
 	if err != nil {
 		t.Fatalf("List targets: %v", err)

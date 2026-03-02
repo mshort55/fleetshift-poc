@@ -223,7 +223,7 @@ func (w *OrchestrationWorkflow) Run(runner DeploymentWorkflowRunner, deploymentI
 	}
 	dep, pool = loaded.Deployment, loaded.Pool
 
-	resolvedIDs, err := w.executePlacementPipeline(runner, dep, pool, deploymentID)
+	resolvedIDs, err := w.executePlacementPipeline(runner, dep, pool, pool, deploymentID)
 	if err != nil {
 		return struct{}{}, err
 	}
@@ -254,6 +254,7 @@ func (w *OrchestrationWorkflow) Run(runner DeploymentWorkflowRunner, deploymentI
 			dep, pool = loaded.Deployment, loaded.Pool
 		}
 
+		previousPool := pool
 		if event.PoolChange != nil {
 			pool = ApplyPoolChange(pool, *event.PoolChange)
 		}
@@ -263,7 +264,7 @@ func (w *OrchestrationWorkflow) Run(runner DeploymentWorkflowRunner, deploymentI
 				return struct{}{}, err
 			}
 		} else {
-			resolvedIDs, err := w.executePlacementPipeline(runner, dep, pool, deploymentID)
+			resolvedIDs, err := w.executePlacementPipeline(runner, dep, pool, previousPool, deploymentID)
 			if err != nil {
 				return struct{}{}, err
 			}
@@ -278,11 +279,14 @@ func (w *OrchestrationWorkflow) Run(runner DeploymentWorkflowRunner, deploymentI
 }
 
 // executePlacementPipeline runs the full resolve → delta → plan → execute
-// pipeline and returns the new resolved target IDs.
+// pipeline and returns the new resolved target IDs. previousPool is the
+// pool before any pool change was applied; it provides full [TargetInfo]
+// for targets that were previously resolved but have since left the pool.
 func (w *OrchestrationWorkflow) executePlacementPipeline(
 	runner DeploymentWorkflowRunner,
 	dep Deployment,
 	pool []TargetInfo,
+	previousPool []TargetInfo,
 	deploymentID DeploymentID,
 ) ([]TargetID, error) {
 	resolved, err := RunActivity(runner, w.ResolvePlacement(), ResolvePlacementInput{
@@ -294,7 +298,8 @@ func (w *OrchestrationWorkflow) executePlacementPipeline(
 	}
 
 	resolvedTargets := ResolvedTargetInfos(resolved, pool)
-	delta := ComputeTargetDelta(dep.ResolvedTargets, resolvedTargets, pool)
+	deltaPool := mergePools(previousPool, pool)
+	delta := ComputeTargetDelta(dep.ResolvedTargets, resolvedTargets, deltaPool)
 
 	plan, err := RunActivity(runner, w.PlanRollout(), PlanRolloutInput{
 		Spec:  dep.RolloutStrategy,
@@ -402,6 +407,23 @@ func (w *OrchestrationWorkflow) executeRolloutPlan(
 		}
 	}
 	return nil
+}
+
+// mergePools returns the union of two pools. Entries in current take
+// precedence over entries in previous for the same TargetID.
+func mergePools(previous, current []TargetInfo) []TargetInfo {
+	index := make(map[TargetID]TargetInfo, len(previous)+len(current))
+	for _, t := range previous {
+		index[t.ID] = t
+	}
+	for _, t := range current {
+		index[t.ID] = t
+	}
+	out := make([]TargetInfo, 0, len(index))
+	for _, t := range index {
+		out = append(out, t)
+	}
+	return out
 }
 
 // ComputeTargetDelta calculates the difference between the previous

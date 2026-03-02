@@ -7,6 +7,7 @@ package domain
 // strategies and considered for invalidation.
 type TargetInfo struct {
 	ID         TargetID
+	Type       TargetType
 	Name       string
 	Labels     map[string]string
 	Properties map[string]string
@@ -16,8 +17,13 @@ type TargetInfo struct {
 // strategies. Only these fields are visible to placement and drive
 // re-resolution when they change. Properties and other target metadata
 // are excluded so they can change without triggering placement invalidation.
+//
+// Type is included because it is a fundamental, immutable characteristic
+// of a target (changing type = registering a new target). Placement
+// strategies may use it to filter by target type, but are not required to.
 type PlacementTarget struct {
 	ID     TargetID
+	Type   TargetType
 	Name   string
 	Labels map[string]string
 }
@@ -29,7 +35,7 @@ func ToPlacementTarget(t TargetInfo) PlacementTarget {
 	for k, v := range t.Labels {
 		labels[k] = v
 	}
-	return PlacementTarget{ID: t.ID, Name: t.Name, Labels: labels}
+	return PlacementTarget{ID: t.ID, Type: t.Type, Name: t.Name, Labels: labels}
 }
 
 // PlacementTargets returns the placement view of each target in the slice.
