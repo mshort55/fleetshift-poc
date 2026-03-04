@@ -51,6 +51,7 @@ func New() *cobra.Command {
 	root.PersistentFlags().StringVarP(&ctx.flags.outputFormat, "output", "o", string(output.FormatTable), "output format (table, json)")
 
 	root.AddCommand(newDeploymentCmd(ctx))
+	root.AddCommand(newAuthCmd(ctx))
 
 	return root
 }

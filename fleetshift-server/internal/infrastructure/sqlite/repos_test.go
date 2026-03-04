@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/fleetshift/fleetshift-poc/fleetshift-server/internal/domain"
+	"github.com/fleetshift/fleetshift-poc/fleetshift-server/internal/domain/authmethodrepotest"
 	"github.com/fleetshift/fleetshift-poc/fleetshift-server/internal/domain/deliveryrepotest"
 	"github.com/fleetshift/fleetshift-poc/fleetshift-server/internal/domain/deploymentrepotest"
 	"github.com/fleetshift/fleetshift-poc/fleetshift-server/internal/domain/inventoryrepotest"
@@ -71,5 +72,12 @@ func TestStore(t *testing.T) {
 	storetest.Run(t, func(t *testing.T) domain.Store {
 		db := sqlite.OpenTestDB(t)
 		return &sqlite.Store{DB: db}
+	})
+}
+
+func TestAuthMethodRepo(t *testing.T) {
+	authmethodrepotest.Run(t, func(t *testing.T) domain.AuthMethodRepository {
+		db := sqlite.OpenTestDB(t)
+		return &sqlite.AuthMethodRepo{DB: db}
 	})
 }

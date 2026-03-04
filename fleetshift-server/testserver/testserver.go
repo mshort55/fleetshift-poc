@@ -4,6 +4,7 @@
 package testserver
 
 import (
+	"context"
 	"net"
 	"testing"
 
@@ -17,6 +18,28 @@ import (
 	"github.com/fleetshift/fleetshift-poc/fleetshift-server/internal/infrastructure/syncworkflow"
 	transportgrpc "github.com/fleetshift/fleetshift-poc/fleetshift-server/internal/transport/grpc"
 )
+
+// stubVerifier returns a fixed test identity for any token.
+type stubVerifier struct{}
+
+func (stubVerifier) Verify(_ context.Context, _ domain.OIDCConfig, _ string) (domain.SubjectClaims, error) {
+	return domain.SubjectClaims{
+		ID:     "test-user",
+		Issuer: "test-issuer",
+	}, nil
+}
+
+// stubDiscovery returns fixed test metadata.
+type stubDiscovery struct{}
+
+func (stubDiscovery) FetchMetadata(_ context.Context, issuerURL string) (domain.OIDCMetadata, error) {
+	return domain.OIDCMetadata{
+		Issuer:                issuerURL,
+		AuthorizationEndpoint: issuerURL + "/authorize",
+		TokenEndpoint:         issuerURL + "/token",
+		JWKSURI:               issuerURL + "/jwks",
+	}, nil
+}
 
 // Start launches an in-process gRPC server and returns its address.
 // The server is stopped automatically when the test finishes.
@@ -49,9 +72,22 @@ func Start(t *testing.T) string {
 		CreateWF: runners.CreateDeployment,
 	}
 
-	srv := grpc.NewServer()
+	authMethodRepo := &sqlite.AuthMethodRepo{DB: db}
+	authMethodSvc := &application.AuthMethodService{
+		Methods:   authMethodRepo,
+		Discovery: stubDiscovery{},
+	}
+	authnInterceptor := transportgrpc.NewAuthnInterceptor(authMethodSvc, stubVerifier{})
+
+	srv := grpc.NewServer(
+		grpc.ChainUnaryInterceptor(authnInterceptor.Unary()),
+		grpc.ChainStreamInterceptor(authnInterceptor.Stream()),
+	)
 	pb.RegisterDeploymentServiceServer(srv, &transportgrpc.DeploymentServer{
 		Deployments: deploymentSvc,
+	})
+	pb.RegisterAuthMethodServiceServer(srv, &transportgrpc.AuthMethodServer{
+		AuthMethods: authMethodSvc,
 	})
 
 	lis, err := net.Listen("tcp", "127.0.0.1:0")

@@ -32,6 +32,7 @@ import (
 	"github.com/fleetshift/fleetshift-poc/fleetshift-server/internal/infrastructure/delivery"
 	"github.com/fleetshift/fleetshift-poc/fleetshift-server/internal/infrastructure/goworkflows"
 	"github.com/fleetshift/fleetshift-poc/fleetshift-server/internal/infrastructure/observability"
+	"github.com/fleetshift/fleetshift-poc/fleetshift-server/internal/infrastructure/oidc"
 	"github.com/fleetshift/fleetshift-poc/fleetshift-server/internal/infrastructure/sqlite"
 	transportgrpc "github.com/fleetshift/fleetshift-poc/fleetshift-server/internal/transport/grpc"
 )
@@ -121,6 +122,34 @@ func runServe(ctx context.Context, f *serveFlags) error {
 		return fmt.Errorf("start workflow worker: %w", err)
 	}
 
+	// --- auth infrastructure ---
+
+	authMethodRepo := &sqlite.AuthMethodRepo{DB: db}
+	discoveryClient := oidc.NewDiscoveryClient(nil)
+	tokenVerifier, err := oidc.NewVerifier(ctx)
+	if err != nil {
+		return fmt.Errorf("create OIDC verifier: %w", err)
+	}
+
+	authMethodSvc := &application.AuthMethodService{
+		Methods:   authMethodRepo,
+		Discovery: discoveryClient,
+	}
+
+	existingMethods, err := authMethodSvc.List(ctx)
+	if err != nil {
+		return fmt.Errorf("load auth methods: %w", err)
+	}
+	for _, m := range existingMethods {
+		if m.Type == domain.AuthMethodTypeOIDC && m.OIDC != nil {
+			if err := tokenVerifier.RegisterKeySet(ctx, m.OIDC.JWKSURI); err != nil {
+				logger.Warn("failed to register JWKS for auth method", "id", m.ID, "err", err)
+			}
+		}
+	}
+
+	authnInterceptor := transportgrpc.NewAuthnInterceptor(authMethodSvc, tokenVerifier)
+
 	// --- application services ---
 
 	deploymentSvc := &application.DeploymentService{
@@ -130,9 +159,15 @@ func runServe(ctx context.Context, f *serveFlags) error {
 
 	// --- gRPC server ---
 
-	grpcServer := grpc.NewServer()
+	grpcServer := grpc.NewServer(
+		grpc.ChainUnaryInterceptor(authnInterceptor.Unary()),
+		grpc.ChainStreamInterceptor(authnInterceptor.Stream()),
+	)
 	pb.RegisterDeploymentServiceServer(grpcServer, &transportgrpc.DeploymentServer{
 		Deployments: deploymentSvc,
+	})
+	pb.RegisterAuthMethodServiceServer(grpcServer, &transportgrpc.AuthMethodServer{
+		AuthMethods: authMethodSvc,
 	})
 	reflection.Register(grpcServer)
 
@@ -146,7 +181,10 @@ func runServe(ctx context.Context, f *serveFlags) error {
 	gwMux := runtime.NewServeMux()
 	gwOpts := []grpc.DialOption{grpc.WithTransportCredentials(insecure.NewCredentials())}
 	if err := pb.RegisterDeploymentServiceHandlerFromEndpoint(ctx, gwMux, f.grpcAddr, gwOpts); err != nil {
-		return fmt.Errorf("register gateway: %w", err)
+		return fmt.Errorf("register deployment gateway: %w", err)
+	}
+	if err := pb.RegisterAuthMethodServiceHandlerFromEndpoint(ctx, gwMux, f.grpcAddr, gwOpts); err != nil {
+		return fmt.Errorf("register auth method gateway: %w", err)
 	}
 
 	httpServer := &http.Server{

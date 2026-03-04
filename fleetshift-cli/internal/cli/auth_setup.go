@@ -1,0 +1,72 @@
+package cli
+
+import (
+	"fmt"
+	"strings"
+
+	"github.com/spf13/cobra"
+
+	pb "github.com/fleetshift/fleetshift-poc/fleetshift-server/gen/fleetshift/v1"
+	"github.com/fleetshift/fleetshift-poc/fleetshift-cli/internal/auth"
+)
+
+type authSetupFlags struct {
+	issuerURL string
+	clientID  string
+	scopes    string
+	methodID  string
+	audience  string
+}
+
+func newAuthSetupCmd(ctx *cmdContext) *cobra.Command {
+	f := &authSetupFlags{}
+	cmd := &cobra.Command{
+		Use:   "setup",
+		Short: "Configure OIDC authentication on the server and locally",
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			return runAuthSetup(cmd, ctx, f)
+		},
+	}
+	cmd.Flags().StringVar(&f.issuerURL, "issuer-url", "", "OIDC issuer URL (required)")
+	cmd.Flags().StringVar(&f.clientID, "client-id", "", "OAuth2 client ID (required)")
+	cmd.Flags().StringVar(&f.scopes, "scopes", "openid,profile,email", "Comma-separated OAuth2 scopes")
+	cmd.Flags().StringVar(&f.methodID, "method-id", "default", "Auth method ID on the server")
+	cmd.Flags().StringVar(&f.audience, "audience", "", "Expected audience claim")
+	_ = cmd.MarkFlagRequired("issuer-url")
+	_ = cmd.MarkFlagRequired("client-id")
+	return cmd
+}
+
+func runAuthSetup(cmd *cobra.Command, ctx *cmdContext, f *authSetupFlags) error {
+	client := pb.NewAuthMethodServiceClient(ctx.conn)
+
+	resp, err := client.CreateAuthMethod(cmd.Context(), &pb.CreateAuthMethodRequest{
+		AuthMethodId: f.methodID,
+		AuthMethod: &pb.AuthMethod{
+			Type: pb.AuthMethod_TYPE_OIDC,
+			OidcConfig: &pb.OIDCConfig{
+				IssuerUrl: f.issuerURL,
+				Audience:  f.audience,
+			},
+		},
+	})
+	if err != nil {
+		return fmt.Errorf("create auth method on server: %w", err)
+	}
+
+	scopes := strings.Split(f.scopes, ",")
+	cfg := auth.Config{
+		IssuerURL:             f.issuerURL,
+		ClientID:              f.clientID,
+		Scopes:                scopes,
+		AuthorizationEndpoint: resp.GetOidcConfig().GetAuthorizationEndpoint(),
+		TokenEndpoint:         resp.GetOidcConfig().GetTokenEndpoint(),
+	}
+
+	if err := auth.SaveConfig(cfg); err != nil {
+		return fmt.Errorf("save local config: %w", err)
+	}
+
+	fmt.Fprintf(cmd.OutOrStdout(), "Authentication configured. Run 'fleetctl auth login' to authenticate.\n")
+	return nil
+}
