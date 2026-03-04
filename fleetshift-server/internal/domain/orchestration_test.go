@@ -475,6 +475,216 @@ func (r *asyncRecord) Await(_ string) (any, error) {
 	return e, nil
 }
 
+// stubVault implements domain.Vault with an in-memory map.
+type stubVault struct {
+	secrets map[domain.SecretRef][]byte
+}
+
+func newStubVault() *stubVault {
+	return &stubVault{secrets: make(map[domain.SecretRef][]byte)}
+}
+
+func (v *stubVault) Put(_ context.Context, ref domain.SecretRef, value []byte) error {
+	v.secrets[ref] = value
+	return nil
+}
+
+func (v *stubVault) Get(_ context.Context, ref domain.SecretRef) ([]byte, error) {
+	val, ok := v.secrets[ref]
+	if !ok {
+		return nil, domain.ErrNotFound
+	}
+	return val, nil
+}
+
+func (v *stubVault) Delete(_ context.Context, ref domain.SecretRef) error {
+	delete(v.secrets, ref)
+	return nil
+}
+
+// stubInventoryRepo implements domain.InventoryRepository in memory.
+type stubInventoryRepo struct {
+	items map[domain.InventoryItemID]domain.InventoryItem
+}
+
+func newStubInventoryRepo() *stubInventoryRepo {
+	return &stubInventoryRepo{items: make(map[domain.InventoryItemID]domain.InventoryItem)}
+}
+
+func (r *stubInventoryRepo) Create(_ context.Context, item domain.InventoryItem) error {
+	if _, ok := r.items[item.ID]; ok {
+		return domain.ErrAlreadyExists
+	}
+	r.items[item.ID] = item
+	return nil
+}
+
+func (r *stubInventoryRepo) Get(_ context.Context, id domain.InventoryItemID) (domain.InventoryItem, error) {
+	item, ok := r.items[id]
+	if !ok {
+		return domain.InventoryItem{}, domain.ErrNotFound
+	}
+	return item, nil
+}
+
+func (r *stubInventoryRepo) List(_ context.Context) ([]domain.InventoryItem, error) {
+	out := make([]domain.InventoryItem, 0, len(r.items))
+	for _, item := range r.items {
+		out = append(out, item)
+	}
+	return out, nil
+}
+
+func (r *stubInventoryRepo) ListByType(_ context.Context, t domain.InventoryType) ([]domain.InventoryItem, error) {
+	var out []domain.InventoryItem
+	for _, item := range r.items {
+		if item.Type == t {
+			out = append(out, item)
+		}
+	}
+	return out, nil
+}
+
+func (r *stubInventoryRepo) Update(_ context.Context, item domain.InventoryItem) error {
+	if _, ok := r.items[item.ID]; !ok {
+		return domain.ErrNotFound
+	}
+	r.items[item.ID] = item
+	return nil
+}
+
+func (r *stubInventoryRepo) Delete(_ context.Context, id domain.InventoryItemID) error {
+	delete(r.items, id)
+	return nil
+}
+
+// outputProducingDelivery is a DeliveryService that produces outputs
+// in the delivery result (provisioned targets and secrets).
+type outputProducingDelivery struct {
+	targets []domain.ProvisionedTarget
+	secrets []domain.ProducedSecret
+}
+
+func (d *outputProducingDelivery) Deliver(ctx context.Context, _ domain.TargetInfo, _ domain.DeliveryID, _ []domain.Manifest, signaler *domain.DeliverySignaler) (domain.DeliveryResult, error) {
+	result := domain.DeliveryResult{
+		State:              domain.DeliveryStateDelivered,
+		ProvisionedTargets: d.targets,
+		ProducedSecrets:    d.secrets,
+	}
+	signaler.Done(ctx, result)
+	return result, nil
+}
+
+func (d *outputProducingDelivery) Remove(_ context.Context, _ domain.TargetInfo, _ domain.DeliveryID, _ *domain.DeliverySignaler) error {
+	return nil
+}
+
+// stubStoreWithInventory wraps stubStore but returns a real inventory repo.
+type stubStoreWithInventory struct {
+	deployments *stubDeploymentRepo
+	targets     *stubTargetRepo
+	deliveries  *stubDeliveryRepo
+	inventory   *stubInventoryRepo
+}
+
+func (s *stubStoreWithInventory) Begin(_ context.Context) (domain.Tx, error) {
+	return &stubTxWithInventory{store: s}, nil
+}
+
+type stubTxWithInventory struct {
+	store *stubStoreWithInventory
+}
+
+func (t *stubTxWithInventory) Targets() domain.TargetRepository        { return t.store.targets }
+func (t *stubTxWithInventory) Deployments() domain.DeploymentRepository { return t.store.deployments }
+func (t *stubTxWithInventory) Deliveries() domain.DeliveryRepository    { return t.store.deliveries }
+func (t *stubTxWithInventory) Inventory() domain.InventoryRepository    { return t.store.inventory }
+func (t *stubTxWithInventory) Commit() error                            { return nil }
+func (t *stubTxWithInventory) Rollback() error                          { return nil }
+
+func TestOrchestration_DeliveryOutputs_RegistersTargetAndStoresSecret(t *testing.T) {
+	deploymentID := domain.DeploymentID("output-test")
+	depRepo := &stubDeploymentRepo{
+		deployment: domain.Deployment{
+			ID: deploymentID,
+			ManifestStrategy: domain.ManifestStrategySpec{
+				Type:      domain.ManifestStrategyInline,
+				Manifests: []domain.Manifest{{Raw: json.RawMessage(`{}`)}},
+			},
+			PlacementStrategy: domain.PlacementStrategySpec{
+				Type:    domain.PlacementStrategyStatic,
+				Targets: []domain.TargetID{"kind-local"},
+			},
+			State: domain.DeploymentStateCreating,
+		},
+	}
+
+	targetRepo := &stubTargetRepo{targets: []domain.TargetInfo{{ID: "kind-local", Type: "kind", Name: "Local Kind"}}}
+	deliveryRepo := newStubDeliveryRepo()
+	inventoryRepo := newStubInventoryRepo()
+	vault := newStubVault()
+
+	store := &stubStoreWithInventory{
+		deployments: depRepo,
+		targets:     targetRepo,
+		deliveries:  deliveryRepo,
+		inventory:   inventoryRepo,
+	}
+
+	events := make(chan domain.DeploymentEvent, 16)
+	reg := &stubRegistry{events: events}
+
+	rec := &singleEventRecord{
+		ctx:    context.Background(),
+		event:  domain.DeploymentEvent{Delete: true},
+		events: events,
+	}
+
+	kubeconfig := []byte("apiVersion: v1\nkind: Config")
+	delivery := &outputProducingDelivery{
+		targets: []domain.ProvisionedTarget{{
+			ID:   "k8s-test-cluster",
+			Type: "kubernetes",
+			Name: "test-cluster",
+			Properties: map[string]string{
+				"kubeconfig_ref": "targets/k8s-test-cluster/kubeconfig",
+			},
+		}},
+		secrets: []domain.ProducedSecret{{
+			Ref:   "targets/k8s-test-cluster/kubeconfig",
+			Value: kubeconfig,
+		}},
+	}
+
+	wf := &domain.OrchestrationWorkflowSpec{
+		Store:      store,
+		Delivery:   delivery,
+		Strategies: domain.DefaultStrategyFactory{},
+		Registry:   reg,
+		Vault:      vault,
+	}
+
+	_, err := wf.Run(rec, deploymentID)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	// Vault should contain the kubeconfig.
+	got, err := vault.Get(context.Background(), "targets/k8s-test-cluster/kubeconfig")
+	if err != nil {
+		t.Fatalf("vault.Get: %v", err)
+	}
+	if string(got) != string(kubeconfig) {
+		t.Errorf("vault value = %q, want %q", got, kubeconfig)
+	}
+
+	// Target should be registered.
+	_, err = targetRepo.Get(context.Background(), "k8s-test-cluster")
+	if err != nil {
+		t.Fatalf("target not registered: %v", err)
+	}
+}
+
 func TestOrchestration_AsyncDelivery_ReachesActive(t *testing.T) {
 	deploymentID := domain.DeploymentID("async-test")
 	depRepo := &stubDeploymentRepo{

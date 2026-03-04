@@ -27,6 +27,7 @@ import (
 
 	pb "github.com/fleetshift/fleetshift-poc/fleetshift-server/gen/fleetshift/v1"
 	kindaddon "github.com/fleetshift/fleetshift-poc/fleetshift-server/internal/addon/kind"
+	kubernetesaddon "github.com/fleetshift/fleetshift-poc/fleetshift-server/internal/addon/kubernetes"
 	"github.com/fleetshift/fleetshift-poc/fleetshift-server/internal/application"
 	"github.com/fleetshift/fleetshift-poc/fleetshift-server/internal/domain"
 	"github.com/fleetshift/fleetshift-poc/fleetshift-server/internal/infrastructure/delivery"
@@ -71,6 +72,7 @@ func runServe(ctx context.Context, f *serveFlags) error {
 	defer db.Close()
 
 	store := &sqlite.Store{DB: db}
+	vault := &sqlite.VaultStore{DB: db}
 
 	router := delivery.NewRoutingDeliveryService()
 
@@ -78,6 +80,9 @@ func runServe(ctx context.Context, f *serveFlags) error {
 		return cluster.NewProvider(cluster.ProviderWithLogger(logger))
 	})
 	router.Register(kindaddon.TargetType, kindAgent)
+
+	kubeAgent := kubernetesaddon.NewAgent(vault)
+	router.Register(kubernetesaddon.TargetType, kubeAgent)
 
 	logger := slog.Default()
 
@@ -98,6 +103,7 @@ func runServe(ctx context.Context, f *serveFlags) error {
 		Registry:         reg,
 		Observer:         observability.NewDeploymentObserver(logger),
 		DeliveryObserver: observability.NewDeliveryObserver(logger),
+		Vault:            vault,
 	}
 	orchWf, err := reg.RegisterOrchestration(orchSpec)
 	if err != nil {

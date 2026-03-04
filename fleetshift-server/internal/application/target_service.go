@@ -2,9 +2,7 @@ package application
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
-	"time"
 
 	"github.com/fleetshift/fleetshift-poc/fleetshift-server/internal/domain"
 )
@@ -15,40 +13,20 @@ type TargetService struct {
 }
 
 // Register creates a target and a corresponding inventory item
-// atomically within a single transaction. The target's
-// [domain.InventoryItemID] is set to "target:<TargetID>".
+// atomically within a single transaction. Delegates to
+// [domain.TargetRegistrar] for the core registration logic.
 func (s *TargetService) Register(ctx context.Context, target domain.TargetInfo) error {
-	if target.ID == "" {
-		return fmt.Errorf("%w: target ID is required", domain.ErrInvalidArgument)
-	}
-	if target.Name == "" {
-		return fmt.Errorf("%w: target name is required", domain.ErrInvalidArgument)
-	}
-
 	tx, err := s.Store.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("begin tx: %w", err)
 	}
 	defer tx.Rollback()
 
-	invID := domain.InventoryItemID("target:" + string(target.ID))
-	target.InventoryItemID = invID
-
-	props, _ := json.Marshal(target.Properties)
-	now := time.Now()
-	if err := tx.Inventory().Create(ctx, domain.InventoryItem{
-		ID:         invID,
-		Type:       domain.InventoryType(target.Type),
-		Name:       target.Name,
-		Properties: props,
-		Labels:     target.Labels,
-		CreatedAt:  now,
-		UpdatedAt:  now,
-	}); err != nil {
-		return fmt.Errorf("create inventory item for target: %w", err)
+	reg := &domain.TargetRegistrar{
+		Targets:   tx.Targets(),
+		Inventory: tx.Inventory(),
 	}
-
-	if err := tx.Targets().Create(ctx, target); err != nil {
+	if err := reg.Register(ctx, target); err != nil {
 		return err
 	}
 	return tx.Commit()

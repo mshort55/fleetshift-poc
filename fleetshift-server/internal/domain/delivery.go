@@ -30,9 +30,31 @@ type Delivery struct {
 }
 
 // DeliveryResult is the outcome of a single delivery attempt.
+// Agents may include structured outputs (provisioned targets, produced
+// secrets) that the platform processes after delivery completion.
 type DeliveryResult struct {
-	State   DeliveryState
-	Message string
+	State              DeliveryState
+	Message            string
+	ProvisionedTargets []ProvisionedTarget
+	ProducedSecrets    []ProducedSecret
+}
+
+// ProvisionedTarget declares a target that a delivery created and that
+// the platform should register. Properties should include vault refs
+// for any associated secrets (e.g. "kubeconfig_ref").
+type ProvisionedTarget struct {
+	ID         TargetID
+	Type       TargetType
+	Name       string
+	Labels     map[string]string
+	Properties map[string]string
+}
+
+// ProducedSecret declares a secret that a delivery produced and that
+// the platform should store in the [Vault].
+type ProducedSecret struct {
+	Ref   SecretRef
+	Value []byte
 }
 
 // DeliveryEventKind classifies a [DeliveryEvent].

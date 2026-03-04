@@ -38,6 +38,7 @@ type ClusterProvider interface {
 	Create(name string, options ...cluster.CreateOption) error
 	Delete(name, kubeconfig string) error
 	List() ([]string, error)
+	KubeConfig(name string, internal bool) (string, error)
 }
 
 // ClusterProviderFactory creates a [ClusterProvider] with the given
@@ -92,6 +93,8 @@ func (a *Agent) validateManifests(manifests []domain.Manifest) ([]ClusterSpec, e
 }
 
 func (a *Agent) deliverAsync(ctx context.Context, provider ClusterProvider, specs []ClusterSpec, signaler *domain.DeliverySignaler) {
+	var outputs []ClusterOutput
+
 	for _, spec := range specs {
 		if a.clusterExists(provider, spec.Name) {
 			signaler.Emit(ctx, domain.DeliveryEvent{
@@ -127,9 +130,28 @@ func (a *Agent) deliverAsync(ctx context.Context, provider ClusterProvider, spec
 			})
 			return
 		}
+
+		kc, err := provider.KubeConfig(spec.Name, false)
+		if err != nil {
+			signaler.Emit(ctx, domain.DeliveryEvent{
+				Kind:    domain.DeliveryEventWarning,
+				Message: fmt.Sprintf("get kubeconfig for %q: %v", spec.Name, err),
+			})
+		} else {
+			outputs = append(outputs, ClusterOutput{
+				TargetID:   domain.TargetID("k8s-" + spec.Name),
+				Name:       spec.Name,
+				KubeConfig: []byte(kc),
+			})
+		}
 	}
 
-	signaler.Done(ctx, domain.DeliveryResult{State: domain.DeliveryStateDelivered})
+	result := domain.DeliveryResult{State: domain.DeliveryStateDelivered}
+	for _, out := range outputs {
+		result.ProvisionedTargets = append(result.ProvisionedTargets, out.Target())
+		result.ProducedSecrets = append(result.ProducedSecrets, out.Secret())
+	}
+	signaler.Done(ctx, result)
 }
 
 func (a *Agent) clusterExists(provider ClusterProvider, name string) bool {

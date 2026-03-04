@@ -102,6 +102,7 @@ type OrchestrationWorkflowSpec struct {
 	Registry         Registry
 	Observer         DeploymentObserver
 	DeliveryObserver DeliveryObserver
+	Vault            Vault
 	Now              func() time.Time
 }
 
@@ -250,6 +251,49 @@ func (s *OrchestrationWorkflowSpec) UpdateDeployment() Activity[Deployment, stru
 		d.Etag = uuid.New().String()
 		if err := tx.Deployments().Update(ctx, d); err != nil {
 			return struct{}{}, err
+		}
+		return struct{}{}, tx.Commit()
+	})
+}
+
+// ProcessDeliveryOutputs stores produced secrets in the [Vault] and
+// registers provisioned targets. Secrets are stored first so that
+// target properties referencing vault refs are valid at registration
+// time. Results with no outputs are skipped.
+func (s *OrchestrationWorkflowSpec) ProcessDeliveryOutputs() Activity[DeliveryResult, struct{}] {
+	return NewActivity("process-delivery-outputs", func(ctx context.Context, result DeliveryResult) (struct{}, error) {
+		if len(result.ProducedSecrets) == 0 && len(result.ProvisionedTargets) == 0 {
+			return struct{}{}, nil
+		}
+
+		if s.Vault != nil {
+			for _, secret := range result.ProducedSecrets {
+				if err := s.Vault.Put(ctx, secret.Ref, secret.Value); err != nil {
+					return struct{}{}, fmt.Errorf("store secret %q: %w", secret.Ref, err)
+				}
+			}
+		}
+
+		tx, err := s.Store.Begin(ctx)
+		if err != nil {
+			return struct{}{}, fmt.Errorf("begin tx: %w", err)
+		}
+		defer tx.Rollback()
+
+		reg := &TargetRegistrar{
+			Targets:   tx.Targets(),
+			Inventory: tx.Inventory(),
+		}
+		for _, pt := range result.ProvisionedTargets {
+			if err := reg.Register(ctx, TargetInfo{
+				ID:         pt.ID,
+				Type:       pt.Type,
+				Name:       pt.Name,
+				Labels:     pt.Labels,
+				Properties: pt.Properties,
+			}); err != nil {
+				return struct{}{}, fmt.Errorf("register target %q: %w", pt.ID, err)
+			}
 		}
 		return struct{}{}, tx.Commit()
 	})
@@ -498,8 +542,16 @@ func (s *OrchestrationWorkflowSpec) executeRolloutPlan(
 				}
 				pending = append(pending, did)
 			}
-			if _, err := s.awaitDeliveries(record, pending); err != nil {
+			_, results, err := s.awaitDeliveries(record, pending)
+			if err != nil {
 				return err
+			}
+			for _, result := range results {
+				if len(result.ProvisionedTargets) > 0 || len(result.ProducedSecrets) > 0 {
+					if _, err := RunActivity(record, s.ProcessDeliveryOutputs(), result); err != nil {
+						return fmt.Errorf("process delivery outputs: %w", err)
+					}
+				}
 			}
 			continue
 		}
@@ -509,38 +561,39 @@ func (s *OrchestrationWorkflowSpec) executeRolloutPlan(
 
 // awaitDeliveries blocks until every delivery in pending has completed.
 // Non-delivery events that arrive while waiting are collected and
-// returned for the caller to process later. A Delete event aborts
-// immediately with an error.
+// returned for the caller to process later. Completed delivery results
+// are also returned so the caller can process outputs. A Delete event
+// aborts immediately with an error.
 func (s *OrchestrationWorkflowSpec) awaitDeliveries(
 	record Record,
 	pending []DeliveryID,
-) ([]DeploymentEvent, error) {
+) (deferred []DeploymentEvent, results []DeliveryResult, err error) {
 	remaining := make(map[DeliveryID]struct{}, len(pending))
 	for _, id := range pending {
 		remaining[id] = struct{}{}
 	}
 
-	var deferred []DeploymentEvent
 	for len(remaining) > 0 {
 		event, err := AwaitSignal(record, DeploymentEventSignal)
 		if err != nil {
-			return nil, fmt.Errorf("await delivery completion: %w", err)
+			return nil, nil, fmt.Errorf("await delivery completion: %w", err)
 		}
 		if event.Delete {
-			return nil, fmt.Errorf("deployment deleted while awaiting deliveries")
+			return nil, nil, fmt.Errorf("deployment deleted while awaiting deliveries")
 		}
 		if event.DeliveryCompleted != nil {
 			delete(remaining, event.DeliveryCompleted.DeliveryID)
 			if event.DeliveryCompleted.Result.State == DeliveryStateFailed {
-				return nil, fmt.Errorf("delivery %s failed: %s",
+				return nil, nil, fmt.Errorf("delivery %s failed: %s",
 					event.DeliveryCompleted.DeliveryID,
 					event.DeliveryCompleted.Result.Message)
 			}
+			results = append(results, event.DeliveryCompleted.Result)
 			continue
 		}
 		deferred = append(deferred, event)
 	}
-	return deferred, nil
+	return deferred, results, nil
 }
 
 // deliveryIDFor produces a deterministic [DeliveryID] for a
