@@ -27,15 +27,15 @@ Coordinating threads / goroutines is sometimes necessary in tests. To do this de
 
 For an example of how to do this, see [this](https://github.com/alechenninger/falcon/blob/ae638df2a195b903a76e414db00d3aa32078a09a/internal/domain/observer.go#L252).
 
-## No Mocks
+## No Mocks (and RARELY stubs!)
 
-No "method verifying" mocks. [Not to be confused with *dummies* or *stubs*](https://martinfowler.com/bliki/TestDouble.html) (which can be fine in moderation, IF AND ONLY IF they are meaningfully simpler than just using a fake).
+No "method verifying" mocks, ever.
 
 Prefer simply using a real instance. If an object is not coupled to external I/O, there is no reason not to reuse it. It is the least work and the best coverage.
 
 If it is, prefer using a Fake. In memory fakes are a useful feature of an application ("Kessel in a box"), so the investment pays for itself quickly. When implementing fakes (or any second implementation of an interface), first define a set of "[contract tests](./internal-architecture.md)" at the interface layer.
 
-Stubs or dummies can be used judiciously when the interaction is trivial.
+Stubs or dummies can be used judiciously when the interaction is completely trivial, but this is rare. There is usually no point if the in memory version is just as fast.
 
 ## Hermetic
 

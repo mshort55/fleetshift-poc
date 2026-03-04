@@ -36,12 +36,11 @@ type immediateExecution[T any] struct {
 	val T
 }
 
-func (e *immediateExecution[T]) WorkflowID() string                          { return "fake" }
+func (e *immediateExecution[T]) WorkflowID() string                        { return "fake" }
 func (e *immediateExecution[T]) AwaitResult(_ context.Context) (T, error) { return e.val, nil }
 
 func TestCreateDeploymentWorkflow_PersistsThenStartsOrchestration(t *testing.T) {
-	depRepo := &stubDeploymentRepo{}
-	store := &stubStore{deployments: depRepo, targets: &stubTargetRepo{}, deliveries: newStubDeliveryRepo()}
+	store, _ := setupStore(t)
 	fixedTime := time.Date(2026, 3, 2, 12, 0, 0, 0, time.UTC)
 
 	fakeOrch := &fakeOrchestrationWorkflow{}
@@ -92,10 +91,7 @@ func TestCreateDeploymentWorkflow_PersistsThenStartsOrchestration(t *testing.T) 
 		t.Error("Deployment.Etag is empty, want non-empty")
 	}
 
-	persisted, err := depRepo.Get(ctx, "d1")
-	if err != nil {
-		t.Fatalf("Get(d1) after persist: %v", err)
-	}
+	persisted := getDeployment(t, store, "d1")
 	if persisted.ID != "d1" {
 		t.Errorf("persisted ID = %q, want %q", persisted.ID, "d1")
 	}

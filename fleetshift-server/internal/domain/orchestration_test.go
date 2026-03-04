@@ -4,10 +4,152 @@ import (
 	"context"
 	"encoding/json"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/fleetshift/fleetshift-poc/fleetshift-server/internal/domain"
+	"github.com/fleetshift/fleetshift-poc/fleetshift-server/internal/infrastructure/sqlite"
 )
+
+// ---------------------------------------------------------------------------
+// Test helpers: real SQLite store + seeding
+// ---------------------------------------------------------------------------
+
+func setupStore(t *testing.T) (domain.Store, domain.Vault) {
+	t.Helper()
+	db := sqlite.OpenTestDB(t)
+	return &sqlite.Store{DB: db}, &sqlite.VaultStore{DB: db}
+}
+
+func seedDeployment(t *testing.T, store domain.Store, dep domain.Deployment) {
+	t.Helper()
+	if dep.UID == "" {
+		dep.UID = "test-uid"
+	}
+	if dep.Etag == "" {
+		dep.Etag = "test-etag"
+	}
+	if dep.CreatedAt.IsZero() {
+		dep.CreatedAt = time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	}
+	if dep.UpdatedAt.IsZero() {
+		dep.UpdatedAt = dep.CreatedAt
+	}
+	tx, err := store.Begin(context.Background())
+	if err != nil {
+		t.Fatalf("begin tx: %v", err)
+	}
+	defer tx.Rollback()
+	if err := tx.Deployments().Create(context.Background(), dep); err != nil {
+		t.Fatalf("seed deployment %q: %v", dep.ID, err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+}
+
+func seedTargets(t *testing.T, store domain.Store, targets ...domain.TargetInfo) {
+	t.Helper()
+	tx, err := store.Begin(context.Background())
+	if err != nil {
+		t.Fatalf("begin tx: %v", err)
+	}
+	defer tx.Rollback()
+	for _, tgt := range targets {
+		if err := tx.Targets().Create(context.Background(), tgt); err != nil {
+			t.Fatalf("seed target %q: %v", tgt.ID, err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+}
+
+func getDeployment(t *testing.T, store domain.Store, id domain.DeploymentID) domain.Deployment {
+	t.Helper()
+	tx, err := store.Begin(context.Background())
+	if err != nil {
+		t.Fatalf("begin tx: %v", err)
+	}
+	defer tx.Rollback()
+	dep, err := tx.Deployments().Get(context.Background(), id)
+	if err != nil {
+		t.Fatalf("get deployment %q: %v", id, err)
+	}
+	return dep
+}
+
+func getTarget(t *testing.T, store domain.Store, id domain.TargetID) domain.TargetInfo {
+	t.Helper()
+	tx, err := store.Begin(context.Background())
+	if err != nil {
+		t.Fatalf("begin tx: %v", err)
+	}
+	defer tx.Rollback()
+	tgt, err := tx.Targets().Get(context.Background(), id)
+	if err != nil {
+		t.Fatalf("get target %q: %v", id, err)
+	}
+	return tgt
+}
+
+func getDeliveries(t *testing.T, store domain.Store, depID domain.DeploymentID) []domain.Delivery {
+	t.Helper()
+	tx, err := store.Begin(context.Background())
+	if err != nil {
+		t.Fatalf("begin tx: %v", err)
+	}
+	defer tx.Rollback()
+	records, err := tx.Deliveries().ListByDeployment(context.Background(), depID)
+	if err != nil {
+		t.Fatalf("list deliveries for %q: %v", depID, err)
+	}
+	return records
+}
+
+func getDelivery(t *testing.T, store domain.Store, id domain.DeliveryID) domain.Delivery {
+	t.Helper()
+	tx, err := store.Begin(context.Background())
+	if err != nil {
+		t.Fatalf("begin tx: %v", err)
+	}
+	defer tx.Rollback()
+	d, err := tx.Deliveries().Get(context.Background(), id)
+	if err != nil {
+		t.Fatalf("get delivery %q: %v", id, err)
+	}
+	return d
+}
+
+// ---------------------------------------------------------------------------
+// Recording observer for intermediate state assertions
+// ---------------------------------------------------------------------------
+
+type recordingObserver struct {
+	domain.NoOpDeploymentObserver
+	mu     sync.Mutex
+	states []domain.DeploymentState
+}
+
+func (o *recordingObserver) RunStarted(ctx context.Context, _ domain.DeploymentID) (context.Context, domain.DeploymentRunProbe) {
+	return ctx, &recordingProbe{observer: o}
+}
+
+type recordingProbe struct {
+	domain.NoOpDeploymentRunProbe
+	observer *recordingObserver
+}
+
+func (p *recordingProbe) StateChanged(state domain.DeploymentState) {
+	p.observer.mu.Lock()
+	defer p.observer.mu.Unlock()
+	p.observer.states = append(p.observer.states, state)
+}
+
+// ---------------------------------------------------------------------------
+// Workflow record fakes (simulate the workflow engine, not the data layer)
+// ---------------------------------------------------------------------------
 
 // recordingRecord wraps a [domain.Record] and records activity names
 // and target-related inputs so tests can assert execution sequence.
@@ -53,174 +195,6 @@ func (r *recordingRecord) activityNames() []string {
 	return names
 }
 
-// stubDeploymentRepo returns a fixed deployment for Get and accepts Update.
-// It tracks the full update history for tests that need to assert
-// intermediate states (e.g. Active before Deleting).
-type stubDeploymentRepo struct {
-	deployment domain.Deployment
-	updated    *domain.Deployment
-	updates    []domain.Deployment
-}
-
-func (s *stubDeploymentRepo) Create(_ context.Context, d domain.Deployment) error {
-	s.deployment = d
-	return nil
-}
-
-func (s *stubDeploymentRepo) Get(_ context.Context, id domain.DeploymentID) (domain.Deployment, error) {
-	if id != s.deployment.ID {
-		return domain.Deployment{}, domain.ErrNotFound
-	}
-	if s.updated != nil {
-		return *s.updated, nil
-	}
-	return s.deployment, nil
-}
-
-func (s *stubDeploymentRepo) List(_ context.Context) ([]domain.Deployment, error) {
-	return []domain.Deployment{s.deployment}, nil
-}
-
-func (s *stubDeploymentRepo) Update(_ context.Context, d domain.Deployment) error {
-	s.updated = &d
-	s.updates = append(s.updates, d)
-	return nil
-}
-
-func (s *stubDeploymentRepo) Delete(_ context.Context, _ domain.DeploymentID) error { return nil }
-
-// stubTargetRepo returns a fixed list for List.
-type stubTargetRepo struct {
-	targets []domain.TargetInfo
-}
-
-func (s *stubTargetRepo) Create(_ context.Context, t domain.TargetInfo) error {
-	s.targets = append(s.targets, t)
-	return nil
-}
-
-func (s *stubTargetRepo) Get(_ context.Context, id domain.TargetID) (domain.TargetInfo, error) {
-	for _, t := range s.targets {
-		if t.ID == id {
-			return t, nil
-		}
-	}
-	return domain.TargetInfo{}, domain.ErrNotFound
-}
-
-func (s *stubTargetRepo) List(_ context.Context) ([]domain.TargetInfo, error) {
-	return s.targets, nil
-}
-
-func (s *stubTargetRepo) Delete(_ context.Context, _ domain.TargetID) error { return nil }
-
-// stubStore implements domain.Store backed by in-memory stub repos.
-type stubStore struct {
-	deployments *stubDeploymentRepo
-	targets     *stubTargetRepo
-	deliveries  *stubDeliveryRepo
-}
-
-func (s *stubStore) Begin(_ context.Context) (domain.Tx, error) {
-	return &stubTx{store: s}, nil
-}
-
-type stubTx struct {
-	store *stubStore
-}
-
-func (t *stubTx) Targets() domain.TargetRepository        { return t.store.targets }
-func (t *stubTx) Deployments() domain.DeploymentRepository { return t.store.deployments }
-func (t *stubTx) Deliveries() domain.DeliveryRepository    { return t.store.deliveries }
-func (t *stubTx) Inventory() domain.InventoryRepository    { return nil }
-func (t *stubTx) Commit() error                            { return nil }
-func (t *stubTx) Rollback() error                          { return nil }
-
-// stubDeliveryRepo implements DeliveryRepository with an in-memory map.
-type stubDeliveryRepo struct {
-	deliveries map[domain.DeliveryID]domain.Delivery
-}
-
-func newStubDeliveryRepo() *stubDeliveryRepo {
-	return &stubDeliveryRepo{deliveries: make(map[domain.DeliveryID]domain.Delivery)}
-}
-
-func (s *stubDeliveryRepo) Put(_ context.Context, d domain.Delivery) error {
-	s.deliveries[d.ID] = d
-	return nil
-}
-
-func (s *stubDeliveryRepo) Get(_ context.Context, id domain.DeliveryID) (domain.Delivery, error) {
-	d, ok := s.deliveries[id]
-	if !ok {
-		return domain.Delivery{}, domain.ErrNotFound
-	}
-	return d, nil
-}
-
-func (s *stubDeliveryRepo) GetByDeploymentTarget(_ context.Context, depID domain.DeploymentID, tgtID domain.TargetID) (domain.Delivery, error) {
-	for _, d := range s.deliveries {
-		if d.DeploymentID == depID && d.TargetID == tgtID {
-			return d, nil
-		}
-	}
-	return domain.Delivery{}, domain.ErrNotFound
-}
-
-func (s *stubDeliveryRepo) ListByDeployment(_ context.Context, depID domain.DeploymentID) ([]domain.Delivery, error) {
-	var result []domain.Delivery
-	for _, d := range s.deliveries {
-		if d.DeploymentID == depID {
-			result = append(result, d)
-		}
-	}
-	return result, nil
-}
-
-func (s *stubDeliveryRepo) DeleteByDeployment(_ context.Context, depID domain.DeploymentID) error {
-	for id, d := range s.deliveries {
-		if d.DeploymentID == depID {
-			delete(s.deliveries, id)
-		}
-	}
-	return nil
-}
-
-// stubRegistry implements [domain.Registry] for domain unit tests.
-// It routes SignalDeploymentEvent to a shared events channel that test
-// records read from via Await.
-type stubRegistry struct {
-	events chan domain.DeploymentEvent
-}
-
-func (r *stubRegistry) SignalDeploymentEvent(_ context.Context, _ domain.DeploymentID, event domain.DeploymentEvent) error {
-	r.events <- event
-	return nil
-}
-
-func (r *stubRegistry) RegisterOrchestration(_ *domain.OrchestrationWorkflowSpec) (domain.OrchestrationWorkflow, error) {
-	return nil, nil
-}
-
-func (r *stubRegistry) RegisterCreateDeployment(_ *domain.CreateDeploymentWorkflowSpec) (domain.CreateDeploymentWorkflow, error) {
-	return nil, nil
-}
-
-// noopDelivery implements DeliveryService with no-op Deliver and Remove.
-// It calls signaler.Done synchronously, which is safe in domain unit
-// tests where workflows execute in a single goroutine without locks.
-type noopDelivery struct{}
-
-func (noopDelivery) Deliver(ctx context.Context, _ domain.TargetInfo, _ domain.DeliveryID, _ []domain.Manifest, signaler *domain.DeliverySignaler) (domain.DeliveryResult, error) {
-	result := domain.DeliveryResult{State: domain.DeliveryStateDelivered}
-	signaler.Done(ctx, result)
-	return result, nil
-}
-
-func (noopDelivery) Remove(_ context.Context, _ domain.TargetInfo, _ domain.DeliveryID, _ *domain.DeliverySignaler) error {
-	return nil
-}
-
 // singleEventRecord is a minimal Record that runs activities
 // synchronously. Await delivers one scripted event and then signals
 // delete. Delivery-completion events injected via the shared events
@@ -251,31 +225,143 @@ func (r *singleEventRecord) Await(_ string) (any, error) {
 	return domain.DeploymentEvent{Delete: true}, nil
 }
 
-func TestOrchestration_RemoveStepsRunBeforeDeliverSteps(t *testing.T) {
-	deploymentID := domain.DeploymentID("d1")
-	depRepo := &stubDeploymentRepo{
-		deployment: domain.Deployment{
-			ID:              deploymentID,
-			ResolvedTargets: []domain.TargetID{"old1"},
-			ManifestStrategy: domain.ManifestStrategySpec{
-				Type:      domain.ManifestStrategyInline,
-				Manifests: []domain.Manifest{{Raw: json.RawMessage(`{}`)}},
-			},
-			PlacementStrategy: domain.PlacementStrategySpec{
-				Type:    domain.PlacementStrategyStatic,
-				Targets: []domain.TargetID{"new1", "new2"},
-			},
-			RolloutStrategy: nil,
-			State:           domain.DeploymentStateCreating,
-		},
-	}
-	pool := []domain.TargetInfo{
-		{ID: "old1"},
-		{ID: "new1"},
-		{ID: "new2"},
-	}
+// asyncRecord is a Record for testing async delivery agents. Await
+// blocks until a signal arrives on the events channel, then sends
+// a Delete on the next call.
+type asyncRecord struct {
+	ctx    context.Context
+	events chan domain.DeploymentEvent
+	sawAll bool
+}
 
-	targetRepo := &stubTargetRepo{targets: pool}
+func (r *asyncRecord) ID() string              { return "test-async" }
+func (r *asyncRecord) Context() context.Context { return r.ctx }
+func (r *asyncRecord) Run(activity domain.Activity[any, any], in any) (any, error) {
+	return activity.Run(r.ctx, in)
+}
+
+func (r *asyncRecord) Await(_ string) (any, error) {
+	if r.sawAll {
+		return domain.DeploymentEvent{Delete: true}, nil
+	}
+	e := <-r.events
+	return e, nil
+}
+
+// ---------------------------------------------------------------------------
+// Signal routing (just a channel forwarder, not a data stub)
+// ---------------------------------------------------------------------------
+
+// stubRegistry implements [domain.Registry] for domain unit tests.
+// It routes SignalDeploymentEvent to a shared events channel that test
+// records read from via Await.
+type stubRegistry struct {
+	events chan domain.DeploymentEvent
+}
+
+func (r *stubRegistry) SignalDeploymentEvent(_ context.Context, _ domain.DeploymentID, event domain.DeploymentEvent) error {
+	r.events <- event
+	return nil
+}
+
+func (r *stubRegistry) RegisterOrchestration(_ *domain.OrchestrationWorkflowSpec) (domain.OrchestrationWorkflow, error) {
+	return nil, nil
+}
+
+func (r *stubRegistry) RegisterCreateDeployment(_ *domain.CreateDeploymentWorkflowSpec) (domain.CreateDeploymentWorkflow, error) {
+	return nil, nil
+}
+
+// ---------------------------------------------------------------------------
+// Delivery agent fakes (simulate delivery behaviour, not the data layer)
+// ---------------------------------------------------------------------------
+
+// noopDelivery implements DeliveryService with no-op Deliver and Remove.
+// It calls signaler.Done synchronously, which is safe in domain unit
+// tests where workflows execute in a single goroutine without locks.
+type noopDelivery struct{}
+
+func (noopDelivery) Deliver(ctx context.Context, _ domain.TargetInfo, _ domain.DeliveryID, _ []domain.Manifest, signaler *domain.DeliverySignaler) (domain.DeliveryResult, error) {
+	result := domain.DeliveryResult{State: domain.DeliveryStateDelivered}
+	signaler.Done(ctx, result)
+	return result, nil
+}
+
+func (noopDelivery) Remove(_ context.Context, _ domain.TargetInfo, _ domain.DeliveryID, _ *domain.DeliverySignaler) error {
+	return nil
+}
+
+// asyncDelivery returns Accepted immediately and calls signaler.Done
+// in a background goroutine, simulating how real delivery agents
+// (e.g. kind) operate.
+type asyncDelivery struct {
+	done chan struct{}
+}
+
+func (a *asyncDelivery) Deliver(ctx context.Context, _ domain.TargetInfo, _ domain.DeliveryID, _ []domain.Manifest, signaler *domain.DeliverySignaler) (domain.DeliveryResult, error) {
+	go func() {
+		signaler.Done(ctx, domain.DeliveryResult{State: domain.DeliveryStateDelivered})
+		if a.done != nil {
+			close(a.done)
+		}
+	}()
+	return domain.DeliveryResult{State: domain.DeliveryStateAccepted}, nil
+}
+
+func (asyncDelivery) Remove(_ context.Context, _ domain.TargetInfo, _ domain.DeliveryID, _ *domain.DeliverySignaler) error {
+	return nil
+}
+
+// outputProducingDelivery is a DeliveryService that produces outputs
+// in the delivery result (provisioned targets and secrets).
+type outputProducingDelivery struct {
+	targets []domain.ProvisionedTarget
+	secrets []domain.ProducedSecret
+}
+
+func (d *outputProducingDelivery) Deliver(ctx context.Context, _ domain.TargetInfo, _ domain.DeliveryID, _ []domain.Manifest, signaler *domain.DeliverySignaler) (domain.DeliveryResult, error) {
+	result := domain.DeliveryResult{
+		State:              domain.DeliveryStateDelivered,
+		ProvisionedTargets: d.targets,
+		ProducedSecrets:    d.secrets,
+	}
+	signaler.Done(ctx, result)
+	return result, nil
+}
+
+func (d *outputProducingDelivery) Remove(_ context.Context, _ domain.TargetInfo, _ domain.DeliveryID, _ *domain.DeliverySignaler) error {
+	return nil
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+func TestOrchestration_RemoveStepsRunBeforeDeliverSteps(t *testing.T) {
+	store, _ := setupStore(t)
+
+	deploymentID := domain.DeploymentID("d1")
+	seedDeployment(t, store, domain.Deployment{
+		ID:              deploymentID,
+		ResolvedTargets: []domain.TargetID{"old1"},
+		ManifestStrategy: domain.ManifestStrategySpec{
+			Type:      domain.ManifestStrategyInline,
+			Manifests: []domain.Manifest{{Raw: json.RawMessage(`{}`)}},
+		},
+		PlacementStrategy: domain.PlacementStrategySpec{
+			Type:    domain.PlacementStrategyStatic,
+			Targets: []domain.TargetID{"new1", "new2"},
+		},
+		State: domain.DeploymentStateCreating,
+	})
+
+	pool := []domain.TargetInfo{
+		{ID: "old1", Name: "old1", Type: "test"},
+		{ID: "new1", Name: "new1", Type: "test"},
+		{ID: "new2", Name: "new2", Type: "test"},
+	}
+	seedTargets(t, store, pool...)
+
 	events := make(chan domain.DeploymentEvent, 16)
 	reg := &stubRegistry{events: events}
 
@@ -286,7 +372,7 @@ func TestOrchestration_RemoveStepsRunBeforeDeliverSteps(t *testing.T) {
 	}
 
 	wf := &domain.OrchestrationWorkflowSpec{
-		Store:      &stubStore{deployments: depRepo, targets: targetRepo, deliveries: newStubDeliveryRepo()},
+		Store:      store,
 		Delivery:   noopDelivery{},
 		Strategies: domain.DefaultStrategyFactory{},
 		Registry:   reg,
@@ -327,31 +413,28 @@ func TestOrchestration_RemoveStepsRunBeforeDeliverSteps(t *testing.T) {
 }
 
 func TestOrchestration_PlacementAndRolloutRunAsActivities(t *testing.T) {
-	deploymentID := domain.DeploymentID("d1")
-	depRepo := &stubDeploymentRepo{
-		deployment: domain.Deployment{
-			ID:                deploymentID,
-			ResolvedTargets:   nil,
-			ManifestStrategy:  domain.ManifestStrategySpec{Type: domain.ManifestStrategyInline, Manifests: []domain.Manifest{{Raw: json.RawMessage(`{}`)}}},
-			PlacementStrategy: domain.PlacementStrategySpec{Type: domain.PlacementStrategyStatic, Targets: []domain.TargetID{"t1"}},
-			RolloutStrategy:   nil,
-			State:             domain.DeploymentStateCreating,
-		},
-	}
-	pool := []domain.TargetInfo{{ID: "t1"}}
+	store, _ := setupStore(t)
 
-	targetRepo := &stubTargetRepo{targets: pool}
+	deploymentID := domain.DeploymentID("d1")
+	seedDeployment(t, store, domain.Deployment{
+		ID:                deploymentID,
+		ManifestStrategy:  domain.ManifestStrategySpec{Type: domain.ManifestStrategyInline, Manifests: []domain.Manifest{{Raw: json.RawMessage(`{}`)}}},
+		PlacementStrategy: domain.PlacementStrategySpec{Type: domain.PlacementStrategyStatic, Targets: []domain.TargetID{"t1"}},
+		State:             domain.DeploymentStateCreating,
+	})
+	seedTargets(t, store, domain.TargetInfo{ID: "t1", Name: "t1", Type: "test"})
+
 	events := make(chan domain.DeploymentEvent, 16)
 	reg := &stubRegistry{events: events}
 
 	rec := &singleEventRecord{
 		ctx:    context.Background(),
-		event:  domain.DeploymentEvent{PoolChange: &domain.PoolChange{Set: pool}},
+		event:  domain.DeploymentEvent{PoolChange: &domain.PoolChange{Set: []domain.TargetInfo{{ID: "t1", Name: "t1", Type: "test"}}}},
 		events: events,
 	}
 
 	wf := &domain.OrchestrationWorkflowSpec{
-		Store:      &stubStore{deployments: depRepo, targets: targetRepo, deliveries: newStubDeliveryRepo()},
+		Store:      store,
 		Delivery:   noopDelivery{},
 		Strategies: domain.DefaultStrategyFactory{},
 		Registry:   reg,
@@ -384,22 +467,21 @@ func TestOrchestration_PlacementAndRolloutRunAsActivities(t *testing.T) {
 }
 
 func TestOrchestration_EmptyPool_FailsDeployment(t *testing.T) {
-	deploymentID := domain.DeploymentID("empty-pool")
-	depRepo := &stubDeploymentRepo{
-		deployment: domain.Deployment{
-			ID: deploymentID,
-			ManifestStrategy: domain.ManifestStrategySpec{
-				Type:      domain.ManifestStrategyInline,
-				Manifests: []domain.Manifest{{Raw: json.RawMessage(`{}`)}},
-			},
-			PlacementStrategy: domain.PlacementStrategySpec{
-				Type: domain.PlacementStrategyAll,
-			},
-			State: domain.DeploymentStateCreating,
-		},
-	}
+	store, _ := setupStore(t)
 
-	targetRepo := &stubTargetRepo{targets: nil}
+	deploymentID := domain.DeploymentID("empty-pool")
+	seedDeployment(t, store, domain.Deployment{
+		ID: deploymentID,
+		ManifestStrategy: domain.ManifestStrategySpec{
+			Type:      domain.ManifestStrategyInline,
+			Manifests: []domain.Manifest{{Raw: json.RawMessage(`{}`)}},
+		},
+		PlacementStrategy: domain.PlacementStrategySpec{
+			Type: domain.PlacementStrategyAll,
+		},
+		State: domain.DeploymentStateCreating,
+	})
+
 	events := make(chan domain.DeploymentEvent, 16)
 	reg := &stubRegistry{events: events}
 
@@ -409,7 +491,7 @@ func TestOrchestration_EmptyPool_FailsDeployment(t *testing.T) {
 	}
 
 	wf := &domain.OrchestrationWorkflowSpec{
-		Store:      &stubStore{deployments: depRepo, targets: targetRepo, deliveries: newStubDeliveryRepo()},
+		Store:      store,
 		Delivery:   noopDelivery{},
 		Strategies: domain.DefaultStrategyFactory{},
 		Registry:   reg,
@@ -423,213 +505,29 @@ func TestOrchestration_EmptyPool_FailsDeployment(t *testing.T) {
 		t.Errorf("error should mention zero targets, got: %v", err)
 	}
 
-	if depRepo.updated == nil {
-		t.Fatal("deployment should have been updated to Failed state")
-	}
-	if depRepo.updated.State != domain.DeploymentStateFailed {
-		t.Errorf("deployment state = %q, want %q", depRepo.updated.State, domain.DeploymentStateFailed)
+	dep := getDeployment(t, store, deploymentID)
+	if dep.State != domain.DeploymentStateFailed {
+		t.Errorf("deployment state = %q, want %q", dep.State, domain.DeploymentStateFailed)
 	}
 }
-
-// asyncDelivery returns Accepted immediately and calls signaler.Done
-// in a background goroutine, simulating how real delivery agents
-// (e.g. kind) operate.
-type asyncDelivery struct {
-	done chan struct{}
-}
-
-func (a *asyncDelivery) Deliver(ctx context.Context, _ domain.TargetInfo, _ domain.DeliveryID, _ []domain.Manifest, signaler *domain.DeliverySignaler) (domain.DeliveryResult, error) {
-	go func() {
-		signaler.Done(ctx, domain.DeliveryResult{State: domain.DeliveryStateDelivered})
-		if a.done != nil {
-			close(a.done)
-		}
-	}()
-	return domain.DeliveryResult{State: domain.DeliveryStateAccepted}, nil
-}
-
-func (asyncDelivery) Remove(_ context.Context, _ domain.TargetInfo, _ domain.DeliveryID, _ *domain.DeliverySignaler) error {
-	return nil
-}
-
-// asyncRecord is a Record for testing async delivery agents. Await
-// blocks until a signal arrives on the events channel, then sends
-// a Delete on the next call.
-type asyncRecord struct {
-	ctx    context.Context
-	events chan domain.DeploymentEvent
-	sawAll bool
-}
-
-func (r *asyncRecord) ID() string              { return "test-async" }
-func (r *asyncRecord) Context() context.Context { return r.ctx }
-func (r *asyncRecord) Run(activity domain.Activity[any, any], in any) (any, error) {
-	return activity.Run(r.ctx, in)
-}
-
-func (r *asyncRecord) Await(_ string) (any, error) {
-	if r.sawAll {
-		return domain.DeploymentEvent{Delete: true}, nil
-	}
-	e := <-r.events
-	return e, nil
-}
-
-// stubVault implements domain.Vault with an in-memory map.
-type stubVault struct {
-	secrets map[domain.SecretRef][]byte
-}
-
-func newStubVault() *stubVault {
-	return &stubVault{secrets: make(map[domain.SecretRef][]byte)}
-}
-
-func (v *stubVault) Put(_ context.Context, ref domain.SecretRef, value []byte) error {
-	v.secrets[ref] = value
-	return nil
-}
-
-func (v *stubVault) Get(_ context.Context, ref domain.SecretRef) ([]byte, error) {
-	val, ok := v.secrets[ref]
-	if !ok {
-		return nil, domain.ErrNotFound
-	}
-	return val, nil
-}
-
-func (v *stubVault) Delete(_ context.Context, ref domain.SecretRef) error {
-	delete(v.secrets, ref)
-	return nil
-}
-
-// stubInventoryRepo implements domain.InventoryRepository in memory.
-type stubInventoryRepo struct {
-	items map[domain.InventoryItemID]domain.InventoryItem
-}
-
-func newStubInventoryRepo() *stubInventoryRepo {
-	return &stubInventoryRepo{items: make(map[domain.InventoryItemID]domain.InventoryItem)}
-}
-
-func (r *stubInventoryRepo) Create(_ context.Context, item domain.InventoryItem) error {
-	if _, ok := r.items[item.ID]; ok {
-		return domain.ErrAlreadyExists
-	}
-	r.items[item.ID] = item
-	return nil
-}
-
-func (r *stubInventoryRepo) Get(_ context.Context, id domain.InventoryItemID) (domain.InventoryItem, error) {
-	item, ok := r.items[id]
-	if !ok {
-		return domain.InventoryItem{}, domain.ErrNotFound
-	}
-	return item, nil
-}
-
-func (r *stubInventoryRepo) List(_ context.Context) ([]domain.InventoryItem, error) {
-	out := make([]domain.InventoryItem, 0, len(r.items))
-	for _, item := range r.items {
-		out = append(out, item)
-	}
-	return out, nil
-}
-
-func (r *stubInventoryRepo) ListByType(_ context.Context, t domain.InventoryType) ([]domain.InventoryItem, error) {
-	var out []domain.InventoryItem
-	for _, item := range r.items {
-		if item.Type == t {
-			out = append(out, item)
-		}
-	}
-	return out, nil
-}
-
-func (r *stubInventoryRepo) Update(_ context.Context, item domain.InventoryItem) error {
-	if _, ok := r.items[item.ID]; !ok {
-		return domain.ErrNotFound
-	}
-	r.items[item.ID] = item
-	return nil
-}
-
-func (r *stubInventoryRepo) Delete(_ context.Context, id domain.InventoryItemID) error {
-	delete(r.items, id)
-	return nil
-}
-
-// outputProducingDelivery is a DeliveryService that produces outputs
-// in the delivery result (provisioned targets and secrets).
-type outputProducingDelivery struct {
-	targets []domain.ProvisionedTarget
-	secrets []domain.ProducedSecret
-}
-
-func (d *outputProducingDelivery) Deliver(ctx context.Context, _ domain.TargetInfo, _ domain.DeliveryID, _ []domain.Manifest, signaler *domain.DeliverySignaler) (domain.DeliveryResult, error) {
-	result := domain.DeliveryResult{
-		State:              domain.DeliveryStateDelivered,
-		ProvisionedTargets: d.targets,
-		ProducedSecrets:    d.secrets,
-	}
-	signaler.Done(ctx, result)
-	return result, nil
-}
-
-func (d *outputProducingDelivery) Remove(_ context.Context, _ domain.TargetInfo, _ domain.DeliveryID, _ *domain.DeliverySignaler) error {
-	return nil
-}
-
-// stubStoreWithInventory wraps stubStore but returns a real inventory repo.
-type stubStoreWithInventory struct {
-	deployments *stubDeploymentRepo
-	targets     *stubTargetRepo
-	deliveries  *stubDeliveryRepo
-	inventory   *stubInventoryRepo
-}
-
-func (s *stubStoreWithInventory) Begin(_ context.Context) (domain.Tx, error) {
-	return &stubTxWithInventory{store: s}, nil
-}
-
-type stubTxWithInventory struct {
-	store *stubStoreWithInventory
-}
-
-func (t *stubTxWithInventory) Targets() domain.TargetRepository        { return t.store.targets }
-func (t *stubTxWithInventory) Deployments() domain.DeploymentRepository { return t.store.deployments }
-func (t *stubTxWithInventory) Deliveries() domain.DeliveryRepository    { return t.store.deliveries }
-func (t *stubTxWithInventory) Inventory() domain.InventoryRepository    { return t.store.inventory }
-func (t *stubTxWithInventory) Commit() error                            { return nil }
-func (t *stubTxWithInventory) Rollback() error                          { return nil }
 
 func TestOrchestration_DeliveryOutputs_RegistersTargetAndStoresSecret(t *testing.T) {
+	store, vault := setupStore(t)
+
 	deploymentID := domain.DeploymentID("output-test")
-	depRepo := &stubDeploymentRepo{
-		deployment: domain.Deployment{
-			ID: deploymentID,
-			ManifestStrategy: domain.ManifestStrategySpec{
-				Type:      domain.ManifestStrategyInline,
-				Manifests: []domain.Manifest{{Raw: json.RawMessage(`{}`)}},
-			},
-			PlacementStrategy: domain.PlacementStrategySpec{
-				Type:    domain.PlacementStrategyStatic,
-				Targets: []domain.TargetID{"kind-local"},
-			},
-			State: domain.DeploymentStateCreating,
+	seedDeployment(t, store, domain.Deployment{
+		ID: deploymentID,
+		ManifestStrategy: domain.ManifestStrategySpec{
+			Type:      domain.ManifestStrategyInline,
+			Manifests: []domain.Manifest{{Raw: json.RawMessage(`{}`)}},
 		},
-	}
-
-	targetRepo := &stubTargetRepo{targets: []domain.TargetInfo{{ID: "kind-local", Type: "kind", Name: "Local Kind"}}}
-	deliveryRepo := newStubDeliveryRepo()
-	inventoryRepo := newStubInventoryRepo()
-	vault := newStubVault()
-
-	store := &stubStoreWithInventory{
-		deployments: depRepo,
-		targets:     targetRepo,
-		deliveries:  deliveryRepo,
-		inventory:   inventoryRepo,
-	}
+		PlacementStrategy: domain.PlacementStrategySpec{
+			Type:    domain.PlacementStrategyStatic,
+			Targets: []domain.TargetID{"kind-local"},
+		},
+		State: domain.DeploymentStateCreating,
+	})
+	seedTargets(t, store, domain.TargetInfo{ID: "kind-local", Type: "kind", Name: "Local Kind"})
 
 	events := make(chan domain.DeploymentEvent, 16)
 	reg := &stubRegistry{events: events}
@@ -669,7 +567,6 @@ func TestOrchestration_DeliveryOutputs_RegistersTargetAndStoresSecret(t *testing
 		t.Fatalf("Run: %v", err)
 	}
 
-	// Vault should contain the kubeconfig.
 	got, err := vault.Get(context.Background(), "targets/k8s-test-cluster/kubeconfig")
 	if err != nil {
 		t.Fatalf("vault.Get: %v", err)
@@ -678,33 +575,27 @@ func TestOrchestration_DeliveryOutputs_RegistersTargetAndStoresSecret(t *testing
 		t.Errorf("vault value = %q, want %q", got, kubeconfig)
 	}
 
-	// Target should be registered.
-	_, err = targetRepo.Get(context.Background(), "k8s-test-cluster")
-	if err != nil {
-		t.Fatalf("target not registered: %v", err)
-	}
+	_ = getTarget(t, store, "k8s-test-cluster")
 }
 
 func TestOrchestration_AsyncDelivery_ReachesActive(t *testing.T) {
+	store, _ := setupStore(t)
+
 	deploymentID := domain.DeploymentID("async-test")
-	depRepo := &stubDeploymentRepo{
-		deployment: domain.Deployment{
-			ID: deploymentID,
-			ManifestStrategy: domain.ManifestStrategySpec{
-				Type:      domain.ManifestStrategyInline,
-				Manifests: []domain.Manifest{{Raw: json.RawMessage(`{}`)}},
-			},
-			PlacementStrategy: domain.PlacementStrategySpec{
-				Type:    domain.PlacementStrategyStatic,
-				Targets: []domain.TargetID{"t1"},
-			},
-			State: domain.DeploymentStateCreating,
+	seedDeployment(t, store, domain.Deployment{
+		ID: deploymentID,
+		ManifestStrategy: domain.ManifestStrategySpec{
+			Type:      domain.ManifestStrategyInline,
+			Manifests: []domain.Manifest{{Raw: json.RawMessage(`{}`)}},
 		},
-	}
-	pool := []domain.TargetInfo{{ID: "t1"}}
-	targetRepo := &stubTargetRepo{targets: pool}
-	deliveryRepo := newStubDeliveryRepo()
-	store := &stubStore{deployments: depRepo, targets: targetRepo, deliveries: deliveryRepo}
+		PlacementStrategy: domain.PlacementStrategySpec{
+			Type:    domain.PlacementStrategyStatic,
+			Targets: []domain.TargetID{"t1"},
+		},
+		State: domain.DeploymentStateCreating,
+	})
+	seedTargets(t, store, domain.TargetInfo{ID: "t1", Name: "t1", Type: "test"})
+
 	asyncDel := &asyncDelivery{done: make(chan struct{})}
 
 	events := make(chan domain.DeploymentEvent, 16)
@@ -715,22 +606,18 @@ func TestOrchestration_AsyncDelivery_ReachesActive(t *testing.T) {
 		events: events,
 	}
 
+	obs := &recordingObserver{}
+
 	wf := &domain.OrchestrationWorkflowSpec{
 		Store:      store,
 		Delivery:   asyncDel,
 		Strategies: domain.DefaultStrategyFactory{},
 		Registry:   reg,
+		Observer:   obs,
 	}
 
-	// The async delivery agent signals completion, which the registry
-	// routes to the record's events channel. After the delivery
-	// completion arrives, the workflow reaches Active. We then need
-	// to send a Delete to terminate the workflow.
 	go func() {
-		// Wait for delivery completion to be processed, then send Delete.
 		<-asyncDel.done
-		// Give the workflow a moment to process the delivery completion
-		// and reach the event loop. Then send Delete.
 		events <- domain.DeploymentEvent{Delete: true}
 	}()
 
@@ -740,27 +627,25 @@ func TestOrchestration_AsyncDelivery_ReachesActive(t *testing.T) {
 	}
 
 	sawActive := false
-	for _, u := range depRepo.updates {
-		if u.State == domain.DeploymentStateActive {
+	for _, s := range obs.states {
+		if s == domain.DeploymentStateActive {
 			sawActive = true
 		}
 	}
 	if !sawActive {
-		states := make([]string, len(depRepo.updates))
-		for i, u := range depRepo.updates {
-			states[i] = string(u.State)
+		states := make([]string, len(obs.states))
+		for i, s := range obs.states {
+			states[i] = string(s)
 		}
 		t.Fatalf("workflow never reached Active; state transitions: %v", states)
 	}
-	if depRepo.updated.State != domain.DeploymentStateDeleting {
-		t.Errorf("final deployment state = %q, want %q", depRepo.updated.State, domain.DeploymentStateDeleting)
+
+	dep := getDeployment(t, store, deploymentID)
+	if dep.State != domain.DeploymentStateDeleting {
+		t.Errorf("final deployment state = %q, want %q", dep.State, domain.DeploymentStateDeleting)
 	}
 
-	did := domain.DeliveryID("async-test:t1")
-	d, err := deliveryRepo.Get(context.Background(), did)
-	if err != nil {
-		t.Fatalf("delivery record not found: %v", err)
-	}
+	d := getDelivery(t, store, "async-test:t1")
 	if d.State != domain.DeliveryStateDelivered {
 		t.Errorf("delivery state = %q, want %q", d.State, domain.DeliveryStateDelivered)
 	}
