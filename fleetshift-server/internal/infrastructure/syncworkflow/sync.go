@@ -1,4 +1,4 @@
-// Package syncworkflow provides a synchronous, in-process [domain.WorkflowEngine].
+// Package syncworkflow provides a synchronous, in-process [domain.Registry].
 // Activities execute inline with no persistence or replay. The workflow runs
 // in a goroutine and receives [domain.DeploymentEvent] values through a
 // buffered channel, so callers must coordinate start and signal.
@@ -11,10 +11,10 @@ import (
 	"github.com/fleetshift/fleetshift-poc/fleetshift-server/internal/domain"
 )
 
-// Engine implements [domain.WorkflowEngine] with synchronous, in-process
+// Registry implements [domain.Registry] with synchronous, in-process
 // execution. No durable state is kept. Workflow instances are tracked so
 // that event signals can be delivered to the correct goroutine.
-type Engine struct {
+type Registry struct {
 	mu        sync.Mutex
 	instances map[domain.DeploymentID]*instance
 }
@@ -23,126 +23,130 @@ type instance struct {
 	events chan domain.DeploymentEvent
 }
 
-func (e *Engine) getInstance(id domain.DeploymentID) *instance {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	if e.instances == nil {
-		e.instances = make(map[domain.DeploymentID]*instance)
+func (r *Registry) getInstance(id domain.DeploymentID) *instance {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.instances == nil {
+		r.instances = make(map[domain.DeploymentID]*instance)
 	}
-	inst, ok := e.instances[id]
+	inst, ok := r.instances[id]
 	if !ok {
 		inst = &instance{events: make(chan domain.DeploymentEvent, 16)}
-		e.instances[id] = inst
+		r.instances[id] = inst
 	}
 	return inst
 }
 
-func (e *Engine) removeInstance(id domain.DeploymentID) {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	delete(e.instances, id)
+func (r *Registry) removeInstance(id domain.DeploymentID) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	delete(r.instances, id)
 }
 
-func (e *Engine) Register(owf *domain.OrchestrationWorkflow, cwf *domain.CreateDeploymentWorkflow) (domain.WorkflowRunners, error) {
-	orchRunner := &orchestrationRunner{engine: e, wf: owf}
-
-	owf.SignalDeploymentEvent = func(ctx context.Context, id domain.DeploymentID, event domain.DeploymentEvent) error {
-		inst := e.getInstance(id)
-		select {
-		case inst.events <- event:
-			return nil
-		case <-ctx.Done():
-			return ctx.Err()
-		}
+func (r *Registry) SignalDeploymentEvent(ctx context.Context, id domain.DeploymentID, event domain.DeploymentEvent) error {
+	inst := r.getInstance(id)
+	select {
+	case inst.events <- event:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
 	}
-
-	cwf.StartOrchestration = domain.NewActivity("start-orchestration", func(ctx context.Context, id domain.DeploymentID) (struct{}, error) {
-		_, err := orchRunner.Run(ctx, id)
-		return struct{}{}, err
-	})
-
-	createRunner := &createDeploymentRunner{
-		cwf: cwf,
-	}
-	return domain.WorkflowRunners{
-		Orchestration:    orchRunner,
-		CreateDeployment: createRunner,
-	}, nil
 }
 
-type orchestrationRunner struct {
-	engine *Engine
-	wf     *domain.OrchestrationWorkflow
+func (r *Registry) RegisterOrchestration(spec *domain.OrchestrationWorkflowSpec) (domain.OrchestrationWorkflow, error) {
+	return &orchestrationWorkflow{registry: r, spec: spec}, nil
 }
 
-func (r *orchestrationRunner) Run(ctx context.Context, deploymentID domain.DeploymentID) (domain.WorkflowHandle[struct{}], error) {
-	inst := r.engine.getInstance(deploymentID)
+func (r *Registry) RegisterCreateDeployment(spec *domain.CreateDeploymentWorkflowSpec) (domain.CreateDeploymentWorkflow, error) {
+	return &createDeploymentWorkflow{spec: spec}, nil
+}
+
+// --- OrchestrationWorkflow ---
+
+type orchestrationWorkflow struct {
+	registry *Registry
+	spec     *domain.OrchestrationWorkflowSpec
+}
+
+func (w *orchestrationWorkflow) Start(ctx context.Context, deploymentID domain.DeploymentID) (domain.Execution[struct{}], error) {
+	inst := w.registry.getInstance(deploymentID)
 
 	done := make(chan orchResult, 1)
 
 	go func() {
-		journal := &baseJournal{id: string(deploymentID), ctx: ctx}
-		awaitEvent := func() (domain.DeploymentEvent, error) {
-			select {
-			case event := <-inst.events:
-				return event, nil
-			case <-ctx.Done():
-				return domain.DeploymentEvent{}, ctx.Err()
-			}
+		record := &baseRecord{
+			id:     string(deploymentID),
+			ctx:    ctx,
+			events: inst.events,
 		}
-		val, err := r.wf.Run(journal, awaitEvent, deploymentID)
-		r.engine.removeInstance(deploymentID)
+		val, err := w.spec.Run(record, deploymentID)
+		w.registry.removeInstance(deploymentID)
 		done <- orchResult{val: val, err: err}
 	}()
 
-	return &orchHandle{id: string(deploymentID), done: done}, nil
+	return &orchExecution{id: string(deploymentID), done: done}, nil
 }
 
-type createDeploymentRunner struct {
-	cwf *domain.CreateDeploymentWorkflow
+// --- CreateDeploymentWorkflow ---
+
+type createDeploymentWorkflow struct {
+	spec *domain.CreateDeploymentWorkflowSpec
 }
 
-func (r *createDeploymentRunner) Run(ctx context.Context, input domain.CreateDeploymentInput) (domain.WorkflowHandle[domain.Deployment], error) {
+func (w *createDeploymentWorkflow) Start(ctx context.Context, input domain.CreateDeploymentInput) (domain.Execution[domain.Deployment], error) {
 	done := make(chan createResult, 1)
 
 	go func() {
-		journal := &baseJournal{id: "create-" + string(input.ID), ctx: ctx}
-		val, err := r.cwf.Run(journal, input)
+		record := &baseRecord{
+			id:  "create-" + string(input.ID),
+			ctx: ctx,
+		}
+		val, err := w.spec.Run(record, input)
 		done <- createResult{val: val, err: err}
 	}()
 
-	return &createHandle{id: "create-" + string(input.ID), done: done}, nil
+	return &createExecution{id: "create-" + string(input.ID), done: done}, nil
 }
 
-// --- shared base Journal ---
+// --- shared base Record ---
 
-type baseJournal struct {
-	id  string
-	ctx context.Context
+type baseRecord struct {
+	id     string
+	ctx    context.Context
+	events <-chan domain.DeploymentEvent
 }
 
-func (j *baseJournal) ID() string              { return j.id }
-func (j *baseJournal) Context() context.Context { return j.ctx }
-func (j *baseJournal) Run(activity domain.Activity[any, any], in any) (any, error) {
-	return activity.Run(j.ctx, in)
+func (r *baseRecord) ID() string              { return r.id }
+func (r *baseRecord) Context() context.Context { return r.ctx }
+func (r *baseRecord) Run(activity domain.Activity[any, any], in any) (any, error) {
+	return activity.Run(r.ctx, in)
 }
 
-// --- Handles and result types ---
+func (r *baseRecord) Await(signalName string) (any, error) {
+	select {
+	case event := <-r.events:
+		return event, nil
+	case <-r.ctx.Done():
+		return nil, r.ctx.Err()
+	}
+}
+
+// --- Executions and result types ---
 
 type orchResult struct {
 	val struct{}
 	err error
 }
 
-type orchHandle struct {
+type orchExecution struct {
 	id   string
 	done <-chan orchResult
 }
 
-func (h *orchHandle) WorkflowID() string { return h.id }
-func (h *orchHandle) AwaitResult(ctx context.Context) (struct{}, error) {
+func (e *orchExecution) WorkflowID() string { return e.id }
+func (e *orchExecution) AwaitResult(ctx context.Context) (struct{}, error) {
 	select {
-	case r := <-h.done:
+	case r := <-e.done:
 		return r.val, r.err
 	case <-ctx.Done():
 		return struct{}{}, ctx.Err()
@@ -154,17 +158,24 @@ type createResult struct {
 	err error
 }
 
-type createHandle struct {
+type createExecution struct {
 	id   string
 	done <-chan createResult
 }
 
-func (h *createHandle) WorkflowID() string { return h.id }
-func (h *createHandle) AwaitResult(ctx context.Context) (domain.Deployment, error) {
+func (e *createExecution) WorkflowID() string { return e.id }
+func (e *createExecution) AwaitResult(ctx context.Context) (domain.Deployment, error) {
 	select {
-	case r := <-h.done:
+	case r := <-e.done:
 		return r.val, r.err
 	case <-ctx.Done():
 		return domain.Deployment{}, ctx.Err()
 	}
 }
+
+// Compile-time interface checks.
+var (
+	_ domain.Registry             = (*Registry)(nil)
+	_ domain.OrchestrationWorkflow = (*orchestrationWorkflow)(nil)
+	_ domain.CreateDeploymentWorkflow = (*createDeploymentWorkflow)(nil)
+)

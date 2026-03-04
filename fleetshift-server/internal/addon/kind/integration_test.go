@@ -30,22 +30,32 @@ func TestKindAddon_EndToEnd(t *testing.T) {
 	router := delivery.NewRoutingDeliveryService()
 	router.Register(kindaddon.TargetType, kindAgent)
 
-	owf := &domain.OrchestrationWorkflow{
+	reg := &syncworkflow.Registry{}
+
+	orchSpec := &domain.OrchestrationWorkflowSpec{
 		Store:      store,
 		Delivery:   router,
 		Strategies: domain.DefaultStrategyFactory{},
+		Registry:   reg,
 	}
-	cwf := &domain.CreateDeploymentWorkflow{Store: store}
-
-	engine := &syncworkflow.Engine{}
-	runners, err := engine.Register(owf, cwf)
+	orchWf, err := reg.RegisterOrchestration(orchSpec)
 	if err != nil {
-		t.Fatalf("Register: %v", err)
+		t.Fatalf("RegisterOrchestration: %v", err)
 	}
+
+	cwfSpec := &domain.CreateDeploymentWorkflowSpec{
+		Store:         store,
+		Orchestration: orchWf,
+	}
+	createWf, err := reg.RegisterCreateDeployment(cwfSpec)
+	if err != nil {
+		t.Fatalf("RegisterCreateDeployment: %v", err)
+	}
+
 	targetSvc := &application.TargetService{Store: store}
 	deploySvc := &application.DeploymentService{
 		Store:    store,
-		CreateWF: runners.CreateDeployment,
+		CreateWF: createWf,
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)

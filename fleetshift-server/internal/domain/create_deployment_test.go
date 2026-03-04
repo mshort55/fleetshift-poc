@@ -8,35 +8,52 @@ import (
 	"github.com/fleetshift/fleetshift-poc/fleetshift-server/internal/domain"
 )
 
-// stubJournal is a minimal Journal that runs activities synchronously.
-type stubJournal struct {
+// stubRecord is a minimal Record that runs activities synchronously.
+type stubRecord struct {
 	ctx context.Context
 }
 
-func (j *stubJournal) ID() string              { return "create-test" }
-func (j *stubJournal) Context() context.Context { return j.ctx }
-func (j *stubJournal) Run(activity domain.Activity[any, any], in any) (any, error) {
-	return activity.Run(j.ctx, in)
+func (r *stubRecord) ID() string              { return "create-test" }
+func (r *stubRecord) Context() context.Context { return r.ctx }
+func (r *stubRecord) Run(activity domain.Activity[any, any], in any) (any, error) {
+	return activity.Run(r.ctx, in)
 }
+func (r *stubRecord) Await(_ string) (any, error) {
+	return nil, nil
+}
+
+// fakeOrchestrationWorkflow records the deployment ID it was started with.
+type fakeOrchestrationWorkflow struct {
+	started domain.DeploymentID
+}
+
+func (f *fakeOrchestrationWorkflow) Start(_ context.Context, deploymentID domain.DeploymentID) (domain.Execution[struct{}], error) {
+	f.started = deploymentID
+	return &immediateExecution[struct{}]{}, nil
+}
+
+type immediateExecution[T any] struct {
+	val T
+}
+
+func (e *immediateExecution[T]) WorkflowID() string                          { return "fake" }
+func (e *immediateExecution[T]) AwaitResult(_ context.Context) (T, error) { return e.val, nil }
 
 func TestCreateDeploymentWorkflow_PersistsThenStartsOrchestration(t *testing.T) {
 	depRepo := &stubDeploymentRepo{}
 	store := &stubStore{deployments: depRepo, targets: &stubTargetRepo{}, deliveries: newStubDeliveryRepo()}
 	fixedTime := time.Date(2026, 3, 2, 12, 0, 0, 0, time.UTC)
 
-	var orchestrationStart domain.DeploymentID
+	fakeOrch := &fakeOrchestrationWorkflow{}
 
-	wf := &domain.CreateDeploymentWorkflow{
-		Store: store,
-		Now:   func() time.Time { return fixedTime },
-		StartOrchestration: domain.NewActivity("start-orchestration", func(_ context.Context, id domain.DeploymentID) (struct{}, error) {
-			orchestrationStart = id
-			return struct{}{}, nil
-		}),
+	wf := &domain.CreateDeploymentWorkflowSpec{
+		Store:         store,
+		Orchestration: fakeOrch,
+		Now:           func() time.Time { return fixedTime },
 	}
 
 	ctx := context.Background()
-	journal := &stubJournal{ctx: ctx}
+	rec := &stubRecord{ctx: ctx}
 
 	input := domain.CreateDeploymentInput{
 		ID: "d1",
@@ -48,7 +65,7 @@ func TestCreateDeploymentWorkflow_PersistsThenStartsOrchestration(t *testing.T) 
 		},
 	}
 
-	dep, err := wf.Run(journal, input)
+	dep, err := wf.Run(rec, input)
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
@@ -83,7 +100,7 @@ func TestCreateDeploymentWorkflow_PersistsThenStartsOrchestration(t *testing.T) 
 		t.Errorf("persisted ID = %q, want %q", persisted.ID, "d1")
 	}
 
-	if orchestrationStart != "d1" {
-		t.Errorf("StartOrchestration called with %q, want %q", orchestrationStart, "d1")
+	if fakeOrch.started != "d1" {
+		t.Errorf("Orchestration.Start called with %q, want %q", fakeOrch.started, "d1")
 	}
 }

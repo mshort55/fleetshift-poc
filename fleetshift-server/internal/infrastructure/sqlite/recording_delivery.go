@@ -13,6 +13,10 @@ import (
 // without performing real delivery. Useful as a stub agent for
 // development, testing, or target types that have no real delivery
 // agent registered yet.
+//
+// Deliver returns [domain.DeliveryStateAccepted] immediately and
+// completes the delivery asynchronously via [domain.DeliverySignaler.Done],
+// conforming to the async delivery contract.
 type RecordingDeliveryService struct {
 	Store domain.Store
 	Now   func() time.Time
@@ -32,26 +36,20 @@ func (s *RecordingDeliveryService) Deliver(ctx context.Context, target domain.Ta
 
 	tx, err := s.Store.Begin(ctx)
 	if err != nil {
-		result := domain.DeliveryResult{State: domain.DeliveryStateFailed}
-		signaler.Done(ctx, result)
-		return result, fmt.Errorf("begin tx: %w", err)
+		return domain.DeliveryResult{State: domain.DeliveryStateFailed, Message: err.Error()}, fmt.Errorf("begin tx: %w", err)
 	}
 	defer tx.Rollback()
 
 	if err := tx.Deliveries().Put(ctx, d); err != nil {
-		result := domain.DeliveryResult{State: domain.DeliveryStateFailed}
-		signaler.Done(ctx, result)
-		return result, err
+		return domain.DeliveryResult{State: domain.DeliveryStateFailed, Message: err.Error()}, err
 	}
 	if err := tx.Commit(); err != nil {
-		result := domain.DeliveryResult{State: domain.DeliveryStateFailed}
-		signaler.Done(ctx, result)
-		return result, fmt.Errorf("commit: %w", err)
+		return domain.DeliveryResult{State: domain.DeliveryStateFailed, Message: err.Error()}, fmt.Errorf("commit: %w", err)
 	}
 
-	result := domain.DeliveryResult{State: domain.DeliveryStateDelivered}
-	signaler.Done(ctx, result)
-	return result, nil
+	go signaler.Done(context.Background(), domain.DeliveryResult{State: domain.DeliveryStateDelivered})
+
+	return domain.DeliveryResult{State: domain.DeliveryStateAccepted}, nil
 }
 
 func (s *RecordingDeliveryService) Remove(ctx context.Context, target domain.TargetInfo, deliveryID domain.DeliveryID, _ *domain.DeliverySignaler) error {

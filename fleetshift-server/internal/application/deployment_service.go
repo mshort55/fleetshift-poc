@@ -10,7 +10,7 @@ import (
 // DeploymentService manages deployment lifecycle and triggers orchestration.
 type DeploymentService struct {
 	Store    domain.Store
-	CreateWF domain.CreateDeploymentRunner
+	CreateWF domain.CreateDeploymentWorkflow
 }
 
 // Create starts the durable create-deployment workflow, which persists
@@ -20,12 +20,12 @@ func (s *DeploymentService) Create(ctx context.Context, in domain.CreateDeployme
 		return domain.Deployment{}, fmt.Errorf("%w: deployment ID is required", domain.ErrInvalidArgument)
 	}
 
-	handle, err := s.CreateWF.Run(ctx, in)
+	exec, err := s.CreateWF.Start(ctx, in)
 	if err != nil {
 		return domain.Deployment{}, fmt.Errorf("start create-deployment workflow: %w", err)
 	}
 
-	dep, err := handle.AwaitResult(ctx)
+	dep, err := exec.AwaitResult(ctx)
 	if err != nil {
 		return domain.Deployment{}, fmt.Errorf("create-deployment workflow: %w", err)
 	}

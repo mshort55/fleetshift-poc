@@ -1,8 +1,9 @@
-// Package workflowenginetest provides contract tests for [domain.WorkflowEngine]
+// Package workflowenginetest provides contract tests for [domain.Registry]
 // implementations. The test owns all orchestration: it provides infra (repos,
-// delivery), builds the domain workflows, and calls the engine only to obtain
-// [domain.WorkflowRunners]. The engine implementation just provides
-// [domain.WorkflowEngine]; it is unaware of how the tests work.
+// delivery), builds the domain workflow specs, and calls the registry to
+// obtain [domain.OrchestrationWorkflow] and [domain.CreateDeploymentWorkflow].
+// The registry implementation just provides [domain.Registry]; it is unaware
+// of how the tests work.
 package workflowenginetest
 
 import (
@@ -26,29 +27,35 @@ type Infra struct {
 // (e.g. sqlite in-memory). Called once per subtest.
 type InfraFactory func(t *testing.T) Infra
 
-// EngineFactory returns the [domain.WorkflowEngine] under test. The engine
+// RegistryFactory returns the [domain.Registry] under test. The registry
 // may perform implementation-specific setup (e.g. launch DBOS, start worker)
-// and register t.Cleanup for teardown. The engine is not given workflows;
-// the contract builds them from infra and passes them to Register.
-type EngineFactory func(t *testing.T) domain.WorkflowEngine
+// and register t.Cleanup for teardown. The registry is not given workflow
+// specs; the contract builds them from infra and passes them to Register.
+type RegistryFactory func(t *testing.T) domain.Registry
 
-// Run exercises the [domain.WorkflowEngine] contract. It uses infraFactory
-// to get repos and delivery, builds [OrchestrationWorkflow] and
-// [CreateDeploymentWorkflow], calls engine.Register(owf, cwf), then runs
-// the same scenarios against the returned runners and infra. The engine
-// only provides itself; the test does the rest.
-func Run(t *testing.T, infraFactory InfraFactory, engineFactory EngineFactory) {
+// workflows holds the registered workflow interfaces used by contract tests.
+type workflows struct {
+	Orchestration    domain.OrchestrationWorkflow
+	CreateDeployment domain.CreateDeploymentWorkflow
+}
+
+// Run exercises the [domain.Registry] contract. It uses infraFactory
+// to get repos and delivery, builds [OrchestrationWorkflowSpec] and
+// [CreateDeploymentWorkflowSpec], calls registry.RegisterOrchestration
+// and registry.RegisterCreateDeployment, then runs the same scenarios
+// against the returned workflow interfaces and infra.
+func Run(t *testing.T, infraFactory InfraFactory, registryFactory RegistryFactory) {
 	t.Helper()
 
 	t.Run("CreateDeployment_StaticPlacement", func(t *testing.T) {
 		infra := infraFactory(t)
-		runners := registerEngine(t, infra, engineFactory)
+		wfs := registerWorkflows(t, infra, registryFactory)
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
 
 		registerTargets(ctx, t, infra, "t1", "t2", "t3")
 
-		_, err := runCreateDeployment(ctx, t, runners, domain.CreateDeploymentInput{
+		_, err := runCreateDeployment(ctx, t, wfs, domain.CreateDeploymentInput{
 			ID: "d1",
 			ManifestStrategy: domain.ManifestStrategySpec{
 				Type:      domain.ManifestStrategyInline,
@@ -82,13 +89,13 @@ func Run(t *testing.T, infraFactory InfraFactory, engineFactory EngineFactory) {
 
 	t.Run("CreateDeployment_AllPlacement", func(t *testing.T) {
 		infra := infraFactory(t)
-		runners := registerEngine(t, infra, engineFactory)
+		wfs := registerWorkflows(t, infra, registryFactory)
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
 
 		registerTargets(ctx, t, infra, "t1", "t2", "t3")
 
-		_, err := runCreateDeployment(ctx, t, runners, domain.CreateDeploymentInput{
+		_, err := runCreateDeployment(ctx, t, wfs, domain.CreateDeploymentInput{
 			ID: "d1",
 			ManifestStrategy: domain.ManifestStrategySpec{
 				Type:      domain.ManifestStrategyInline,
@@ -111,7 +118,7 @@ func Run(t *testing.T, infraFactory InfraFactory, engineFactory EngineFactory) {
 
 	t.Run("CreateDeployment_SelectorPlacement", func(t *testing.T) {
 		infra := infraFactory(t)
-		runners := registerEngine(t, infra, engineFactory)
+		wfs := registerWorkflows(t, infra, registryFactory)
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
 
@@ -121,7 +128,7 @@ func Run(t *testing.T, infraFactory InfraFactory, engineFactory EngineFactory) {
 			domain.TargetInfo{ID: "t3", Type: TestTargetType, Name: "cluster-prod-eu", Labels: map[string]string{"env": "prod"}},
 		)
 
-		_, err := runCreateDeployment(ctx, t, runners, domain.CreateDeploymentInput{
+		_, err := runCreateDeployment(ctx, t, wfs, domain.CreateDeploymentInput{
 			ID: "d1",
 			ManifestStrategy: domain.ManifestStrategySpec{
 				Type:      domain.ManifestStrategyInline,
@@ -142,13 +149,13 @@ func Run(t *testing.T, infraFactory InfraFactory, engineFactory EngineFactory) {
 
 	t.Run("CreateDeployment_StaticPlacement_UnknownTarget", func(t *testing.T) {
 		infra := infraFactory(t)
-		runners := registerEngine(t, infra, engineFactory)
+		wfs := registerWorkflows(t, infra, registryFactory)
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
 
 		registerTargets(ctx, t, infra, "t1")
 
-		_, err := runCreateDeployment(ctx, t, runners, domain.CreateDeploymentInput{
+		_, err := runCreateDeployment(ctx, t, wfs, domain.CreateDeploymentInput{
 			ID: "d1",
 			ManifestStrategy: domain.ManifestStrategySpec{
 				Type:      domain.ManifestStrategyInline,
@@ -166,13 +173,13 @@ func Run(t *testing.T, infraFactory InfraFactory, engineFactory EngineFactory) {
 
 	t.Run("DeleteDeployment_RemovesRecords", func(t *testing.T) {
 		infra := infraFactory(t)
-		runners := registerEngine(t, infra, engineFactory)
+		wfs := registerWorkflows(t, infra, registryFactory)
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
 
 		registerTargets(ctx, t, infra, "t1", "t2")
 
-		_, err := runCreateDeployment(ctx, t, runners, domain.CreateDeploymentInput{
+		_, err := runCreateDeployment(ctx, t, wfs, domain.CreateDeploymentInput{
 			ID: "d1",
 			ManifestStrategy: domain.ManifestStrategySpec{
 				Type:      domain.ManifestStrategyInline,
@@ -201,7 +208,7 @@ func Run(t *testing.T, infraFactory InfraFactory, engineFactory EngineFactory) {
 
 	t.Run("CreateDeployment_DuplicateID", func(t *testing.T) {
 		infra := infraFactory(t)
-		runners := registerEngine(t, infra, engineFactory)
+		wfs := registerWorkflows(t, infra, registryFactory)
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
 
@@ -215,12 +222,12 @@ func Run(t *testing.T, infraFactory InfraFactory, engineFactory EngineFactory) {
 			},
 			PlacementStrategy: domain.PlacementStrategySpec{Type: domain.PlacementStrategyAll},
 		}
-		_, err := runCreateDeployment(ctx, t, runners, input)
+		_, err := runCreateDeployment(ctx, t, wfs, input)
 		if err != nil {
 			t.Fatalf("first Create: %v", err)
 		}
 
-		_, err = runCreateDeployment(ctx, t, runners, input)
+		_, err = runCreateDeployment(ctx, t, wfs, input)
 		if err != nil {
 			// Engine rejected duplicate: error should be ErrAlreadyExists (or wrapped).
 			if !errors.Is(err, domain.ErrAlreadyExists) {
@@ -237,7 +244,7 @@ func Run(t *testing.T, infraFactory InfraFactory, engineFactory EngineFactory) {
 
 	t.Run("CreateDeployment_SelectorPlacement_ZeroMatches", func(t *testing.T) {
 		infra := infraFactory(t)
-		runners := registerEngine(t, infra, engineFactory)
+		wfs := registerWorkflows(t, infra, registryFactory)
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
 
@@ -246,7 +253,7 @@ func Run(t *testing.T, infraFactory InfraFactory, engineFactory EngineFactory) {
 			domain.TargetInfo{ID: "t2", Type: TestTargetType, Name: "b", Labels: map[string]string{"env": "staging"}},
 		)
 
-		_, err := runCreateDeployment(ctx, t, runners, domain.CreateDeploymentInput{
+		_, err := runCreateDeployment(ctx, t, wfs, domain.CreateDeploymentInput{
 			ID: "d1",
 			ManifestStrategy: domain.ManifestStrategySpec{
 				Type:      domain.ManifestStrategyInline,
@@ -274,13 +281,13 @@ func Run(t *testing.T, infraFactory InfraFactory, engineFactory EngineFactory) {
 
 	t.Run("TwoDeployments_Isolation", func(t *testing.T) {
 		infra := infraFactory(t)
-		runners := registerEngine(t, infra, engineFactory)
+		wfs := registerWorkflows(t, infra, registryFactory)
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
 
 		registerTargets(ctx, t, infra, "t1", "t2", "t3")
 
-		_, err := runCreateDeployment(ctx, t, runners, domain.CreateDeploymentInput{
+		_, err := runCreateDeployment(ctx, t, wfs, domain.CreateDeploymentInput{
 			ID: "d1",
 			ManifestStrategy: domain.ManifestStrategySpec{
 				Type:      domain.ManifestStrategyInline,
@@ -295,7 +302,7 @@ func Run(t *testing.T, infraFactory InfraFactory, engineFactory EngineFactory) {
 			t.Fatalf("Create d1: %v", err)
 		}
 
-		_, err = runCreateDeployment(ctx, t, runners, domain.CreateDeploymentInput{
+		_, err = runCreateDeployment(ctx, t, wfs, domain.CreateDeploymentInput{
 			ID: "d2",
 			ManifestStrategy: domain.ManifestStrategySpec{
 				Type:      domain.ManifestStrategyInline,
@@ -328,32 +335,46 @@ func Run(t *testing.T, infraFactory InfraFactory, engineFactory EngineFactory) {
 
 }
 
-// registerEngine builds workflows from infra, calls engine.Register, returns runners.
-func registerEngine(t *testing.T, infra Infra, engineFactory EngineFactory) domain.WorkflowRunners {
+// registerWorkflows builds workflow specs from infra, calls
+// registry.RegisterOrchestration and registry.RegisterCreateDeployment,
+// returns the registered workflow interfaces.
+func registerWorkflows(t *testing.T, infra Infra, registryFactory RegistryFactory) workflows {
 	t.Helper()
-	owf := &domain.OrchestrationWorkflow{
+	reg := registryFactory(t)
+
+	orchSpec := &domain.OrchestrationWorkflowSpec{
 		Store:      infra.Store,
 		Delivery:   infra.Delivery,
 		Strategies: domain.DefaultStrategyFactory{},
+		Registry:   reg,
 	}
-	cwf := &domain.CreateDeploymentWorkflow{
-		Store: infra.Store,
-	}
-	engine := engineFactory(t)
-	runners, err := engine.Register(owf, cwf)
+	orchWf, err := reg.RegisterOrchestration(orchSpec)
 	if err != nil {
-		t.Fatalf("engine.Register: %v", err)
+		t.Fatalf("RegisterOrchestration: %v", err)
 	}
-	return runners
+
+	cwfSpec := &domain.CreateDeploymentWorkflowSpec{
+		Store:         infra.Store,
+		Orchestration: orchWf,
+	}
+	createWf, err := reg.RegisterCreateDeployment(cwfSpec)
+	if err != nil {
+		t.Fatalf("RegisterCreateDeployment: %v", err)
+	}
+
+	return workflows{
+		Orchestration:    orchWf,
+		CreateDeployment: createWf,
+	}
 }
 
-func runCreateDeployment(ctx context.Context, t *testing.T, runners domain.WorkflowRunners, in domain.CreateDeploymentInput) (domain.Deployment, error) {
+func runCreateDeployment(ctx context.Context, t *testing.T, wfs workflows, in domain.CreateDeploymentInput) (domain.Deployment, error) {
 	t.Helper()
-	handle, err := runners.CreateDeployment.Run(ctx, in)
+	exec, err := wfs.CreateDeployment.Start(ctx, in)
 	if err != nil {
 		return domain.Deployment{}, err
 	}
-	return handle.AwaitResult(ctx)
+	return exec.AwaitResult(ctx)
 }
 
 // TestTargetType is the default target type used by contract tests.

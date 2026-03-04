@@ -37,21 +37,31 @@ func setup(t *testing.T) pb.DeploymentServiceClient {
 	router := delivery.NewRoutingDeliveryService()
 	router.Register(testTargetType, recordingAgent)
 
-	owf := &domain.OrchestrationWorkflow{
+	reg := &syncworkflow.Registry{}
+
+	orchSpec := &domain.OrchestrationWorkflowSpec{
 		Store:      store,
 		Delivery:   router,
 		Strategies: domain.DefaultStrategyFactory{},
+		Registry:   reg,
 	}
-	cwf := &domain.CreateDeploymentWorkflow{Store: store}
-
-	engine := &syncworkflow.Engine{}
-	runners, err := engine.Register(owf, cwf)
+	orchWf, err := reg.RegisterOrchestration(orchSpec)
 	if err != nil {
-		t.Fatalf("Register: %v", err)
+		t.Fatalf("RegisterOrchestration: %v", err)
 	}
+
+	cwfSpec := &domain.CreateDeploymentWorkflowSpec{
+		Store:         store,
+		Orchestration: orchWf,
+	}
+	createWf, err := reg.RegisterCreateDeployment(cwfSpec)
+	if err != nil {
+		t.Fatalf("RegisterCreateDeployment: %v", err)
+	}
+
 	deploymentSvc := &application.DeploymentService{
 		Store:    store,
-		CreateWF: runners.CreateDeployment,
+		CreateWF: createWf,
 	}
 
 	// Register a test target so placements resolve.

@@ -4,18 +4,15 @@ import "context"
 
 // Workflow types are organized as follows:
 //
-//   - workflow.go: shared primitives (Activity, Journal, WorkflowHandle,
-//     RunActivity, NewActivity) and the engine contract (WorkflowEngine,
-//     WorkflowRunners). No workflow-specific types.
+//   - workflow.go: shared primitives (Activity, Record, Execution, Signal,
+//     RunActivity, AwaitSignal, NewActivity) and the engine contract
+//     (Registry, per-workflow interfaces).
 //
-//   - Per-workflow file (orchestration.go, create_deployment.go): the workflow
-//     struct and its runner. Naming:
-//     • XRunner = app-facing starter; Run(ctx, input) returns WorkflowHandle.
-//
-// Journal is a single universal type used by all workflows. Workflow-specific
-// engine capabilities (e.g. signaling, awaiting events, starting child
-// workflows) are injected as function fields or Activity fields on the
-// workflow struct, or as parameters to Run — not overloaded onto the journal.
+//   - Per-workflow file (orchestration.go, create_deployment.go): the
+//     workflow spec struct. Naming:
+//     • XWorkflowSpec = workflow definition with dependencies and Run body.
+//     • XWorkflow     = registered workflow (returned by Registry); Start
+//       creates an Execution.
 
 // Activity is a named, typed, idempotent operation. Implementations must
 // be safe for at-least-once invocation.
@@ -24,10 +21,10 @@ type Activity[I any, O any] interface {
 	Run(ctx context.Context, in I) (O, error)
 }
 
-// Journal is the durable execution journal provided to a running
+// Record is the durable execution record provided to a running
 // workflow. It records activity invocations and their results so
 // the engine can replay the workflow deterministically after a crash.
-type Journal interface {
+type Record interface {
 	ID() string
 
 	// Context returns the workflow execution context. In a durable
@@ -38,12 +35,30 @@ type Journal interface {
 	// Run durably runs an activity. The engine provides the activity's
 	// context internally; callers should use [RunActivity] for type safety.
 	Run(activity Activity[any, any], in any) (any, error)
+
+	// Await blocks until the named signal arrives. It uses the engine's
+	// internal execution context (workflow.Context, dbos.DBOSContext, etc.)
+	// rather than a context.Context parameter. This avoids accidentally
+	// carrying request-scoped cancellation into a durable await — the
+	// engine controls the lifecycle, not the caller.
+	Await(signalName string) (any, error)
 }
 
+// Signal is a named, typed channel for cross-workflow communication.
+// Created once as a package-level variable and shared between send
+// ([Registry.SignalDeploymentEvent]) and receive ([AwaitSignal]) sides.
+type Signal[T any] struct {
+	Name string
+}
+
+// DeploymentEventSignal is the signal used for delivery-completion
+// and lifecycle events sent to orchestration workflows.
+var DeploymentEventSignal = Signal[DeploymentEvent]{Name: "deployment-event"}
+
 // RunActivity provides type-safe durable activity execution from within
-// a workflow body. It is a thin wrapper around [Journal.Run].
-func RunActivity[I any, O any](journal Journal, activity Activity[I, O], in I) (O, error) {
-	result, err := journal.Run(&activityAdapter[I, O]{activity: activity}, in)
+// a workflow body. It is a thin wrapper around [Record.Run].
+func RunActivity[I any, O any](record Record, activity Activity[I, O], in I) (O, error) {
+	result, err := record.Run(&activityAdapter[I, O]{activity: activity}, in)
 	if err != nil {
 		var zero O
 		return zero, err
@@ -51,26 +66,47 @@ func RunActivity[I any, O any](journal Journal, activity Activity[I, O], in I) (
 	return result.(O), nil
 }
 
-// WorkflowHandle is a handle to a running or completed workflow execution.
-type WorkflowHandle[O any] interface {
+// AwaitSignal provides type-safe signal reception from within a
+// workflow body. It is a thin wrapper around [Record.Await],
+// mirroring how [RunActivity] wraps [Record.Run].
+func AwaitSignal[T any](record Record, sig Signal[T]) (T, error) {
+	val, err := record.Await(sig.Name)
+	if err != nil {
+		var zero T
+		return zero, err
+	}
+	return val.(T), nil
+}
+
+// Execution is a handle to a running or completed workflow instance.
+type Execution[T any] interface {
 	WorkflowID() string
-	AwaitResult(ctx context.Context) (O, error)
+	AwaitResult(ctx context.Context) (T, error)
 }
 
-// WorkflowRunners holds the runners produced by [WorkflowEngine.Register].
-type WorkflowRunners struct {
-	Orchestration    OrchestrationRunner
-	CreateDeployment CreateDeploymentRunner
+// Registry registers workflow specs and provides cross-workflow
+// signaling. Workflow specs receive it at construction so engine
+// capabilities are available without lazy field assignment.
+type Registry interface {
+	RegisterOrchestration(spec *OrchestrationWorkflowSpec) (OrchestrationWorkflow, error)
+	RegisterCreateDeployment(spec *CreateDeploymentWorkflowSpec) (CreateDeploymentWorkflow, error)
+	SignalDeploymentEvent(ctx context.Context, deploymentID DeploymentID, event DeploymentEvent) error
 }
 
-// WorkflowEngine registers domain workflows with an execution engine
-// and returns the runners needed by the application layer.
-type WorkflowEngine interface {
-	Register(owf *OrchestrationWorkflow, cwf *CreateDeploymentWorkflow) (WorkflowRunners, error)
+// OrchestrationWorkflow is a registered orchestration workflow that
+// can start new instances. Returned by [Registry.RegisterOrchestration].
+type OrchestrationWorkflow interface {
+	Start(ctx context.Context, deploymentID DeploymentID) (Execution[struct{}], error)
+}
+
+// CreateDeploymentWorkflow is a registered create-deployment workflow
+// that can start new instances. Returned by [Registry.RegisterCreateDeployment].
+type CreateDeploymentWorkflow interface {
+	Start(ctx context.Context, input CreateDeploymentInput) (Execution[Deployment], error)
 }
 
 // NewActivity creates an [Activity] from a stable name and a function.
-// Workflow types use this to define their activities as methods.
+// Workflow spec types use this to define their activities as methods.
 func NewActivity[I, O any](name string, fn func(context.Context, I) (O, error)) Activity[I, O] {
 	return &activityFunc[I, O]{name: name, fn: fn}
 }
@@ -84,7 +120,7 @@ func (a *activityFunc[I, O]) Name() string                             { return 
 func (a *activityFunc[I, O]) Run(ctx context.Context, in I) (O, error) { return a.fn(ctx, in) }
 
 // activityAdapter bridges a typed [Activity] to the any-typed
-// [Journal.Run] interface.
+// [Record.Run] interface.
 type activityAdapter[I any, O any] struct{ activity Activity[I, O] }
 
 func (a *activityAdapter[I, O]) Name() string { return a.activity.Name() }

@@ -16,45 +16,38 @@ type CreateDeploymentInput struct {
 	RolloutStrategy   *RolloutStrategySpec
 }
 
-// CreateDeploymentRunner starts create-deployment workflows (app-facing API).
-type CreateDeploymentRunner interface {
-	Run(ctx context.Context, input CreateDeploymentInput) (WorkflowHandle[Deployment], error)
+// CreateDeploymentWorkflowSpec is a short-lived parent workflow that
+// persists a new deployment and starts the orchestration workflow.
+// Both steps are durable: on crash the engine replays from the last
+// completed step.
+//
+// Pass this spec to [Registry.RegisterCreateDeployment] to obtain a
+// [CreateDeploymentWorkflow] that can start instances.
+type CreateDeploymentWorkflowSpec struct {
+	Store         Store
+	Orchestration OrchestrationWorkflow
+	Now           func() time.Time
 }
 
-// CreateDeploymentWorkflow is a short-lived parent workflow that
-// persists a new deployment and starts the orchestration child
-// workflow. Both steps are durable: on crash the engine replays
-// from the last completed step.
-type CreateDeploymentWorkflow struct {
-	Store Store
-	Now   func() time.Time
-
-	// StartOrchestration durably starts the orchestration child
-	// workflow for the given deployment. Set by the engine during
-	// [WorkflowEngine.Register]. Runs as an activity through the
-	// journal so the start survives replay.
-	StartOrchestration Activity[DeploymentID, struct{}]
-}
-
-func (w *CreateDeploymentWorkflow) now() time.Time {
-	if w.Now != nil {
-		return w.Now()
+func (s *CreateDeploymentWorkflowSpec) now() time.Time {
+	if s.Now != nil {
+		return s.Now()
 	}
 	return time.Now()
 }
 
-func (w *CreateDeploymentWorkflow) Name() string { return "create-deployment" }
+func (s *CreateDeploymentWorkflowSpec) Name() string { return "create-deployment" }
 
 // PersistDeployment creates a pending deployment record.
-func (w *CreateDeploymentWorkflow) PersistDeployment() Activity[CreateDeploymentInput, Deployment] {
+func (s *CreateDeploymentWorkflowSpec) PersistDeployment() Activity[CreateDeploymentInput, Deployment] {
 	return NewActivity("persist-deployment", func(ctx context.Context, in CreateDeploymentInput) (Deployment, error) {
-		tx, err := w.Store.Begin(ctx)
+		tx, err := s.Store.Begin(ctx)
 		if err != nil {
 			return Deployment{}, fmt.Errorf("begin tx: %w", err)
 		}
 		defer tx.Rollback()
 
-		now := w.now()
+		now := s.now()
 		uid := uuid.New().String()
 		dep := Deployment{
 			ID:                in.ID,
@@ -77,15 +70,25 @@ func (w *CreateDeploymentWorkflow) PersistDeployment() Activity[CreateDeployment
 	})
 }
 
+// StartOrchestration returns an activity that durably starts the
+// orchestration workflow for a deployment. The start is wrapped in
+// an activity so it survives replay without re-executing.
+func (s *CreateDeploymentWorkflowSpec) StartOrchestration() Activity[DeploymentID, struct{}] {
+	return NewActivity("start-orchestration", func(ctx context.Context, id DeploymentID) (struct{}, error) {
+		_, err := s.Orchestration.Start(ctx, id)
+		return struct{}{}, err
+	})
+}
+
 // Run is the workflow body: persist the deployment, then start
-// orchestration as a durable child workflow.
-func (w *CreateDeploymentWorkflow) Run(journal Journal, input CreateDeploymentInput) (Deployment, error) {
-	dep, err := RunActivity(journal, w.PersistDeployment(), input)
+// orchestration as a durable activity.
+func (s *CreateDeploymentWorkflowSpec) Run(record Record, input CreateDeploymentInput) (Deployment, error) {
+	dep, err := RunActivity(record, s.PersistDeployment(), input)
 	if err != nil {
 		return Deployment{}, fmt.Errorf("persist deployment: %w", err)
 	}
 
-	if _, err := RunActivity(journal, w.StartOrchestration, dep.ID); err != nil {
+	if _, err := RunActivity(record, s.StartOrchestration(), dep.ID); err != nil {
 		return Deployment{}, fmt.Errorf("start orchestration: %w", err)
 	}
 

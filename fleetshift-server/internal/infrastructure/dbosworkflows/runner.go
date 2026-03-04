@@ -1,4 +1,4 @@
-// Package dbosworkflows implements [domain.WorkflowEngine] using
+// Package dbosworkflows implements [domain.Registry] using
 // the DBOS Transact Go SDK.
 package dbosworkflows
 
@@ -13,95 +13,87 @@ import (
 	"github.com/fleetshift/fleetshift-poc/fleetshift-server/internal/domain"
 )
 
-const deploymentEventTopic = "deployment-event"
-
 // activityInvoker calls RunAsStep with the correct concrete output type.
 // Created at construction time when concrete types are known.
 type activityInvoker func(ctx dbos.DBOSContext, in any) (any, error)
 
-// Engine implements [domain.WorkflowEngine] backed by DBOS.
+// Registry implements [domain.Registry] backed by DBOS.
 //
-// Launch runs once on first [Register]; the caller must not call
-// [dbos.Launch] themselves when using Engine through the interface.
-type Engine struct {
+// Launch runs once on first registration; the caller must not call
+// [dbos.Launch] themselves when using Registry through the interface.
+type Registry struct {
 	DBOSCtx    dbos.DBOSContext
 	launchOnce sync.Once
+
+	orchWfFunc dbos.Workflow[domain.DeploymentID, struct{}]
 }
 
-func (e *Engine) Register(owf *domain.OrchestrationWorkflow, cwf *domain.CreateDeploymentWorkflow) (domain.WorkflowRunners, error) {
-	// --- set workflow-specific engine capabilities ---
+func (r *Registry) SignalDeploymentEvent(ctx context.Context, deploymentID domain.DeploymentID, event domain.DeploymentEvent) error {
+	return dbos.Send(r.DBOSCtx, string(deploymentID), event, "deployment-event")
+}
 
-	dbosCtx := e.DBOSCtx
-	owf.SignalDeploymentEvent = func(_ context.Context, deploymentID domain.DeploymentID, event domain.DeploymentEvent) error {
-		return dbos.Send(dbosCtx, string(deploymentID), event, deploymentEventTopic)
-	}
+func (r *Registry) RegisterOrchestration(spec *domain.OrchestrationWorkflowSpec) (domain.OrchestrationWorkflow, error) {
+	invokers := make(map[string]activityInvoker)
 
-	// --- orchestration activities & workflow ---
-
-	orchInvokers := make(map[string]activityInvoker)
-
-	registerActivity(orchInvokers, owf.LoadDeploymentAndPool())
-	registerActivity(orchInvokers, owf.ResolvePlacement())
-	registerActivity(orchInvokers, owf.PlanRollout())
-	registerActivity(orchInvokers, owf.GenerateManifests())
-	registerActivity(orchInvokers, owf.DeliverToTarget())
-	registerActivity(orchInvokers, owf.RemoveFromTarget())
-	registerActivity(orchInvokers, owf.UpdateDeployment())
+	registerActivity(invokers, spec.LoadDeploymentAndPool())
+	registerActivity(invokers, spec.ResolvePlacement())
+	registerActivity(invokers, spec.PlanRollout())
+	registerActivity(invokers, spec.GenerateManifests())
+	registerActivity(invokers, spec.DeliverToTarget())
+	registerActivity(invokers, spec.RemoveFromTarget())
+	registerActivity(invokers, spec.UpdateDeployment())
 
 	orchWfFunc := func(ctx dbos.DBOSContext, deploymentID domain.DeploymentID) (struct{}, error) {
-		journal := &baseJournal{ctx: ctx, invokers: orchInvokers}
-		awaitEvent := func() (domain.DeploymentEvent, error) {
-			for {
-				event, err := dbos.Recv[domain.DeploymentEvent](ctx, deploymentEventTopic, 24*time.Hour)
-				if err != nil {
-					return domain.DeploymentEvent{}, fmt.Errorf("recv deployment event: %w", err)
-				}
-				if event != (domain.DeploymentEvent{}) {
-					return event, nil
-				}
-			}
+		record := &baseRecord{
+			ctx:      ctx,
+			invokers: invokers,
+			signals: map[string]func() (any, error){
+				domain.DeploymentEventSignal.Name: func() (any, error) {
+					for {
+						event, err := dbos.Recv[domain.DeploymentEvent](ctx, domain.DeploymentEventSignal.Name, 24*time.Hour)
+						if err != nil {
+							return nil, fmt.Errorf("recv %q: %w", domain.DeploymentEventSignal.Name, err)
+						}
+						if event != (domain.DeploymentEvent{}) {
+							return event, nil
+						}
+					}
+				},
+			},
 		}
-		return owf.Run(journal, awaitEvent, deploymentID)
+		return spec.Run(record, deploymentID)
 	}
+	r.orchWfFunc = orchWfFunc
 
-	dbos.RegisterWorkflow(e.DBOSCtx, orchWfFunc, dbos.WithWorkflowName(owf.Name()))
+	dbos.RegisterWorkflow(r.DBOSCtx, orchWfFunc, dbos.WithWorkflowName(spec.Name()))
 
-	// --- create-deployment activities & workflow ---
+	return &orchestrationWorkflow{
+		dbosCtx:    r.DBOSCtx,
+		orchWfFunc: orchWfFunc,
+	}, nil
+}
 
-	createInvokers := make(map[string]activityInvoker)
-	registerActivity(createInvokers, cwf.PersistDeployment())
-
-	cwf.StartOrchestration = domain.NewActivity("start-orchestration", func(ctx context.Context, deploymentID domain.DeploymentID) (struct{}, error) {
-		// ctx here is the DBOS step context; RunWorkflow uses the parent's DBOS context.
-		_, err := dbos.RunWorkflow(dbosCtx, orchWfFunc, deploymentID, dbos.WithWorkflowID(string(deploymentID)))
-		return struct{}{}, err
-	})
-	registerActivity(createInvokers, cwf.StartOrchestration)
+func (r *Registry) RegisterCreateDeployment(spec *domain.CreateDeploymentWorkflowSpec) (domain.CreateDeploymentWorkflow, error) {
+	invokers := make(map[string]activityInvoker)
+	registerActivity(invokers, spec.PersistDeployment())
+	registerActivity(invokers, spec.StartOrchestration())
 
 	createWfFunc := func(ctx dbos.DBOSContext, input domain.CreateDeploymentInput) (domain.Deployment, error) {
-		journal := &baseJournal{ctx: ctx, invokers: createInvokers}
-		return cwf.Run(journal, input)
+		record := &baseRecord{ctx: ctx, invokers: invokers, signals: nil}
+		return spec.Run(record, input)
 	}
 
-	dbos.RegisterWorkflow(e.DBOSCtx, createWfFunc, dbos.WithWorkflowName(cwf.Name()))
+	dbos.RegisterWorkflow(r.DBOSCtx, createWfFunc, dbos.WithWorkflowName(spec.Name()))
 
-	e.launchOnce.Do(func() {
-		if err := dbos.Launch(e.DBOSCtx); err != nil {
-			panic(err) // Register already succeeded; Launch failure is fatal
+	r.launchOnce.Do(func() {
+		if err := dbos.Launch(r.DBOSCtx); err != nil {
+			panic(err)
 		}
 	})
 
-	// --- build runners ---
-
-	return domain.WorkflowRunners{
-		Orchestration: &orchestrationRunner{
-			dbosCtx:    e.DBOSCtx,
-			orchWfFunc: orchWfFunc,
-		},
-		CreateDeployment: &createDeploymentRunner{
-			dbosCtx: e.DBOSCtx,
-			wfFunc:  createWfFunc,
-		},
+	return &createDeploymentWorkflow{
+		dbosCtx: r.DBOSCtx,
+		wfFunc:  createWfFunc,
 	}, nil
 }
 
@@ -116,76 +108,92 @@ func registerActivity[I, O any](invokers map[string]activityInvoker, activity do
 	}
 }
 
-// --- shared base Journal ---
+// --- shared base Record ---
 
-type baseJournal struct {
+type baseRecord struct {
 	ctx      dbos.DBOSContext
 	invokers map[string]activityInvoker
+	signals  map[string]func() (any, error)
 }
 
-func (j *baseJournal) ID() string {
-	id, _ := dbos.GetWorkflowID(j.ctx)
+func (r *baseRecord) ID() string {
+	id, _ := dbos.GetWorkflowID(r.ctx)
 	return id
 }
 
-func (j *baseJournal) Context() context.Context {
-	return j.ctx
+func (r *baseRecord) Context() context.Context {
+	return r.ctx
 }
 
-func (j *baseJournal) Run(activity domain.Activity[any, any], in any) (any, error) {
-	invoke, ok := j.invokers[activity.Name()]
+func (r *baseRecord) Run(activity domain.Activity[any, any], in any) (any, error) {
+	invoke, ok := r.invokers[activity.Name()]
 	if !ok {
 		return nil, fmt.Errorf("activity %q not registered", activity.Name())
 	}
-	return invoke(j.ctx, in)
+	return invoke(r.ctx, in)
 }
 
-// --- OrchestrationRunner (app-facing) ---
+func (r *baseRecord) Await(signalName string) (any, error) {
+	recv, ok := r.signals[signalName]
+	if !ok {
+		return nil, fmt.Errorf("signal %q not registered", signalName)
+	}
+	return recv()
+}
 
-type orchestrationRunner struct {
+// --- OrchestrationWorkflow ---
+
+type orchestrationWorkflow struct {
 	dbosCtx    dbos.DBOSContext
 	orchWfFunc dbos.Workflow[domain.DeploymentID, struct{}]
 }
 
-func (r *orchestrationRunner) Run(ctx context.Context, deploymentID domain.DeploymentID) (domain.WorkflowHandle[struct{}], error) {
-	handle, err := dbos.RunWorkflow(r.dbosCtx, r.orchWfFunc, deploymentID, dbos.WithWorkflowID(string(deploymentID)))
+func (w *orchestrationWorkflow) Start(ctx context.Context, deploymentID domain.DeploymentID) (domain.Execution[struct{}], error) {
+	handle, err := dbos.RunWorkflow(w.dbosCtx, w.orchWfFunc, deploymentID, dbos.WithWorkflowID(string(deploymentID)))
 	if err != nil {
 		return nil, fmt.Errorf("run DBOS workflow: %w", err)
 	}
-	return &orchWorkflowHandle{handle: handle}, nil
+	return &orchExecution{handle: handle}, nil
 }
 
-// --- CreateDeploymentRunner (app-facing) ---
+// --- CreateDeploymentWorkflow ---
 
-type createDeploymentRunner struct {
+type createDeploymentWorkflow struct {
 	dbosCtx dbos.DBOSContext
 	wfFunc  dbos.Workflow[domain.CreateDeploymentInput, domain.Deployment]
 }
 
-func (r *createDeploymentRunner) Run(_ context.Context, input domain.CreateDeploymentInput) (domain.WorkflowHandle[domain.Deployment], error) {
-	handle, err := dbos.RunWorkflow(r.dbosCtx, r.wfFunc, input, dbos.WithWorkflowID("create-"+string(input.ID)))
+func (w *createDeploymentWorkflow) Start(ctx context.Context, input domain.CreateDeploymentInput) (domain.Execution[domain.Deployment], error) {
+	handle, err := dbos.RunWorkflow(w.dbosCtx, w.wfFunc, input, dbos.WithWorkflowID("create-"+string(input.ID)))
 	if err != nil {
 		return nil, fmt.Errorf("run DBOS create-deployment workflow: %w", err)
 	}
-	return &createWorkflowHandle{handle: handle}, nil
+	return &createExecution{handle: handle}, nil
 }
 
-// --- Workflow handles ---
+// --- Execution types ---
 
-type orchWorkflowHandle struct {
+type orchExecution struct {
 	handle dbos.WorkflowHandle[struct{}]
 }
 
-func (h *orchWorkflowHandle) WorkflowID() string { return h.handle.GetWorkflowID() }
-func (h *orchWorkflowHandle) AwaitResult(_ context.Context) (struct{}, error) {
-	return h.handle.GetResult()
+func (e *orchExecution) WorkflowID() string { return e.handle.GetWorkflowID() }
+func (e *orchExecution) AwaitResult(_ context.Context) (struct{}, error) {
+	return e.handle.GetResult()
 }
 
-type createWorkflowHandle struct {
+type createExecution struct {
 	handle dbos.WorkflowHandle[domain.Deployment]
 }
 
-func (h *createWorkflowHandle) WorkflowID() string { return h.handle.GetWorkflowID() }
-func (h *createWorkflowHandle) AwaitResult(_ context.Context) (domain.Deployment, error) {
-	return h.handle.GetResult()
+func (e *createExecution) WorkflowID() string { return e.handle.GetWorkflowID() }
+func (e *createExecution) AwaitResult(_ context.Context) (domain.Deployment, error) {
+	return e.handle.GetResult()
 }
+
+// Compile-time interface checks.
+var (
+	_ domain.Registry                = (*Registry)(nil)
+	_ domain.OrchestrationWorkflow   = (*orchestrationWorkflow)(nil)
+	_ domain.CreateDeploymentWorkflow = (*createDeploymentWorkflow)(nil)
+)

@@ -29,7 +29,7 @@ func syncInfra(t *testing.T) workflowenginetest.Infra {
 
 // TestWorkflowEngine runs the workflow engine contract against the sync engine.
 func TestWorkflowEngine(t *testing.T) {
-	workflowenginetest.Run(t, syncInfra, func(t *testing.T) domain.WorkflowEngine {
-		return &syncworkflow.Engine{}
+	workflowenginetest.Run(t, syncInfra, func(t *testing.T) domain.Registry {
+		return &syncworkflow.Registry{}
 	})
 }

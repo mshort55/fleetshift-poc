@@ -81,29 +81,36 @@ func runServe(ctx context.Context, f *serveFlags) error {
 
 	logger := slog.Default()
 
-	owf := &domain.OrchestrationWorkflow{
-		Store:            store,
-		Delivery:         router,
-		Strategies:       domain.DefaultStrategyFactory{},
-		Observer:         observability.NewDeploymentObserver(logger),
-		DeliveryObserver: observability.NewDeliveryObserver(logger),
-	}
-	cwf := &domain.CreateDeploymentWorkflow{
-		Store: store,
-	}
-
 	wfBackend := wfsqlite.NewSqliteBackend(f.dbPath)
 	wfWorker := worker.New(wfBackend, nil)
 	wfClient := client.New(wfBackend)
 
-	engine := &goworkflows.Engine{
+	reg := &goworkflows.Registry{
 		Worker:  wfWorker,
 		Client:  wfClient,
 		Timeout: 30 * time.Second,
 	}
-	runners, err := engine.Register(owf, cwf)
+
+	orchSpec := &domain.OrchestrationWorkflowSpec{
+		Store:            store,
+		Delivery:         router,
+		Strategies:       domain.DefaultStrategyFactory{},
+		Registry:         reg,
+		Observer:         observability.NewDeploymentObserver(logger),
+		DeliveryObserver: observability.NewDeliveryObserver(logger),
+	}
+	orchWf, err := reg.RegisterOrchestration(orchSpec)
 	if err != nil {
-		return fmt.Errorf("register workflows: %w", err)
+		return fmt.Errorf("register orchestration: %w", err)
+	}
+
+	cwfSpec := &domain.CreateDeploymentWorkflowSpec{
+		Store:         store,
+		Orchestration: orchWf,
+	}
+	createWf, err := reg.RegisterCreateDeployment(cwfSpec)
+	if err != nil {
+		return fmt.Errorf("register create-deployment: %w", err)
 	}
 	// --- seed default targets ---
 
@@ -154,7 +161,7 @@ func runServe(ctx context.Context, f *serveFlags) error {
 
 	deploymentSvc := &application.DeploymentService{
 		Store:    store,
-		CreateWF: runners.CreateDeployment,
+		CreateWF: createWf,
 	}
 
 	// --- gRPC server ---

@@ -58,13 +58,13 @@ func goInfra(t *testing.T) workflowenginetest.Infra {
 }
 
 // TestWorkflowEngine_GoWorkflows runs the workflow engine contract against
-// the go-workflows engine. The engine only provides [domain.WorkflowEngine];
+// the go-workflows registry. The registry only provides [domain.Registry];
 // worker and client setup are implementation-specific.
 func TestWorkflowEngine_GoWorkflows(t *testing.T) {
-	workflowenginetest.Run(t, goInfra, func(t *testing.T) domain.WorkflowEngine {
+	workflowenginetest.Run(t, goInfra, func(t *testing.T) domain.Registry {
 		b := wfsqlite.NewInMemoryBackend()
 		w := startWorker(t, b)
 		c := client.New(b)
-		return &goworkflows.Engine{Worker: w, Client: c, Timeout: 10 * time.Second}
+		return &goworkflows.Registry{Worker: w, Client: c, Timeout: 10 * time.Second}
 	})
 }

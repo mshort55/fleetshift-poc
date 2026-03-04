@@ -1,4 +1,4 @@
-// Package goworkflows implements [domain.WorkflowEngine] using
+// Package goworkflows implements [domain.Registry] using
 // cschleiden/go-workflows for durable workflow execution.
 package goworkflows
 
@@ -8,120 +8,105 @@ import (
 	"time"
 
 	"github.com/cschleiden/go-workflows/client"
-	"github.com/cschleiden/go-workflows/registry"
+	goregistry "github.com/cschleiden/go-workflows/registry"
 	"github.com/cschleiden/go-workflows/worker"
 	"github.com/cschleiden/go-workflows/workflow"
 
 	"github.com/fleetshift/fleetshift-poc/fleetshift-server/internal/domain"
 )
 
-const deploymentEventSignal = "deployment-event"
-
 // activityInvoker calls an activity from the workflow context with the
 // correct generic types. Created at construction time when concrete
 // types are known.
 type activityInvoker func(wfCtx workflow.Context, in any) (any, error)
 
-// Engine implements [domain.WorkflowEngine] backed by go-workflows.
-type Engine struct {
+// Registry implements [domain.Registry] backed by go-workflows.
+type Registry struct {
 	Worker  *worker.Worker
 	Client  *client.Client
 	Timeout time.Duration
 }
 
-func (e *Engine) timeout() time.Duration {
-	if e.Timeout > 0 {
-		return e.Timeout
+func (r *Registry) timeout() time.Duration {
+	if r.Timeout > 0 {
+		return r.Timeout
 	}
 	return 30 * time.Second
 }
 
-func (e *Engine) Register(owf *domain.OrchestrationWorkflow, cwf *domain.CreateDeploymentWorkflow) (domain.WorkflowRunners, error) {
-	// --- set workflow-specific engine capabilities ---
+func (r *Registry) SignalDeploymentEvent(ctx context.Context, deploymentID domain.DeploymentID, event domain.DeploymentEvent) error {
+	return r.Client.SignalWorkflow(ctx, string(deploymentID), domain.DeploymentEventSignal.Name, event)
+}
 
-	owf.SignalDeploymentEvent = func(_ context.Context, deploymentID domain.DeploymentID, event domain.DeploymentEvent) error {
-		go e.Client.SignalWorkflow(context.Background(), string(deploymentID), deploymentEventSignal, event)
-		return nil
-	}
-
-	// go-workflows requires all sub-workflow futures to be awaited
-	// before the parent completes, so StartOrchestration is an activity
-	// that uses the client to start orchestration as a top-level workflow.
-	orchWfName := owf.Name()
-	cwf.StartOrchestration = domain.NewActivity("start-orchestration", func(ctx context.Context, deploymentID domain.DeploymentID) (struct{}, error) {
-		_, err := e.Client.CreateWorkflowInstance(ctx, client.WorkflowInstanceOptions{
-			InstanceID: string(deploymentID),
-		}, orchWfName, deploymentID)
-		return struct{}{}, err
-	})
-
-	// --- orchestration activities & workflow ---
-
-	orchInvokers := make(map[string]activityInvoker)
+func (r *Registry) RegisterOrchestration(spec *domain.OrchestrationWorkflowSpec) (domain.OrchestrationWorkflow, error) {
+	invokers := make(map[string]activityInvoker)
 
 	for _, reg := range []func() error{
-		func() error { return registerActivity(e.Worker, orchInvokers, owf.LoadDeploymentAndPool()) },
-		func() error { return registerActivity(e.Worker, orchInvokers, owf.ResolvePlacement()) },
-		func() error { return registerActivity(e.Worker, orchInvokers, owf.PlanRollout()) },
-		func() error { return registerActivity(e.Worker, orchInvokers, owf.GenerateManifests()) },
-		func() error { return registerActivity(e.Worker, orchInvokers, owf.DeliverToTarget()) },
-		func() error { return registerActivity(e.Worker, orchInvokers, owf.RemoveFromTarget()) },
-		func() error { return registerActivity(e.Worker, orchInvokers, owf.UpdateDeployment()) },
+		func() error { return registerActivity(r.Worker, invokers, spec.LoadDeploymentAndPool()) },
+		func() error { return registerActivity(r.Worker, invokers, spec.ResolvePlacement()) },
+		func() error { return registerActivity(r.Worker, invokers, spec.PlanRollout()) },
+		func() error { return registerActivity(r.Worker, invokers, spec.GenerateManifests()) },
+		func() error { return registerActivity(r.Worker, invokers, spec.DeliverToTarget()) },
+		func() error { return registerActivity(r.Worker, invokers, spec.RemoveFromTarget()) },
+		func() error { return registerActivity(r.Worker, invokers, spec.UpdateDeployment()) },
 	} {
 		if err := reg(); err != nil {
-			return domain.WorkflowRunners{}, err
+			return nil, err
 		}
 	}
 
 	wfFunc := func(ctx workflow.Context, deploymentID domain.DeploymentID) (struct{}, error) {
-		ch := workflow.NewSignalChannel[domain.DeploymentEvent](ctx, deploymentEventSignal)
-		journal := &baseJournal{wfCtx: ctx, invokers: orchInvokers}
-		awaitEvent := func() (domain.DeploymentEvent, error) {
-			event, ok := ch.Receive(ctx)
-			if !ok {
-				return domain.DeploymentEvent{}, fmt.Errorf("signal channel closed")
-			}
-			return event, nil
+		ch := workflow.NewSignalChannel[domain.DeploymentEvent](ctx, domain.DeploymentEventSignal.Name)
+		record := &baseRecord{
+			wfCtx:    ctx,
+			invokers: invokers,
+			signals: map[string]func() (any, error){
+				domain.DeploymentEventSignal.Name: func() (any, error) {
+					val, ok := ch.Receive(ctx)
+					if !ok {
+						return nil, fmt.Errorf("signal channel %q closed", domain.DeploymentEventSignal.Name)
+					}
+					return val, nil
+				},
+			},
 		}
-		return owf.Run(journal, awaitEvent, deploymentID)
+		return spec.Run(record, deploymentID)
 	}
 
-	if err := e.Worker.RegisterWorkflow(wfFunc, registry.WithName(owf.Name())); err != nil {
-		return domain.WorkflowRunners{}, fmt.Errorf("register workflow %q: %w", owf.Name(), err)
+	if err := r.Worker.RegisterWorkflow(wfFunc, goregistry.WithName(spec.Name())); err != nil {
+		return nil, fmt.Errorf("register workflow %q: %w", spec.Name(), err)
 	}
 
-	// --- create-deployment activities & workflow ---
+	return &orchestrationWorkflow{
+		client:  r.Client,
+		wfName:  spec.Name(),
+		timeout: r.timeout(),
+	}, nil
+}
 
-	createInvokers := make(map[string]activityInvoker)
-	if err := registerActivity(e.Worker, createInvokers, cwf.PersistDeployment()); err != nil {
-		return domain.WorkflowRunners{}, err
-	}
-	if err := registerActivity(e.Worker, createInvokers, cwf.StartOrchestration); err != nil {
-		return domain.WorkflowRunners{}, err
-	}
+func (r *Registry) RegisterCreateDeployment(spec *domain.CreateDeploymentWorkflowSpec) (domain.CreateDeploymentWorkflow, error) {
+	invokers := make(map[string]activityInvoker)
 
-	createWfFunc := func(ctx workflow.Context, input domain.CreateDeploymentInput) (domain.Deployment, error) {
-		journal := &baseJournal{wfCtx: ctx, invokers: createInvokers}
-		return cwf.Run(journal, input)
+	if err := registerActivity(r.Worker, invokers, spec.PersistDeployment()); err != nil {
+		return nil, err
 	}
-
-	if err := e.Worker.RegisterWorkflow(createWfFunc, registry.WithName(cwf.Name())); err != nil {
-		return domain.WorkflowRunners{}, fmt.Errorf("register workflow %q: %w", cwf.Name(), err)
+	if err := registerActivity(r.Worker, invokers, spec.StartOrchestration()); err != nil {
+		return nil, err
 	}
 
-	// --- build runners ---
+	wfFunc := func(ctx workflow.Context, input domain.CreateDeploymentInput) (domain.Deployment, error) {
+		record := &baseRecord{wfCtx: ctx, invokers: invokers, signals: nil}
+		return spec.Run(record, input)
+	}
 
-	return domain.WorkflowRunners{
-		Orchestration: &orchestrationRunner{
-			client:  e.Client,
-			wfName:  owf.Name(),
-			timeout: e.timeout(),
-		},
-		CreateDeployment: &createDeploymentRunner{
-			client:  e.Client,
-			wfName:  cwf.Name(),
-			timeout: e.timeout(),
-		},
+	if err := r.Worker.RegisterWorkflow(wfFunc, goregistry.WithName(spec.Name())); err != nil {
+		return nil, fmt.Errorf("register workflow %q: %w", spec.Name(), err)
+	}
+
+	return &createDeploymentWorkflow{
+		client:  r.Client,
+		wfName:  spec.Name(),
+		timeout: r.timeout(),
 	}, nil
 }
 
@@ -137,7 +122,7 @@ func registerActivity[I, O any](
 	activityFn := func(ctx context.Context, in I) (O, error) {
 		return activity.Run(ctx, in)
 	}
-	if err := w.RegisterActivity(activityFn, registry.WithName(name)); err != nil {
+	if err := w.RegisterActivity(activityFn, goregistry.WithName(name)); err != nil {
 		return fmt.Errorf("register activity %q: %w", name, err)
 	}
 
@@ -151,87 +136,103 @@ func registerActivity[I, O any](
 	return nil
 }
 
-// --- shared base Journal ---
+// --- shared base Record ---
 
-type baseJournal struct {
+type baseRecord struct {
 	wfCtx    workflow.Context
 	invokers map[string]activityInvoker
+	signals  map[string]func() (any, error)
 }
 
-func (j *baseJournal) ID() string {
-	return workflow.WorkflowInstance(j.wfCtx).InstanceID
+func (r *baseRecord) ID() string {
+	return workflow.WorkflowInstance(r.wfCtx).InstanceID
 }
 
-func (j *baseJournal) Context() context.Context {
+func (r *baseRecord) Context() context.Context {
 	return context.Background()
 }
 
-func (j *baseJournal) Run(activity domain.Activity[any, any], in any) (any, error) {
-	invoke, ok := j.invokers[activity.Name()]
+func (r *baseRecord) Run(activity domain.Activity[any, any], in any) (any, error) {
+	invoke, ok := r.invokers[activity.Name()]
 	if !ok {
 		return nil, fmt.Errorf("activity %q not registered", activity.Name())
 	}
-	return invoke(j.wfCtx, in)
+	return invoke(r.wfCtx, in)
 }
 
-// --- OrchestrationRunner (app-facing) ---
+func (r *baseRecord) Await(signalName string) (any, error) {
+	recv, ok := r.signals[signalName]
+	if !ok {
+		return nil, fmt.Errorf("signal %q not registered", signalName)
+	}
+	return recv()
+}
 
-type orchestrationRunner struct {
+// --- OrchestrationWorkflow ---
+
+type orchestrationWorkflow struct {
 	client  *client.Client
 	wfName  string
 	timeout time.Duration
 }
 
-func (r *orchestrationRunner) Run(ctx context.Context, deploymentID domain.DeploymentID) (domain.WorkflowHandle[struct{}], error) {
-	instance, err := r.client.CreateWorkflowInstance(ctx, client.WorkflowInstanceOptions{
+func (w *orchestrationWorkflow) Start(ctx context.Context, deploymentID domain.DeploymentID) (domain.Execution[struct{}], error) {
+	instance, err := w.client.CreateWorkflowInstance(ctx, client.WorkflowInstanceOptions{
 		InstanceID: string(deploymentID),
-	}, r.wfName, deploymentID)
+	}, w.wfName, deploymentID)
 	if err != nil {
 		return nil, fmt.Errorf("create workflow instance: %w", err)
 	}
 
-	return &workflowHandle[struct{}]{
-		client:   r.client,
+	return &execution[struct{}]{
+		client:   w.client,
 		instance: instance,
-		timeout:  r.timeout,
+		timeout:  w.timeout,
 	}, nil
 }
 
-// --- CreateDeploymentRunner (app-facing) ---
+// --- CreateDeploymentWorkflow ---
 
-type createDeploymentRunner struct {
+type createDeploymentWorkflow struct {
 	client  *client.Client
 	wfName  string
 	timeout time.Duration
 }
 
-func (r *createDeploymentRunner) Run(ctx context.Context, input domain.CreateDeploymentInput) (domain.WorkflowHandle[domain.Deployment], error) {
-	instance, err := r.client.CreateWorkflowInstance(ctx, client.WorkflowInstanceOptions{
+func (w *createDeploymentWorkflow) Start(ctx context.Context, input domain.CreateDeploymentInput) (domain.Execution[domain.Deployment], error) {
+	instance, err := w.client.CreateWorkflowInstance(ctx, client.WorkflowInstanceOptions{
 		InstanceID: "create-" + string(input.ID),
-	}, r.wfName, input)
+	}, w.wfName, input)
 	if err != nil {
 		return nil, fmt.Errorf("create workflow instance: %w", err)
 	}
 
-	return &workflowHandle[domain.Deployment]{
-		client:   r.client,
+	return &execution[domain.Deployment]{
+		client:   w.client,
 		instance: instance,
-		timeout:  r.timeout,
+		timeout:  w.timeout,
 	}, nil
 }
 
-// --- WorkflowHandle ---
+// --- Execution ---
 
-type workflowHandle[O any] struct {
+type execution[O any] struct {
 	client   *client.Client
 	instance *workflow.Instance
 	timeout  time.Duration
 }
 
-func (h *workflowHandle[O]) WorkflowID() string {
-	return h.instance.InstanceID
+func (e *execution[O]) WorkflowID() string {
+	return e.instance.InstanceID
 }
 
-func (h *workflowHandle[O]) AwaitResult(ctx context.Context) (O, error) {
-	return client.GetWorkflowResult[O](ctx, h.client, h.instance, h.timeout)
+func (e *execution[O]) AwaitResult(ctx context.Context) (O, error) {
+	return client.GetWorkflowResult[O](ctx, e.client, e.instance, e.timeout)
 }
+
+// Compile-time interface checks.
+var (
+	_ domain.Registry                = (*Registry)(nil)
+	_ domain.OrchestrationWorkflow   = (*orchestrationWorkflow)(nil)
+	_ domain.CreateDeploymentWorkflow = (*createDeploymentWorkflow)(nil)
+)

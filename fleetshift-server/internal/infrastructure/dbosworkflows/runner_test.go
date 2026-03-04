@@ -62,11 +62,11 @@ func dbosInfra(t *testing.T) workflowenginetest.Infra {
 	}
 }
 
-// TestWorkflowEngine_DBOS runs the workflow engine contract against the DBOS engine.
-// The engine only provides [domain.WorkflowEngine]; setup (Postgres, Launch) and
-// teardown are implementation-specific.
+// TestWorkflowEngine_DBOS runs the workflow engine contract against the DBOS
+// registry. The registry only provides [domain.Registry]; setup (Postgres,
+// Launch) and teardown are implementation-specific.
 func TestWorkflowEngine_DBOS(t *testing.T) {
-	workflowenginetest.Run(t, dbosInfra, func(t *testing.T) domain.WorkflowEngine {
+	workflowenginetest.Run(t, dbosInfra, func(t *testing.T) domain.Registry {
 		connStr := startPostgres(t)
 
 		dbosCtx, err := dbos.NewDBOSContext(context.Background(), dbos.Config{
@@ -79,6 +79,6 @@ func TestWorkflowEngine_DBOS(t *testing.T) {
 
 		t.Cleanup(func() { dbos.Shutdown(dbosCtx, 5*time.Second) })
 
-		return &dbosworkflows.Engine{DBOSCtx: dbosCtx}
+		return &dbosworkflows.Registry{DBOSCtx: dbosCtx}
 	})
 }
