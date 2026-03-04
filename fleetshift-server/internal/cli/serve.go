@@ -4,12 +4,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log"
 	"log/slog"
 	"net"
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -39,9 +39,11 @@ import (
 )
 
 type serveFlags struct {
-	grpcAddr string
-	httpAddr string
-	dbPath   string
+	grpcAddr  string
+	httpAddr  string
+	dbPath    string
+	logLevel  string
+	logFormat string
 }
 
 func newServeCmd() *cobra.Command {
@@ -56,6 +58,8 @@ func newServeCmd() *cobra.Command {
 	cmd.Flags().StringVar(&f.grpcAddr, "grpc-addr", ":50051", "gRPC listen address")
 	cmd.Flags().StringVar(&f.httpAddr, "http-addr", ":8080", "HTTP/JSON gateway listen address")
 	cmd.Flags().StringVar(&f.dbPath, "db", "fleetshift.db", "SQLite database path")
+	cmd.Flags().StringVar(&f.logLevel, "log-level", "info", "log level (debug, info, warn, error)")
+	cmd.Flags().StringVar(&f.logFormat, "log-format", "text", "log format (text, json)")
 	return cmd
 }
 
@@ -84,7 +88,10 @@ func runServe(ctx context.Context, f *serveFlags) error {
 	kubeAgent := kubernetesaddon.NewAgent(vault)
 	router.Register(kubernetesaddon.TargetType, kubeAgent)
 
-	logger := slog.Default()
+	logger, err := buildLogger(f.logLevel, f.logFormat)
+	if err != nil {
+		return err
+	}
 
 	wfBackend := wfsqlite.NewSqliteBackend(f.dbPath)
 	wfWorker := worker.New(wfBackend, nil)
@@ -161,7 +168,7 @@ func runServe(ctx context.Context, f *serveFlags) error {
 		}
 	}
 
-	authnInterceptor := transportgrpc.NewAuthnInterceptor(authMethodSvc, tokenVerifier)
+	authnInterceptor := transportgrpc.NewAuthnInterceptor(authMethodSvc, tokenVerifier, observability.NewAuthnObserver(logger))
 
 	// --- application services ---
 
@@ -181,6 +188,7 @@ func runServe(ctx context.Context, f *serveFlags) error {
 	})
 	pb.RegisterAuthMethodServiceServer(grpcServer, &transportgrpc.AuthMethodServer{
 		AuthMethods: authMethodSvc,
+		Authn:       authnInterceptor,
 	})
 	reflection.Register(grpcServer)
 
@@ -210,12 +218,12 @@ func runServe(ctx context.Context, f *serveFlags) error {
 	errCh := make(chan error, 2)
 
 	go func() {
-		log.Printf("gRPC server listening on %s", f.grpcAddr)
+		logger.Info("gRPC server listening", "addr", f.grpcAddr)
 		errCh <- grpcServer.Serve(grpcLis)
 	}()
 
 	go func() {
-		log.Printf("HTTP gateway listening on %s", f.httpAddr)
+		logger.Info("HTTP gateway listening", "addr", f.httpAddr)
 		if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			errCh <- err
 		}
@@ -225,7 +233,7 @@ func runServe(ctx context.Context, f *serveFlags) error {
 
 	select {
 	case <-ctx.Done():
-		log.Println("shutting down...")
+		logger.Info("shutting down")
 	case err := <-errCh:
 		return err
 	}
@@ -234,14 +242,43 @@ func runServe(ctx context.Context, f *serveFlags) error {
 
 	workerCancel()
 	if err := wfWorker.WaitForCompletion(); err != nil {
-		log.Printf("workflow worker shutdown error: %v", err)
+		logger.Error("workflow worker shutdown error", "error", err)
 	}
 
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	if err := httpServer.Shutdown(shutdownCtx); err != nil {
-		log.Printf("HTTP shutdown error: %v", err)
+		logger.Error("HTTP shutdown error", "error", err)
 	}
 
 	return nil
+}
+
+func buildLogger(level, format string) (*slog.Logger, error) {
+	var lv slog.Level
+	switch strings.ToLower(level) {
+	case "debug":
+		lv = slog.LevelDebug
+	case "info", "":
+		lv = slog.LevelInfo
+	case "warn":
+		lv = slog.LevelWarn
+	case "error":
+		lv = slog.LevelError
+	default:
+		return nil, fmt.Errorf("unknown log level %q (valid: debug, info, warn, error)", level)
+	}
+
+	opts := &slog.HandlerOptions{Level: lv}
+	var handler slog.Handler
+	switch strings.ToLower(format) {
+	case "json":
+		handler = slog.NewJSONHandler(os.Stderr, opts)
+	case "text", "":
+		handler = slog.NewTextHandler(os.Stderr, opts)
+	default:
+		return nil, fmt.Errorf("unknown log format %q (valid: text, json)", format)
+	}
+
+	return slog.New(handler), nil
 }

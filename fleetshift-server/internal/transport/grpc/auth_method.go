@@ -19,6 +19,7 @@ const authMethodCollection = "authMethods/"
 type AuthMethodServer struct {
 	pb.UnimplementedAuthMethodServiceServer
 	AuthMethods *application.AuthMethodService
+	Authn       *AuthnInterceptor
 }
 
 func (s *AuthMethodServer) CreateAuthMethod(ctx context.Context, req *pb.CreateAuthMethodRequest) (*pb.AuthMethod, error) {
@@ -37,6 +38,10 @@ func (s *AuthMethodServer) CreateAuthMethod(ctx context.Context, req *pb.CreateA
 	result, err := s.AuthMethods.Create(ctx, domain.AuthMethodID(req.GetAuthMethodId()), method)
 	if err != nil {
 		return nil, domainError(err)
+	}
+
+	if s.Authn != nil {
+		s.Authn.InvalidateMethodCache()
 	}
 
 	return authMethodToProto(result), nil

@@ -7,7 +7,7 @@ help: ## Show this help
 build: build-server build-cli ## Build all binaries
 
 build-server: ## Build the server binary
-	cd fleetshift-server && go build ./...
+	cd fleetshift-server && go build -o ../bin/fleetshift ./cmd/fleetshift
 
 build-cli: ## Build the fleetctl CLI binary
 	cd fleetshift-cli && go build -o ../bin/fleetctl ./cmd/fleetctl

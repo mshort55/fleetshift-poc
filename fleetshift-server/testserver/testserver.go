@@ -85,7 +85,7 @@ func Start(t *testing.T) string {
 		Methods:   authMethodRepo,
 		Discovery: stubDiscovery{},
 	}
-	authnInterceptor := transportgrpc.NewAuthnInterceptor(authMethodSvc, stubVerifier{})
+	authnInterceptor := transportgrpc.NewAuthnInterceptor(authMethodSvc, stubVerifier{}, domain.NoOpAuthnObserver{})
 
 	srv := grpc.NewServer(
 		grpc.ChainUnaryInterceptor(authnInterceptor.Unary()),

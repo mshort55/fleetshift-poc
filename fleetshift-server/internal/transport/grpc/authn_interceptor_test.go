@@ -107,7 +107,7 @@ func setupAuthnTest(t *testing.T, repo *fakeAuthMethodRepo, verifier *fakeOIDCTo
 		Discovery: discovery,
 	}
 
-	interceptor := NewAuthnInterceptor(authMethodSvc, verifier)
+	interceptor := NewAuthnInterceptor(authMethodSvc, verifier, domain.NoOpAuthnObserver{})
 	interceptor.cacheTTL = 0 // disable cache for tests
 
 	capture := &authCaptureServer{}

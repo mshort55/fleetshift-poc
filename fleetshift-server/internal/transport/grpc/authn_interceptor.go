@@ -22,6 +22,7 @@ import (
 type AuthnInterceptor struct {
 	methods  *application.AuthMethodService
 	verifier domain.OIDCTokenVerifier
+	observer domain.AuthnObserver
 
 	cacheMu      sync.RWMutex
 	cachedAt     time.Time
@@ -31,10 +32,11 @@ type AuthnInterceptor struct {
 
 // NewAuthnInterceptor creates an interceptor that authenticates requests
 // using the given services.
-func NewAuthnInterceptor(methods *application.AuthMethodService, verifier domain.OIDCTokenVerifier) *AuthnInterceptor {
+func NewAuthnInterceptor(methods *application.AuthMethodService, verifier domain.OIDCTokenVerifier, observer domain.AuthnObserver) *AuthnInterceptor {
 	return &AuthnInterceptor{
 		methods:  methods,
 		verifier: verifier,
+		observer: observer,
 		cacheTTL: 30 * time.Second,
 	}
 }
@@ -72,26 +74,42 @@ func (a *AuthnInterceptor) Stream() grpclib.StreamServerInterceptor {
 }
 
 func (a *AuthnInterceptor) authenticate(ctx context.Context, fullMethod string) (context.Context, error) {
+	reqInfo := domain.AuthnRequestInfo{Method: fullMethod}
+	if p, ok := peer.FromContext(ctx); ok {
+		reqInfo.PeerAddr = p.Addr.String()
+	}
+
+	ctx, probe := a.observer.Authenticate(ctx, reqInfo)
+	defer probe.End()
+
 	methods, err := a.loadMethods(ctx)
 	if err != nil {
+		probe.Error(err)
 		return ctx, status.Errorf(codes.Internal, "load auth methods: %v", err)
 	}
+	probe.MethodsLoaded(len(methods))
 
 	var subject *domain.SubjectClaims
 	var client *application.ClientClaims
+	var matchedType domain.AuthMethodType
 
 	for _, m := range methods {
 		switch m.Type {
 		case domain.AuthMethodTypeOIDC:
 			token := extractBearerToken(ctx)
 			if token == "" {
+				probe.CredentialMissing(m.Type)
 				continue
 			}
+			probe.VerifyingCredential(m.ID, m.Type)
 			claims, verifyErr := a.verifier.Verify(ctx, *m.OIDC, token)
 			if verifyErr != nil {
+				probe.Error(verifyErr)
 				return ctx, status.Errorf(codes.Unauthenticated, "token verification failed: %v", verifyErr)
 			}
 			subject = &claims
+			matchedType = m.Type
+			// TODO: this is inappropriate here
 			if azp, ok := claims.Extra["azp"]; ok && len(azp) > 0 {
 				client = &application.ClientClaims{ID: application.ClientID(azp[0])}
 			}
@@ -101,10 +119,14 @@ func (a *AuthnInterceptor) authenticate(ctx context.Context, fullMethod string) 
 		}
 	}
 
-	reqClaims := application.RequestClaims{Method: fullMethod}
-	if p, ok := peer.FromContext(ctx); ok {
-		reqClaims.PeerAddr = p.Addr.String()
+	if subject != nil {
+		probe.Authenticated(matchedType, *subject)
+	} else {
+		probe.Anonymous()
 	}
+
+	reqClaims := application.RequestClaims{Method: fullMethod}
+	reqClaims.PeerAddr = reqInfo.PeerAddr
 
 	authzCtx := &application.AuthorizationContext{
 		Subject: subject,
@@ -112,6 +134,16 @@ func (a *AuthnInterceptor) authenticate(ctx context.Context, fullMethod string) 
 		Request: reqClaims,
 	}
 	return application.ContextWithAuth(ctx, authzCtx), nil
+}
+
+// InvalidateMethodCache forces the next authentication attempt to
+// reload auth methods from the store. Call after creating or
+// modifying auth methods.
+func (a *AuthnInterceptor) InvalidateMethodCache() {
+	a.cacheMu.Lock()
+	a.cachedAt = time.Time{}
+	a.cachedResult = nil
+	a.cacheMu.Unlock()
 }
 
 func (a *AuthnInterceptor) loadMethods(ctx context.Context) ([]domain.AuthMethod, error) {
