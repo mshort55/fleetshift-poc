@@ -11,7 +11,7 @@ import (
 	"github.com/fleetshift/fleetshift-poc/fleetshift-server/internal/domain"
 	"github.com/fleetshift/fleetshift-poc/fleetshift-server/internal/infrastructure/delivery"
 	"github.com/fleetshift/fleetshift-poc/fleetshift-server/internal/infrastructure/sqlite"
-	"github.com/fleetshift/fleetshift-poc/fleetshift-server/internal/infrastructure/syncworkflow"
+	"github.com/fleetshift/fleetshift-poc/fleetshift-server/internal/infrastructure/memworkflow"
 )
 
 // TestKindAddon_EndToEnd exercises the full addon lifecycle:
@@ -30,7 +30,7 @@ func TestKindAddon_EndToEnd(t *testing.T) {
 	router := delivery.NewRoutingDeliveryService()
 	router.Register(kindaddon.TargetType, kindAgent)
 
-	reg := &syncworkflow.Registry{}
+	reg := &memworkflow.Registry{}
 
 	orchSpec := &domain.OrchestrationWorkflowSpec{
 		Store:      store,

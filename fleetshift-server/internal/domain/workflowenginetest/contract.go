@@ -16,11 +16,20 @@ import (
 	"github.com/fleetshift/fleetshift-poc/fleetshift-server/internal/domain"
 )
 
-// Infra is the test-owned infrastructure: store and delivery.
-// The same infra is used for all engines; implementations do not provide it.
+// AgentRegistrar allows the contract test to register additional
+// delivery agents. Typically backed by [delivery.RoutingDeliveryService].
+type AgentRegistrar interface {
+	Register(targetType domain.TargetType, agent domain.DeliveryAgent)
+}
+
+// Infra is the test-owned infrastructure: store, delivery, vault, and
+// agent registration. The same infra is used for all engines;
+// implementations do not provide it.
 type Infra struct {
-	Store    domain.Store
-	Delivery domain.DeliveryService
+	Store          domain.Store
+	Delivery       domain.DeliveryService
+	Vault          domain.Vault
+	AgentRegistrar AgentRegistrar
 }
 
 // InfraFactory creates infra for a test. Typically shared across engine tests
@@ -279,6 +288,61 @@ func Run(t *testing.T, infraFactory InfraFactory, registryFactory RegistryFactor
 		}
 	})
 
+	t.Run("DeliveryOutputs_RegistersTargetAndStoresSecret", func(t *testing.T) {
+		infra := infraFactory(t)
+		wfs := registerWorkflows(t, infra, registryFactory)
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+
+		createTargets(ctx, t, infra,
+			domain.TargetInfo{ID: "provisioner", Type: OutputTargetType, Name: "provisioner"},
+		)
+
+		_, err := runCreateDeployment(ctx, t, wfs, domain.CreateDeploymentInput{
+			ID: "d-outputs",
+			ManifestStrategy: domain.ManifestStrategySpec{
+				Type:      domain.ManifestStrategyInline,
+				Manifests: []domain.Manifest{{Raw: json.RawMessage(`{"name":"new-cluster"}`)}},
+			},
+			PlacementStrategy: domain.PlacementStrategySpec{
+				Type:    domain.PlacementStrategyStatic,
+				Targets: []domain.TargetID{"provisioner"},
+			},
+		})
+		if err != nil {
+			t.Fatalf("Create: %v", err)
+		}
+
+		awaitDeploymentState(ctx, t, infra, "d-outputs", domain.DeploymentStateActive)
+
+		tx, err := infra.Store.Begin(ctx)
+		if err != nil {
+			t.Fatalf("Begin: %v", err)
+		}
+		defer tx.Rollback()
+
+		tgt, err := tx.Targets().Get(ctx, "k8s-new-cluster")
+		if err != nil {
+			t.Fatalf("provisioned target not found: %v", err)
+		}
+		if tgt.Type != "kubernetes" {
+			t.Errorf("target type = %q, want %q", tgt.Type, "kubernetes")
+		}
+		if tgt.Properties["kubeconfig_ref"] != "targets/k8s-new-cluster/kubeconfig" {
+			t.Errorf("target kubeconfig_ref = %q, want %q", tgt.Properties["kubeconfig_ref"], "targets/k8s-new-cluster/kubeconfig")
+		}
+
+		if infra.Vault != nil {
+			secret, err := infra.Vault.Get(ctx, "targets/k8s-new-cluster/kubeconfig")
+			if err != nil {
+				t.Fatalf("vault secret not found: %v", err)
+			}
+			if string(secret) != "fake-kubeconfig-data" {
+				t.Errorf("vault secret = %q, want %q", secret, "fake-kubeconfig-data")
+			}
+		}
+	})
+
 	t.Run("TwoDeployments_Isolation", func(t *testing.T) {
 		infra := infraFactory(t)
 		wfs := registerWorkflows(t, infra, registryFactory)
@@ -340,6 +404,9 @@ func Run(t *testing.T, infraFactory InfraFactory, registryFactory RegistryFactor
 // returns the registered workflow interfaces.
 func registerWorkflows(t *testing.T, infra Infra, registryFactory RegistryFactory) workflows {
 	t.Helper()
+	if infra.AgentRegistrar != nil {
+		infra.AgentRegistrar.Register(OutputTargetType, &outputAgent{})
+	}
 	reg := registryFactory(t)
 
 	orchSpec := &domain.OrchestrationWorkflowSpec{
@@ -347,6 +414,7 @@ func registerWorkflows(t *testing.T, infra Infra, registryFactory RegistryFactor
 		Delivery:   infra.Delivery,
 		Strategies: domain.DefaultStrategyFactory{},
 		Registry:   reg,
+		Vault:      infra.Vault,
 	}
 	orchWf, err := reg.RegisterOrchestration(orchSpec)
 	if err != nil {
@@ -379,6 +447,11 @@ func runCreateDeployment(ctx context.Context, t *testing.T, wfs workflows, in do
 
 // TestTargetType is the default target type used by contract tests.
 const TestTargetType domain.TargetType = "test"
+
+// OutputTargetType is a target type whose delivery agent produces
+// [domain.ProvisionedTarget] and [domain.ProducedSecret] outputs.
+// Used by the delivery-outputs contract test.
+const OutputTargetType domain.TargetType = "output-test"
 
 func registerTargets(ctx context.Context, t *testing.T, infra Infra, ids ...string) {
 	t.Helper()
@@ -494,4 +567,40 @@ func must(t *testing.T, err error) {
 	if err != nil {
 		t.Fatal(err)
 	}
+}
+
+// outputAgent implements [domain.DeliveryAgent] by producing a
+// [domain.ProvisionedTarget] and [domain.ProducedSecret] from each
+// delivery. The manifest's "name" field determines the target ID.
+type outputAgent struct{}
+
+func (a *outputAgent) Deliver(_ context.Context, _ domain.TargetInfo, _ domain.DeliveryID, manifests []domain.Manifest, signaler *domain.DeliverySignaler) (domain.DeliveryResult, error) {
+	var spec struct{ Name string }
+	if err := json.Unmarshal(manifests[0].Raw, &spec); err != nil {
+		return domain.DeliveryResult{State: domain.DeliveryStateFailed, Message: err.Error()}, err
+	}
+	targetID := domain.TargetID("k8s-" + spec.Name)
+	secretRef := domain.SecretRef("targets/" + string(targetID) + "/kubeconfig")
+
+	go signaler.Done(context.Background(), domain.DeliveryResult{
+		State: domain.DeliveryStateDelivered,
+		ProvisionedTargets: []domain.ProvisionedTarget{{
+			ID:   targetID,
+			Type: "kubernetes",
+			Name: spec.Name,
+			Properties: map[string]string{
+				"kubeconfig_ref": string(secretRef),
+			},
+		}},
+		ProducedSecrets: []domain.ProducedSecret{{
+			Ref:   secretRef,
+			Value: []byte("fake-kubeconfig-data"),
+		}},
+	})
+
+	return domain.DeliveryResult{State: domain.DeliveryStateAccepted}, nil
+}
+
+func (a *outputAgent) Remove(_ context.Context, _ domain.TargetInfo, _ domain.DeliveryID, _ *domain.DeliverySignaler) error {
+	return nil
 }

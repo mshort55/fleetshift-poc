@@ -1,26 +1,38 @@
-// Package syncworkflow provides a synchronous, in-process [domain.Registry].
-// Activities execute inline with no persistence or replay. The workflow runs
-// in a goroutine and receives [domain.DeploymentEvent] values through a
-// buffered channel, so callers must coordinate start and signal.
-package syncworkflow
+// Package memworkflow provides a lightweight, in-memory [domain.Registry]
+// that faithfully reproduces the concurrency and serialization semantics
+// of a durable workflow engine:
+//
+//   - Activities are dispatched to goroutines with a fresh
+//     [context.Background] context (not the workflow context).
+//   - Activity inputs and outputs go through a JSON round-trip,
+//     matching what durable engines do when persisting activity state.
+//   - Signals are JSON-serialized on send and deserialized on receive,
+//     matching go-workflows' signal channel behavior.
+//
+// No durable state is kept; there is no replay. This package is the
+// recommended workflow backend for fast, high-fidelity tests.
+package memworkflow
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
+	"reflect"
 	"sync"
 
 	"github.com/fleetshift/fleetshift-poc/fleetshift-server/internal/domain"
 )
 
-// Registry implements [domain.Registry] with synchronous, in-process
-// execution. No durable state is kept. Workflow instances are tracked so
-// that event signals can be delivered to the correct goroutine.
+// Registry implements [domain.Registry] with in-memory execution.
+// Workflow instances are tracked so that event signals can be delivered
+// to the correct goroutine.
 type Registry struct {
 	mu        sync.Mutex
 	instances map[domain.DeploymentID]*instance
 }
 
 type instance struct {
-	events chan domain.DeploymentEvent
+	events chan []byte // JSON-serialized DeploymentEvent
 }
 
 func (r *Registry) getInstance(id domain.DeploymentID) *instance {
@@ -31,7 +43,7 @@ func (r *Registry) getInstance(id domain.DeploymentID) *instance {
 	}
 	inst, ok := r.instances[id]
 	if !ok {
-		inst = &instance{events: make(chan domain.DeploymentEvent, 16)}
+		inst = &instance{events: make(chan []byte, 16)}
 		r.instances[id] = inst
 	}
 	return inst
@@ -43,10 +55,17 @@ func (r *Registry) removeInstance(id domain.DeploymentID) {
 	delete(r.instances, id)
 }
 
+// SignalDeploymentEvent JSON-serializes the event and delivers it to
+// the workflow instance's signal channel, mirroring how durable engines
+// persist signals before delivering them.
 func (r *Registry) SignalDeploymentEvent(ctx context.Context, id domain.DeploymentID, event domain.DeploymentEvent) error {
+	data, err := json.Marshal(event)
+	if err != nil {
+		return fmt.Errorf("memworkflow: marshal signal: %w", err)
+	}
 	inst := r.getInstance(id)
 	select {
-	case inst.events <- event:
+	case inst.events <- data:
 		return nil
 	case <-ctx.Done():
 		return ctx.Err()
@@ -113,22 +132,78 @@ func (w *createDeploymentWorkflow) Start(ctx context.Context, input domain.Creat
 type baseRecord struct {
 	id     string
 	ctx    context.Context
-	events <-chan domain.DeploymentEvent
+	events <-chan []byte // JSON-serialized signals
 }
 
 func (r *baseRecord) ID() string              { return r.id }
 func (r *baseRecord) Context() context.Context { return r.ctx }
+
+// Run dispatches the activity to a goroutine with a fresh context and
+// JSON round-trips both input and output. The workflow goroutine blocks
+// until the activity completes.
 func (r *baseRecord) Run(activity domain.Activity[any, any], in any) (any, error) {
-	return activity.Run(r.ctx, in)
+	deserializedIn, err := jsonRoundTrip(in)
+	if err != nil {
+		return nil, fmt.Errorf("memworkflow: round-trip activity %q input: %w", activity.Name(), err)
+	}
+
+	type actResult struct {
+		out any
+		err error
+	}
+	ch := make(chan actResult, 1)
+	go func() {
+		out, err := activity.Run(context.Background(), deserializedIn)
+		ch <- actResult{out, err}
+	}()
+
+	select {
+	case res := <-ch:
+		if res.err != nil {
+			return nil, res.err
+		}
+		deserializedOut, err := jsonRoundTrip(res.out)
+		if err != nil {
+			return nil, fmt.Errorf("memworkflow: round-trip activity %q output: %w", activity.Name(), err)
+		}
+		return deserializedOut, nil
+	case <-r.ctx.Done():
+		return nil, r.ctx.Err()
+	}
 }
 
+// Await blocks until a signal arrives on the channel, then
+// JSON-deserializes it into [domain.DeploymentEvent].
 func (r *baseRecord) Await(signalName string) (any, error) {
 	select {
-	case event := <-r.events:
+	case data := <-r.events:
+		var event domain.DeploymentEvent
+		if err := json.Unmarshal(data, &event); err != nil {
+			return nil, fmt.Errorf("memworkflow: unmarshal signal %q: %w", signalName, err)
+		}
 		return event, nil
 	case <-r.ctx.Done():
 		return nil, r.ctx.Err()
 	}
+}
+
+// jsonRoundTrip marshals v to JSON and unmarshals into a new value of
+// the same concrete type. This catches serialization issues that would
+// be silent without a durable engine.
+func jsonRoundTrip(v any) (any, error) {
+	if v == nil {
+		return nil, nil
+	}
+	data, err := json.Marshal(v)
+	if err != nil {
+		return nil, err
+	}
+	t := reflect.TypeOf(v)
+	ptr := reflect.New(t)
+	if err := json.Unmarshal(data, ptr.Interface()); err != nil {
+		return nil, err
+	}
+	return ptr.Elem().Interface(), nil
 }
 
 // --- Executions and result types ---
@@ -175,7 +250,7 @@ func (e *createExecution) AwaitResult(ctx context.Context) (domain.Deployment, e
 
 // Compile-time interface checks.
 var (
-	_ domain.Registry             = (*Registry)(nil)
-	_ domain.OrchestrationWorkflow = (*orchestrationWorkflow)(nil)
+	_ domain.Registry                 = (*Registry)(nil)
+	_ domain.OrchestrationWorkflow    = (*orchestrationWorkflow)(nil)
 	_ domain.CreateDeploymentWorkflow = (*createDeploymentWorkflow)(nil)
 )

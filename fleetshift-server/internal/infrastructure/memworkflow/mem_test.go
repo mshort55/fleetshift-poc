@@ -1,4 +1,4 @@
-package syncworkflow_test
+package memworkflow_test
 
 import (
 	"testing"
@@ -7,14 +7,15 @@ import (
 	"github.com/fleetshift/fleetshift-poc/fleetshift-server/internal/domain"
 	"github.com/fleetshift/fleetshift-poc/fleetshift-server/internal/domain/workflowenginetest"
 	"github.com/fleetshift/fleetshift-poc/fleetshift-server/internal/infrastructure/delivery"
+	"github.com/fleetshift/fleetshift-poc/fleetshift-server/internal/infrastructure/memworkflow"
 	"github.com/fleetshift/fleetshift-poc/fleetshift-server/internal/infrastructure/sqlite"
-	"github.com/fleetshift/fleetshift-poc/fleetshift-server/internal/infrastructure/syncworkflow"
 )
 
-func syncInfra(t *testing.T) workflowenginetest.Infra {
+func memInfra(t *testing.T) workflowenginetest.Infra {
 	t.Helper()
 	db := sqlite.OpenTestDB(t)
 	store := &sqlite.Store{DB: db}
+	vault := &sqlite.VaultStore{DB: db}
 	recordingAgent := &sqlite.RecordingDeliveryService{
 		Store: store,
 		Now:   func() time.Time { return time.Date(2026, 2, 27, 12, 0, 0, 0, time.UTC) },
@@ -22,14 +23,15 @@ func syncInfra(t *testing.T) workflowenginetest.Infra {
 	router := delivery.NewRoutingDeliveryService()
 	router.Register(workflowenginetest.TestTargetType, recordingAgent)
 	return workflowenginetest.Infra{
-		Store:    store,
-		Delivery: router,
+		Store:          store,
+		Delivery:       router,
+		Vault:          vault,
+		AgentRegistrar: router,
 	}
 }
 
-// TestWorkflowEngine runs the workflow engine contract against the sync engine.
 func TestWorkflowEngine(t *testing.T) {
-	workflowenginetest.Run(t, syncInfra, func(t *testing.T) domain.Registry {
-		return &syncworkflow.Registry{}
+	workflowenginetest.Run(t, memInfra, func(t *testing.T) domain.Registry {
+		return &memworkflow.Registry{}
 	})
 }

@@ -15,7 +15,7 @@ import (
 	"github.com/fleetshift/fleetshift-poc/fleetshift-server/internal/domain"
 	"github.com/fleetshift/fleetshift-poc/fleetshift-server/internal/infrastructure/delivery"
 	"github.com/fleetshift/fleetshift-poc/fleetshift-server/internal/infrastructure/sqlite"
-	"github.com/fleetshift/fleetshift-poc/fleetshift-server/internal/infrastructure/syncworkflow"
+	"github.com/fleetshift/fleetshift-poc/fleetshift-server/internal/infrastructure/memworkflow"
 )
 
 // TestKindAddon_RealDocker exercises the full addon lifecycle against
@@ -50,7 +50,7 @@ func TestKindAddon_RealDocker(t *testing.T) {
 	db := sqlite.OpenTestDB(t)
 	store := &sqlite.Store{DB: db}
 
-	reg := &syncworkflow.Registry{}
+	reg := &memworkflow.Registry{}
 
 	orchSpec := &domain.OrchestrationWorkflowSpec{
 		Store:      store,

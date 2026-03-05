@@ -18,7 +18,7 @@ import (
 	"github.com/fleetshift/fleetshift-poc/fleetshift-server/internal/domain"
 	"github.com/fleetshift/fleetshift-poc/fleetshift-server/internal/infrastructure/delivery"
 	"github.com/fleetshift/fleetshift-poc/fleetshift-server/internal/infrastructure/sqlite"
-	"github.com/fleetshift/fleetshift-poc/fleetshift-server/internal/infrastructure/syncworkflow"
+	"github.com/fleetshift/fleetshift-poc/fleetshift-server/internal/infrastructure/memworkflow"
 	transportgrpc "github.com/fleetshift/fleetshift-poc/fleetshift-server/internal/transport/grpc"
 )
 
@@ -37,7 +37,7 @@ func setup(t *testing.T) pb.DeploymentServiceClient {
 	router := delivery.NewRoutingDeliveryService()
 	router.Register(testTargetType, recordingAgent)
 
-	reg := &syncworkflow.Registry{}
+	reg := &memworkflow.Registry{}
 
 	orchSpec := &domain.OrchestrationWorkflowSpec{
 		Store:      store,

@@ -1,6 +1,6 @@
 // Package testserver provides a fully wired in-process FleetShift gRPC
 // server for integration testing. The server uses SQLite in-memory storage
-// and the synchronous workflow engine, making tests fast and deterministic.
+// and the in-memory workflow engine, making tests fast and deterministic.
 package testserver
 
 import (
@@ -15,7 +15,7 @@ import (
 	"github.com/fleetshift/fleetshift-poc/fleetshift-server/internal/domain"
 	"github.com/fleetshift/fleetshift-poc/fleetshift-server/internal/infrastructure/delivery"
 	"github.com/fleetshift/fleetshift-poc/fleetshift-server/internal/infrastructure/sqlite"
-	"github.com/fleetshift/fleetshift-poc/fleetshift-server/internal/infrastructure/syncworkflow"
+	"github.com/fleetshift/fleetshift-poc/fleetshift-server/internal/infrastructure/memworkflow"
 	transportgrpc "github.com/fleetshift/fleetshift-poc/fleetshift-server/internal/transport/grpc"
 )
 
@@ -53,7 +53,7 @@ func Start(t *testing.T) string {
 	recording := &sqlite.RecordingDeliveryService{Store: store}
 	router.Register("test", recording)
 
-	reg := &syncworkflow.Registry{}
+	reg := &memworkflow.Registry{}
 
 	orchSpec := &domain.OrchestrationWorkflowSpec{
 		Store:      store,
