@@ -17,13 +17,14 @@ const (
 // only the placement view (see [PlacementTarget]) is passed to placement
 // strategies and considered for invalidation.
 type TargetInfo struct {
-	ID              TargetID
-	InventoryItemID InventoryItemID
-	Type            TargetType
-	Name            string
-	State           TargetState
-	Labels          map[string]string
-	Properties      map[string]string
+	ID                    TargetID
+	InventoryItemID       InventoryItemID
+	Type                  TargetType
+	Name                  string
+	State                 TargetState
+	Labels                map[string]string
+	Properties            map[string]string
+	AcceptedResourceTypes []ResourceType
 }
 
 // PlacementTarget is the subset of target state shared with placement
@@ -37,12 +38,17 @@ type TargetInfo struct {
 //
 // State is included so placement strategies can enforce readiness
 // requirements (only [TargetStateReady] targets are eligible by default).
+//
+// AcceptedResourceTypes is included because it is a fundamental,
+// immutable characteristic of a target. Placement strategies may use it
+// to filter by supported manifest types, but are not required to.
 type PlacementTarget struct {
-	ID     TargetID
-	Type   TargetType
-	Name   string
-	State  TargetState
-	Labels map[string]string
+	ID                    TargetID
+	Type                  TargetType
+	Name                  string
+	State                 TargetState
+	Labels                map[string]string
+	AcceptedResourceTypes []ResourceType
 }
 
 // ToPlacementTarget returns the placement view of a target (Labels only;
@@ -52,7 +58,9 @@ func ToPlacementTarget(t TargetInfo) PlacementTarget {
 	for k, v := range t.Labels {
 		labels[k] = v
 	}
-	return PlacementTarget{ID: t.ID, Type: t.Type, Name: t.Name, State: t.State, Labels: labels}
+	art := make([]ResourceType, len(t.AcceptedResourceTypes))
+	copy(art, t.AcceptedResourceTypes)
+	return PlacementTarget{ID: t.ID, Type: t.Type, Name: t.Name, State: t.State, Labels: labels, AcceptedResourceTypes: art}
 }
 
 // PlacementTargets returns the placement view of each target in the slice.

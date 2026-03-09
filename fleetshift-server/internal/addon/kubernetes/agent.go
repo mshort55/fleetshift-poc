@@ -25,6 +25,10 @@ import (
 // managed by the direct delivery agent (kubeconfig-based, no fleetlet).
 const TargetType domain.TargetType = "kubernetes"
 
+// ManifestResourceType is the [domain.ResourceType] for generic
+// Kubernetes manifests applied via server-side apply.
+const ManifestResourceType domain.ResourceType = "kubernetes"
+
 const fieldManager = "fleetshift"
 
 // Agent implements [domain.DeliveryAgent] for direct Kubernetes cluster

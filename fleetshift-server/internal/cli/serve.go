@@ -129,9 +129,10 @@ func runServe(ctx context.Context, f *serveFlags) error {
 
 	targetSvc := &application.TargetService{Store: store}
 	if err := targetSvc.Register(ctx, domain.TargetInfo{
-		ID:   "kind-local",
-		Type: kindaddon.TargetType,
-		Name: "Local Kind Provider",
+		ID:                    "kind-local",
+		Type:                  kindaddon.TargetType,
+		Name:                  "Local Kind Provider",
+		AcceptedResourceTypes: []domain.ResourceType{kindaddon.ClusterResourceType},
 	}); err != nil && !errors.Is(err, domain.ErrAlreadyExists) {
 		return fmt.Errorf("seed kind target: %w", err)
 	}

@@ -23,6 +23,27 @@ func TestToPlacementTarget_OmitsProperties(t *testing.T) {
 	// PlacementTarget has no Properties field; conversion omits them by type.
 }
 
+func TestToPlacementTarget_PropagatesAcceptedResourceTypes(t *testing.T) {
+	target := domain.TargetInfo{
+		ID:                    "t1",
+		Name:                  "cluster-a",
+		AcceptedResourceTypes: []domain.ResourceType{"api.kind.cluster", "kubernetes"},
+	}
+	got := domain.ToPlacementTarget(target)
+	if len(got.AcceptedResourceTypes) != 2 {
+		t.Fatalf("len(AcceptedResourceTypes) = %d, want 2", len(got.AcceptedResourceTypes))
+	}
+	if got.AcceptedResourceTypes[0] != "api.kind.cluster" || got.AcceptedResourceTypes[1] != "kubernetes" {
+		t.Errorf("AcceptedResourceTypes = %v, want [api.kind.cluster, kubernetes]", got.AcceptedResourceTypes)
+	}
+
+	// Verify it's a copy, not a shared slice.
+	got.AcceptedResourceTypes[0] = "mutated"
+	if target.AcceptedResourceTypes[0] == "mutated" {
+		t.Error("AcceptedResourceTypes should be copied, not shared")
+	}
+}
+
 func TestPlacementTargets_PreservesOrderAndLength(t *testing.T) {
 	pool := []domain.TargetInfo{
 		{ID: "a", Name: "n1", State: domain.TargetStateReady, Labels: map[string]string{"x": "1"}},

@@ -43,11 +43,12 @@ type DeliveryResult struct {
 // the platform should register. Properties should include vault refs
 // for any associated secrets (e.g. "kubeconfig_ref").
 type ProvisionedTarget struct {
-	ID         TargetID
-	Type       TargetType
-	Name       string
-	Labels     map[string]string
-	Properties map[string]string
+	ID                    TargetID
+	Type                  TargetType
+	Name                  string
+	Labels                map[string]string
+	Properties            map[string]string
+	AcceptedResourceTypes []ResourceType
 }
 
 // ProducedSecret declares a secret that a delivery produced and that

@@ -286,11 +286,12 @@ func (s *OrchestrationWorkflowSpec) ProcessDeliveryOutputs() Activity[DeliveryRe
 		}
 		for _, pt := range result.ProvisionedTargets {
 			if err := reg.Register(ctx, TargetInfo{
-				ID:         pt.ID,
-				Type:       pt.Type,
-				Name:       pt.Name,
-				Labels:     pt.Labels,
-				Properties: pt.Properties,
+				ID:                    pt.ID,
+				Type:                  pt.Type,
+				Name:                  pt.Name,
+				Labels:                pt.Labels,
+				Properties:            pt.Properties,
+				AcceptedResourceTypes: pt.AcceptedResourceTypes,
 			}); err != nil {
 				return struct{}{}, fmt.Errorf("register target %q: %w", pt.ID, err)
 			}
@@ -530,6 +531,13 @@ func (s *OrchestrationWorkflowSpec) executeRolloutPlan(
 				})
 				if err != nil {
 					return fmt.Errorf("generate manifests for target %s: %w", target.ID, err)
+				}
+				// TODO: partial delivery (where some manifests are filtered out)
+				// may result in an incomplete or incoherent manifest set for a
+				// target. Revisit whether to warn or make this configurable.
+				manifests = FilterAcceptedManifests(target, manifests)
+				if len(manifests) == 0 {
+					continue
 				}
 				did := deliveryIDFor(deploymentID, target.ID)
 				if _, err := RunActivity(record, s.DeliverToTarget(), DeliverInput{

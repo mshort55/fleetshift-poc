@@ -1,6 +1,9 @@
 package kind
 
-import "github.com/fleetshift/fleetshift-poc/fleetshift-server/internal/domain"
+import (
+	"github.com/fleetshift/fleetshift-poc/fleetshift-server/internal/addon/kubernetes"
+	"github.com/fleetshift/fleetshift-poc/fleetshift-server/internal/domain"
+)
 
 // KubernetesTargetType is the [domain.TargetType] for Kubernetes
 // clusters provisioned by the kind addon. The kubernetes-direct
@@ -26,6 +29,7 @@ func (o *ClusterOutput) Target() domain.ProvisionedTarget {
 		Properties: map[string]string{
 			"kubeconfig_ref": string(o.secretRef()),
 		},
+		AcceptedResourceTypes: []domain.ResourceType{kubernetes.ManifestResourceType},
 	}
 }
 

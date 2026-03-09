@@ -24,6 +24,10 @@ func (r *TargetRepo) Create(ctx context.Context, t domain.TargetInfo) error {
 	if err != nil {
 		return fmt.Errorf("marshal properties: %w", err)
 	}
+	art, err := marshalResourceTypes(t.AcceptedResourceTypes)
+	if err != nil {
+		return fmt.Errorf("marshal accepted_resource_types: %w", err)
+	}
 
 	state := t.State
 	if state == "" {
@@ -31,8 +35,8 @@ func (r *TargetRepo) Create(ctx context.Context, t domain.TargetInfo) error {
 	}
 
 	_, err = r.DB.ExecContext(ctx,
-		`INSERT INTO targets (id, type, name, state, labels, properties, inventory_item_id) VALUES (?, ?, ?, ?, ?, ?, ?)`,
-		string(t.ID), string(t.Type), t.Name, string(state), string(labels), string(props), string(t.InventoryItemID),
+		`INSERT INTO targets (id, type, name, state, labels, properties, inventory_item_id, accepted_resource_types) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		string(t.ID), string(t.Type), t.Name, string(state), string(labels), string(props), string(t.InventoryItemID), art,
 	)
 	if err != nil {
 		if isUniqueViolation(err) {
@@ -45,14 +49,14 @@ func (r *TargetRepo) Create(ctx context.Context, t domain.TargetInfo) error {
 
 func (r *TargetRepo) Get(ctx context.Context, id domain.TargetID) (domain.TargetInfo, error) {
 	row := r.DB.QueryRowContext(ctx,
-		`SELECT id, type, name, state, labels, properties, inventory_item_id FROM targets WHERE id = ?`,
+		`SELECT id, type, name, state, labels, properties, inventory_item_id, accepted_resource_types FROM targets WHERE id = ?`,
 		string(id),
 	)
 	return scanTarget(row)
 }
 
 func (r *TargetRepo) List(ctx context.Context) ([]domain.TargetInfo, error) {
-	rows, err := r.DB.QueryContext(ctx, `SELECT id, type, name, state, labels, properties, inventory_item_id FROM targets`)
+	rows, err := r.DB.QueryContext(ctx, `SELECT id, type, name, state, labels, properties, inventory_item_id, accepted_resource_types FROM targets`)
 	if err != nil {
 		return nil, fmt.Errorf("list targets: %w", err)
 	}
@@ -87,8 +91,8 @@ type scanner interface {
 
 func scanTarget(s scanner) (domain.TargetInfo, error) {
 	var t domain.TargetInfo
-	var id, targetType, stateStr, labelsJSON, propsJSON, inventoryItemID string
-	if err := s.Scan(&id, &targetType, &t.Name, &stateStr, &labelsJSON, &propsJSON, &inventoryItemID); err != nil {
+	var id, targetType, stateStr, labelsJSON, propsJSON, inventoryItemID, artJSON string
+	if err := s.Scan(&id, &targetType, &t.Name, &stateStr, &labelsJSON, &propsJSON, &inventoryItemID, &artJSON); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return t, fmt.Errorf("%w", domain.ErrNotFound)
 		}
@@ -104,5 +108,37 @@ func scanTarget(s scanner) (domain.TargetInfo, error) {
 	if err := json.Unmarshal([]byte(propsJSON), &t.Properties); err != nil {
 		return t, fmt.Errorf("unmarshal properties: %w", err)
 	}
+	art, err := unmarshalResourceTypes(artJSON)
+	if err != nil {
+		return t, fmt.Errorf("unmarshal accepted_resource_types: %w", err)
+	}
+	t.AcceptedResourceTypes = art
 	return t, nil
+}
+
+func marshalResourceTypes(rts []domain.ResourceType) (string, error) {
+	if len(rts) == 0 {
+		return "[]", nil
+	}
+	raw := make([]string, len(rts))
+	for i, rt := range rts {
+		raw[i] = string(rt)
+	}
+	b, err := json.Marshal(raw)
+	return string(b), err
+}
+
+func unmarshalResourceTypes(s string) ([]domain.ResourceType, error) {
+	var raw []string
+	if err := json.Unmarshal([]byte(s), &raw); err != nil {
+		return nil, err
+	}
+	if len(raw) == 0 {
+		return nil, nil
+	}
+	out := make([]domain.ResourceType, len(raw))
+	for i, v := range raw {
+		out[i] = domain.ResourceType(v)
+	}
+	return out, nil
 }

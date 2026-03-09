@@ -650,3 +650,212 @@ func TestOrchestration_AsyncDelivery_ReachesActive(t *testing.T) {
 		t.Errorf("delivery state = %q, want %q", d.State, domain.DeliveryStateDelivered)
 	}
 }
+
+func TestOrchestration_ResourceTypeFiltering_SkipsIncompatibleTargets(t *testing.T) {
+	store, _ := setupStore(t)
+
+	deploymentID := domain.DeploymentID("rt-filter")
+	seedDeployment(t, store, domain.Deployment{
+		ID: deploymentID,
+		ManifestStrategy: domain.ManifestStrategySpec{
+			Type: domain.ManifestStrategyInline,
+			Manifests: []domain.Manifest{
+				{ResourceType: "api.kind.cluster", Raw: json.RawMessage(`{"name":"c1"}`)},
+			},
+		},
+		PlacementStrategy: domain.PlacementStrategySpec{
+			Type: domain.PlacementStrategyAll,
+		},
+		State: domain.DeploymentStateCreating,
+	})
+
+	pool := []domain.TargetInfo{
+		{ID: "kind-local", Name: "Kind Provider", Type: "kind", AcceptedResourceTypes: []domain.ResourceType{"api.kind.cluster"}},
+		{ID: "k8s-existing", Name: "Existing K8s", Type: "kubernetes", AcceptedResourceTypes: []domain.ResourceType{"kubernetes"}},
+	}
+	seedTargets(t, store, pool...)
+
+	events := make(chan domain.DeploymentEvent, 16)
+	reg := &stubRegistry{events: events}
+
+	rec := &singleEventRecord{
+		ctx:    context.Background(),
+		event:  domain.DeploymentEvent{Delete: true},
+		events: events,
+	}
+
+	wf := &domain.OrchestrationWorkflowSpec{
+		Store:      store,
+		Delivery:   noopDelivery{},
+		Strategies: domain.DefaultStrategyFactory{},
+		Registry:   reg,
+	}
+
+	recorder := &recordingRecord{ctx: rec.ctx, delegate: rec}
+
+	_, err := wf.Run(recorder, deploymentID)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	var deliveredTo []domain.TargetID
+	for _, rec := range recorder.records {
+		if rec.Name == "deliver-to-target" {
+			deliveredTo = append(deliveredTo, rec.TargetID)
+		}
+	}
+	if len(deliveredTo) != 1 {
+		t.Fatalf("expected delivery to 1 target, got %d: %v", len(deliveredTo), deliveredTo)
+	}
+	if deliveredTo[0] != "kind-local" {
+		t.Errorf("expected delivery to kind-local, got %s", deliveredTo[0])
+	}
+}
+
+func TestOrchestration_ResourceTypeFiltering_UnconstrainedTargetReceivesAll(t *testing.T) {
+	store, _ := setupStore(t)
+
+	deploymentID := domain.DeploymentID("rt-unconstrained")
+	seedDeployment(t, store, domain.Deployment{
+		ID: deploymentID,
+		ManifestStrategy: domain.ManifestStrategySpec{
+			Type: domain.ManifestStrategyInline,
+			Manifests: []domain.Manifest{
+				{ResourceType: "api.kind.cluster", Raw: json.RawMessage(`{"name":"c1"}`)},
+			},
+		},
+		PlacementStrategy: domain.PlacementStrategySpec{
+			Type: domain.PlacementStrategyAll,
+		},
+		State: domain.DeploymentStateCreating,
+	})
+
+	pool := []domain.TargetInfo{
+		{ID: "constrained", Name: "K8s Only", Type: "kubernetes", AcceptedResourceTypes: []domain.ResourceType{"kubernetes"}},
+		{ID: "unconstrained", Name: "Legacy Target", Type: "test"},
+	}
+	seedTargets(t, store, pool...)
+
+	events := make(chan domain.DeploymentEvent, 16)
+	reg := &stubRegistry{events: events}
+
+	rec := &singleEventRecord{
+		ctx:    context.Background(),
+		event:  domain.DeploymentEvent{Delete: true},
+		events: events,
+	}
+
+	wf := &domain.OrchestrationWorkflowSpec{
+		Store:      store,
+		Delivery:   noopDelivery{},
+		Strategies: domain.DefaultStrategyFactory{},
+		Registry:   reg,
+	}
+
+	recorder := &recordingRecord{ctx: rec.ctx, delegate: rec}
+
+	_, err := wf.Run(recorder, deploymentID)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	var deliveredTo []domain.TargetID
+	for _, rec := range recorder.records {
+		if rec.Name == "deliver-to-target" {
+			deliveredTo = append(deliveredTo, rec.TargetID)
+		}
+	}
+	if len(deliveredTo) != 1 {
+		t.Fatalf("expected delivery to 1 target, got %d: %v", len(deliveredTo), deliveredTo)
+	}
+	if deliveredTo[0] != "unconstrained" {
+		t.Errorf("expected delivery to unconstrained, got %s", deliveredTo[0])
+	}
+}
+
+// recordingDelivery records the manifests delivered to each target, allowing
+// tests to assert per-target manifest filtering.
+type recordingDelivery struct {
+	mu        sync.Mutex
+	delivered map[domain.TargetID][]domain.Manifest
+}
+
+func (d *recordingDelivery) Deliver(ctx context.Context, target domain.TargetInfo, _ domain.DeliveryID, manifests []domain.Manifest, signaler *domain.DeliverySignaler) (domain.DeliveryResult, error) {
+	d.mu.Lock()
+	if d.delivered == nil {
+		d.delivered = make(map[domain.TargetID][]domain.Manifest)
+	}
+	d.delivered[target.ID] = append(d.delivered[target.ID], manifests...)
+	d.mu.Unlock()
+	result := domain.DeliveryResult{State: domain.DeliveryStateDelivered}
+	signaler.Done(ctx, result)
+	return result, nil
+}
+
+func (d *recordingDelivery) Remove(_ context.Context, _ domain.TargetInfo, _ domain.DeliveryID, _ *domain.DeliverySignaler) error {
+	return nil
+}
+
+func TestOrchestration_ResourceTypeFiltering_MixedManifestsFilteredPerTarget(t *testing.T) {
+	store, _ := setupStore(t)
+
+	deploymentID := domain.DeploymentID("rt-mixed")
+	seedDeployment(t, store, domain.Deployment{
+		ID: deploymentID,
+		ManifestStrategy: domain.ManifestStrategySpec{
+			Type: domain.ManifestStrategyInline,
+			Manifests: []domain.Manifest{
+				{ResourceType: "api.kind.cluster", Raw: json.RawMessage(`{"name":"c1"}`)},
+				{ResourceType: "kubernetes", Raw: json.RawMessage(`{"kind":"ConfigMap"}`)},
+			},
+		},
+		PlacementStrategy: domain.PlacementStrategySpec{
+			Type: domain.PlacementStrategyAll,
+		},
+		State: domain.DeploymentStateCreating,
+	})
+
+	pool := []domain.TargetInfo{
+		{ID: "kind-target", Name: "Kind", Type: "kind", AcceptedResourceTypes: []domain.ResourceType{"api.kind.cluster"}},
+		{ID: "k8s-target", Name: "K8s", Type: "kubernetes", AcceptedResourceTypes: []domain.ResourceType{"kubernetes"}},
+	}
+	seedTargets(t, store, pool...)
+
+	events := make(chan domain.DeploymentEvent, 16)
+	reg := &stubRegistry{events: events}
+
+	rec := &singleEventRecord{
+		ctx:    context.Background(),
+		event:  domain.DeploymentEvent{Delete: true},
+		events: events,
+	}
+
+	delivery := &recordingDelivery{}
+	wf := &domain.OrchestrationWorkflowSpec{
+		Store:      store,
+		Delivery:   delivery,
+		Strategies: domain.DefaultStrategyFactory{},
+		Registry:   reg,
+	}
+
+	_, err := wf.Run(rec, deploymentID)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	kindManifests := delivery.delivered["kind-target"]
+	if len(kindManifests) != 1 {
+		t.Fatalf("kind-target: expected 1 manifest, got %d", len(kindManifests))
+	}
+	if kindManifests[0].ResourceType != "api.kind.cluster" {
+		t.Errorf("kind-target: expected api.kind.cluster, got %s", kindManifests[0].ResourceType)
+	}
+
+	k8sManifests := delivery.delivered["k8s-target"]
+	if len(k8sManifests) != 1 {
+		t.Fatalf("k8s-target: expected 1 manifest, got %d", len(k8sManifests))
+	}
+	if k8sManifests[0].ResourceType != "kubernetes" {
+		t.Errorf("k8s-target: expected kubernetes, got %s", k8sManifests[0].ResourceType)
+	}
+}
