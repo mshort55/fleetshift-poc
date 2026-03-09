@@ -1077,6 +1077,22 @@ One built-in type: `immediate` (default). Non-trivial rollout (batching, staged 
 
 **Context:** KubeFleet has no built-in rollback -- operators manually stop the update run and fix the CRP. The `Rollback` endpoint is a FleetShift addition. The question is whether safety (staged rollback) or speed (immediate rollback) is the better default. A staged rollback is safer (if the rollback itself has bugs, canary catches it) but slower (the whole point of rollback is "fix it fast"). Leaning toward immediate rollback by default with an optional `"paced": true` flag that uses the deployment's rollout strategy.
 
+### Delivery-agent rollback mechanics
+
+**Question:** Does the delivery contract need a target-side rollback concept, or is re-delivering the previous manifest set sufficient for all target types?
+
+**Context:** The existing rollback discussion (rollback pacing above, task failure contract below) addresses orchestration: which targets to roll back and how fast. What it doesn't address is what happens on a single target when the platform says "roll back." The current implied model is purely declarative re-delivery -- the platform sends the previous manifest set and the delivery agent applies it like any other delivery. For Kubernetes targets using Server-Side Apply with pruning, this is likely sufficient: SSA converges on the old state, pruning removes resources that only existed in the new set.
+
+The question is whether addon-registered targets with external side-effects (provisioning, certificate issuance, SaaS registrations) need something richer -- a way for the delivery agent to capture what it did at apply time and later reverse it with the platform's cooperation.
+
+**One possible shape -- rollback ticket:** The delivery acknowledgment could optionally include an opaque, agent-produced token (a "rollback ticket") that the platform stores alongside the delivery record. On rollback, the platform passes the ticket back to the delivery agent, which interprets it and performs the reversal. The platform never inspects the ticket; the agent owns the semantics. This is similar to how `DeliveryResult` already carries structured outputs (`ProvisionedTargets`, `ProducedSecrets`) -- the ticket would be another agent-produced artifact the platform holds on behalf of the agent.
+
+Sub-questions if this direction has merit:
+
+- **Validation and rejection.** Can the agent refuse a rollback (target has drifted, reversal is unsafe, operation is unsupported for this target type)? What does the platform do with a rejection -- surface it to the user, fall back to re-delivery, fail the rollback step?
+- **Ticket lifecycle.** Does each delivery produce a new ticket, invalidating the previous one? Can intermediate deliveries make earlier tickets stale? Is there a stack of rollback points or only the most recent delivery?
+- **Whether this belongs in the delivery contract at all.** The platform always knows the previous manifest set and can re-deliver it. Rollback might be entirely a platform-side concern. The question is whether there are realistic target types where the platform's knowledge is insufficient and agent cooperation is required to reverse a delivery safely.
+
 ### Task failure contract
 
 **Question:** When a rollout strategy's task evaluation callback returns a failure, should the platform (a) pause the rollout and wait for manual intervention, (b) automatically trigger rollback, or (c) let the strategy specify the failure policy per task?
