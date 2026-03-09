@@ -12,9 +12,9 @@ The management plane decomposes every deployment into three orthogonal, pluggabl
 Deployment = ManifestStrategy × PlacementStrategy × RolloutStrategy
 ```
 
-- **ManifestStrategy** -- "what to deploy." Could be an addon-provided `ManifestGenerator` callback, raw inline manifests, a template with per-target substitution, a git ref, or an OCI artifact. "Manifest" is used generically throughout this document -- it means any declarative payload: Kubernetes YAML, platform API objects, addon configuration documents, or provisioning specifications. Extensible.
-- **PlacementStrategy** -- "where it goes." Could be a label selector, a static target list, "all targets in scope," a scored strategy that ranks and selects targets by dynamic metrics, or `local` (the platform itself). Extensible. Placement strategies are not just filters -- they can rank, sort, and select a top-N subset. Complex strategies can be stateful, maintaining their own scoring pipelines and signaling the platform to re-resolve when their output would change.
-- **RolloutStrategy** -- "how fast and in what order." Could be immediate (all at once), rolling (batches of N), or staged (named stages with gates, approvals, health checks, and deployment health dependencies). Extensible.
+- **ManifestStrategy** -- "what to deploy." The platform provides built-in convenience types (`inline`, `template`) for simple cases. Non-trivial manifest generation is addon-driven: the addon registers a `ManifestGenerator` callback that the platform invokes through the addon integration model (section 8). "Manifest" is used generically throughout this document -- it means any declarative payload: Kubernetes YAML, platform API objects, addon configuration documents, or provisioning specifications.
+- **PlacementStrategy** -- "where it goes." The platform provides built-in types for static selection (`selector`, `static`, `all`, `local`). Non-trivial placement -- scored ranking, capacity-aware binpacking -- is addon-driven. Placement strategies are not just filters; they can rank, sort, and select a top-N subset.
+- **RolloutStrategy** -- "how fast and in what order." The platform provides a single built-in type (`immediate` -- all at once). Non-trivial rollout -- batching, gating, staged progression -- is addon-driven.
 
 What you deploy can be a function of where it goes -- the manifest strategy receives `TargetInfo` for per-target customization. How fast you roll it out is independent of both -- the rollout strategy governs pacing and safety without knowing what is being deployed or how targets were selected.
 
@@ -27,24 +27,22 @@ graph TB
     end
 
     subgraph manifestTypes [Manifest Strategy Types]
-        addonStrategy["addon: capability ManifestGenerator"]
-        inlineStrategy["inline: raw manifests"]
-        templateStrategy["template: parameterized"]
-        gitStrategy["git / oci (future)"]
+        inlineStrategy["inline: raw manifests (built-in)"]
+        templateStrategy["template: parameterized (built-in)"]
+        addonStrategy["addon: ManifestGenerator (addon-driven)"]
     end
 
     subgraph placementTypes [Placement Strategy Types]
-        selectorStrategy["selector: label-based filter"]
-        staticStrategy["static: explicit target list"]
-        allStrategy["all: every target in scope"]
-        scoredStrategy["scored: rank by metrics, select top N"]
-        localStrategy["local: the platform itself"]
+        selectorStrategy["selector: label-based filter (built-in)"]
+        staticStrategy["static: explicit target list (built-in)"]
+        allStrategy["all: every target in scope (built-in)"]
+        localStrategy["local: the platform itself (built-in)"]
+        scoredStrategy["scored, capacity-aware, ... (addon-driven)"]
     end
 
     subgraph rolloutTypes [Rollout Strategy Types]
-        immediateStrategy["immediate: all at once (default)"]
-        rollingStrategy["rolling: batches of N"]
-        stagedStrategy["staged: named stages with gates"]
+        immediateStrategy["immediate: all at once (built-in)"]
+        addonRollout["rolling, staged, ... (addon-driven)"]
     end
 
     manifestSpec --> manifestTypes
@@ -58,7 +56,7 @@ graph TB
         generate["4. Generate manifests per target in batch"]
         deliver["5. Deliver via fleetlet"]
         diff["6. Diff + apply"]
-        gate["7. Execute batch gates (wait/approval/health)"]
+        gate["7. Evaluate step tasks (via rollout strategy)"]
     end
 
     placementTypes --> resolve
@@ -122,6 +120,7 @@ graph LR
 
 ### Manifest strategy types
 
+`inline` and `template` are built-in convenience types. The `addon` type is the primary model -- non-trivial manifest generation runs out-of-process through the addon integration model (section 8).
 
 | Type       | Source                                               | What triggers re-generation       |
 | ---------- | ---------------------------------------------------- | --------------------------------- |
@@ -132,6 +131,7 @@ graph LR
 
 ### Placement strategy types
 
+The built-in types cover static selection. Non-trivial placement (scored ranking, capacity-aware binpacking) is addon-driven: the addon maintains its own data sources and implements `PlacementStrategy` through the addon integration model (section 8).
 
 | Type       | Resolution                                                | What triggers re-evaluation                    |
 | ---------- | --------------------------------------------------------- | ---------------------------------------------- |
@@ -143,23 +143,11 @@ graph LR
 
 ### Rollout strategy types
 
+`immediate` is the sole built-in rollout strategy. Non-trivial rollout -- batching, gating, staged progression, disruption budgets -- is addon-driven through the addon integration model (section 8).
 
-| Type        | Behavior                                                                                            | What triggers progression                                                    |
-| ----------- | --------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------- |
-| `immediate` | All targets receive changes simultaneously (default)                                                | N/A -- single batch, no gates                                                |
-| `rolling`   | Targets are updated in batches of N (absolute or percentage), proceeding when each batch succeeds   | Batch completion (all targets in batch report Applied/Available)             |
-| `staged`    | Named stages with label selectors, concurrency limits, and explicit gates (wait, approval, health)  | Gate clearance: timed wait expires, approval granted, or health check passes |
-
-A staged rollout supports several gate types within its stages:
-
-| Stage Gate Type      | Behavior                                                                                          |
-| -------------------- | ------------------------------------------------------------------------------------------------- |
-| `wait`               | Pauses for a fixed duration before proceeding                                                     |
-| `approval`           | Waits for an external approval signal                                                             |
-| `health`             | Waits until all targets in the stage report healthy                                               |
-| `deploymentHealth`   | Waits until a named sibling or child deployment reports healthy for a configurable stable duration |
-
-The `deploymentHealth` gate enables choreography between related deployments without a centralized DAG engine. A database deployment can use a staged rollout where the first stage rolls out the database and the second stage gates on the API deployment's health — or vice versa. This composes with `DeploymentGroup` (section 3) for multi-component application orchestration.
+| Type        | Behavior                                                             | What triggers progression    |
+| ----------- | -------------------------------------------------------------------- | ---------------------------- |
+| `immediate` | All targets receive changes simultaneously (default)                 | N/A -- single batch, no gates |
 
 ### Declarative placement and safety
 
@@ -222,11 +210,11 @@ The platform's orchestration pipeline is always the same regardless of which str
 
 1. Resolve the placement strategy against the workspace's target pool → target set
 2. Compute the delta against the previous target set → added, removed, unchanged
-3. Plan the rollout: pass the delta to the rollout strategy → ordered batches with gates
+3. Plan the rollout: pass the delta to the rollout strategy → ordered steps with tasks
 4. For each batch, for each target, call the manifest strategy's `Generate(gctx)` → manifests
 5. Deliver manifests to the target through its delivery agent
 6. Diff against previous state; add, update, or remove as needed
-7. Execute the batch's after-tasks (timed wait, health check, deployment health, approval gate) before proceeding
+7. Evaluate step tasks by calling back to the rollout strategy before proceeding
 
 ### Workspace target pool
 
@@ -253,24 +241,24 @@ for each deployment in workspace:
             for target in step.remove.targets:
                 deployment.ManifestStrategy.OnRemoved(target)  // when addon-driven
                 remove(target)
-            await_tasks(step.remove.afterTasks)   // optional gates
+            evaluate(step.remove.afterTasks)    // call back to rollout strategy
         if step.deliver:
-            await_tasks(step.deliver.beforeTasks)   // approval, health check
+            evaluate(step.deliver.beforeTasks)  // call back to rollout strategy
             for target in step.deliver.targets (up to step.deliver.maxConcurrency):
                 gctx = GenerateContext{Target: target, Namespace: ..., Config: ...}
                 manifests = deployment.ManifestStrategy.Generate(gctx)
                 if manifests != stored_previous(target):
                     deliver(target, manifests)  // request/response: blocks until delivery agent ACK
-            await_tasks(step.deliver.afterTasks)    // timed wait, health check, deployment health, approval
+            evaluate(step.deliver.afterTasks)   // call back to rollout strategy
 ```
 
-The rollout strategy returns a single ordered sequence of steps; each step is either remove (from no-longer-placed targets) or deliver (generate and apply to targets). The orchestrator runs steps in order: "Is this a remove? Remove. Is this a deliver? Deliver." Removals are thus part of the plan and can be paced or gated (e.g. staged teardown, approval before removing from production). A strategy that wants "immediate removal" emits one remove step with all departed targets first, then deliver steps (e.g. `ImmediateRollout`: one remove step, one deliver step).
+The rollout strategy returns a single ordered sequence of steps; each step is either remove (from no-longer-placed targets) or deliver (generate and apply to targets). Each step can include before-tasks and after-tasks; when the platform encounters a task, it calls back to the rollout strategy to evaluate it (which may involve RPCs to an addon for health checks, approval gates, timed waits, etc.). The orchestrator runs steps in order. Removals are part of the plan and can be paced or gated. A strategy that wants "immediate removal" emits one remove step with all departed targets first, then one deliver step (the built-in `immediate` strategy).
 
 **Two-phase manifest diffing:** Manifest diffing is two-phase: (1) the platform compares the new generated output against the stored previous output per deployment per target -- if identical, it skips delivery entirely (no network call); (2) when a change is detected, the platform sends the full new manifest payload to the target's delivery agent. For Kubernetes targets, the delivery agent applies using Server-Side Apply, which handles merging platform-owned fields with target-side mutations (HPAs, admission controllers) without overwriting unmanaged fields. Other target types implement their own apply semantics.
 
 **Delivery is request/response, not fire-and-forget.** Each delivery step (sending manifests to a target via its delivery agent) is a correlated request/response interaction. The delivery agent acknowledges receipt and application (or returns an error). The orchestration step blocks until the ACK arrives. If the connection drops mid-delivery, the RPC fails and the durable engine retries the step. Idempotent apply (Server-Side Apply for K8s targets, equivalent for others) gives at-least-once delivery guarantees without a separate acknowledgment protocol -- the guarantee falls out of RPC semantics + durable execution + idempotent apply.
 
-**Durable execution.** The orchestration pipeline uses durable execution semantics (e.g., DBOS, Temporal, or equivalent). Each step -- Resolve, Plan, Generate, deliver, gate evaluation -- is persisted before execution. If the platform crashes mid-rollout, execution resumes from the last completed step. All strategy interfaces must be **safe for at-least-once invocation**. The durable engine may replay any step. The constraint is narrower: **any side effects must be idempotent.** If `Generate` mutates external state (registers in a SaaS database, issues a certificate), repeating that mutation must be safe. `OnRemoved` must be traditionally idempotent -- calling it twice for the same target must not double-delete or error.
+**Durable execution.** The orchestration pipeline uses durable execution semantics (e.g., DBOS, Temporal, or equivalent). Each step -- Resolve, Plan, Generate, deliver, task evaluation -- is persisted before execution. If the platform crashes mid-rollout, execution resumes from the last completed step. All strategy interfaces must be **safe for at-least-once invocation**. The durable engine may replay any step. The constraint is narrower: **any side effects must be idempotent.** If `Generate` mutates external state (registers in a SaaS database, issues a certificate), repeating that mutation must be safe. `OnRemoved` must be traditionally idempotent -- calling it twice for the same target must not double-delete or error.
 
 ---
 
@@ -292,31 +280,19 @@ A strategy-initiated signal re-runs only that strategy and its downstream effect
 
 - **Placement-driven**: the placement strategy's resolved target set changes. The rollout strategy's plan includes both remove steps (for departed targets) and deliver steps (for new and unchanged targets). The platform runs the plan in order; the manifest strategy is not involved in removal — the platform handles cleanup. The rollout strategy governs pacing and gates for both removals and deliveries.
 - **Manifest-driven**: the manifest source changes. The platform re-calls the manifest strategy's Generate for all currently-placed targets, diffs against previous manifests, and delivers only the changes. The rollout strategy governs the pacing -- a staged rollout means canary targets get updated first.
-- **Rollout-driven**: a gate clears (approval granted, timed wait expires, health check passes, deployment health satisfied). The platform advances to the next batch in the rollout plan and continues delivery. If a gate fails (health check reports degraded targets), the platform pauses and optionally triggers rollback.
+- **Rollout-driven**: a task completes (the rollout strategy signals that a step task has been satisfied). The platform advances to the next step in the rollout plan and continues delivery. If a task fails, the platform pauses and optionally triggers rollback.
 
-**Rollout is categorically different.** The rollout strategy is a temporal process, not a function that produces a result to recompute. A gate clearing (approval granted, timer expires, health check passes) is the rollout *progressing* -- it's normal operation, not invalidation. There is no stale rollout result to recompute. If the user changes the rollout strategy spec, it governs the *next* rollout (the next placement or manifest change that triggers delivery), not the current in-flight rollout retroactively.
+**Rollout is categorically different.** The rollout strategy is a temporal process, not a function that produces a result to recompute. A task completing is the rollout *progressing* -- it's normal operation, not invalidation. There is no stale rollout result to recompute. If the user changes the rollout strategy spec, it governs the *next* rollout (the next placement or manifest change that triggers delivery), not the current in-flight rollout retroactively.
 
 ---
 
 ## 4. Rollout strategies
 
-The rollout strategy's `Plan(delta)` returns an ordered sequence of **steps**; each step is either **remove** (from departed targets) or **deliver** (generate and apply to targets). The platform runs steps in order. This unified model lets a strategy control both removal pacing (e.g. staged teardown, approval before removing from production) and delivery pacing. Default "immediate" behaviour is one remove step (all departed targets) then one deliver step (all added and unchanged).
+The rollout strategy's `Plan(delta)` returns an ordered sequence of **steps**; each step is either **remove** (from departed targets) or **deliver** (generate and apply to targets). Steps can include before-tasks and after-tasks; when the platform encounters a task, it calls back to the rollout strategy to evaluate it. The platform runs steps in order. This unified model lets a strategy control both removal pacing and delivery pacing.
 
-For `immediate`, the platform delivers to all resolved targets in parallel with no ordering or gating. This is the default when no rollout strategy is specified. For `rolling`, the platform partitions the resolved targets into batches of the configured size and proceeds to the next batch only when the current batch reports healthy. For `staged`, the user defines an ordered list of named stages, each selecting a subset of the resolved targets by label. Stages execute sequentially. Within a stage, targets are updated up to `maxConcurrency` at a time. Between stages, configurable gates control progression.
+The built-in `immediate` strategy emits one remove step (all departed targets) then one deliver step (all added and unchanged), with no tasks. The platform delivers to all resolved targets in parallel. This is the default when no rollout strategy is specified.
 
-**Stage gates** are the mechanism for progressive delivery safety:
-
-- **TimedWait**: pause for a fixed duration after a stage completes before advancing. Useful for bake time -- "wait 10 minutes after canary before proceeding to production."
-- **Approval**: pause until an explicit approval signal is received. The platform creates an approval request; a human (or automation) approves it via the API. Useful for change-control workflows.
-- **HealthCheck**: pause until all targets in the completed stage report healthy for a sustained period. The platform queries `DeliveryStatusService` and waits for `Available=True` to hold for the configured `stableDuration`. This is the key advantage over blind timers -- the platform uses real delivery health signals, not wall-clock guesses.
-
-Gates can appear as `beforeStageTasks` (executed before a stage starts, e.g., an approval gate before touching production) or `afterStageTasks` (executed after a stage completes, e.g., a health check bake period).
-
-**Disruption budget**: the rollout strategy spec includes optional `minAvailable` and `maxUnavailable` constraints. These are fleet-level PDB equivalents -- they limit how many targets can be simultaneously receiving updates (not yet reporting Available) at any point during the rollout. The platform enforces these constraints across all stages. If honoring the constraint would prevent progress (e.g., `minAvailable: 90%` but the next stage contains 20% of the fleet), the platform reports a conflict on the deployment status.
-
-**Pause and resume**: any active rollout can be paused by PATCHing the deployment with `rolloutState: paused`. The platform stops advancing to new batches but does not interrupt in-progress deliveries. Resuming is `rolloutState: running`. This provides the manual override that operators need during incidents without requiring separate CRD objects.
-
-These capabilities are differentiators over KubeFleet and OCM: health-check gates use real delivery status instead of blind timers; approval is a single API call instead of a CRD patch; disruption budgets are inline instead of a separate CRD; the rollout strategy is orthogonal to what is deployed and where.
+Non-trivial rollout -- batching, staged progression, task evaluation (health checks, approvals, timed waits), disruption budgets -- is addon-driven. Addon-provided rollout strategies implement the same `Plan(delta) -> steps` contract and run through the addon integration model (section 8). The platform's step executor is agnostic to how the plan was produced; task evaluation callbacks may involve RPCs to the addon.
 
 ---
 
@@ -339,7 +315,7 @@ The parent deployment targets the platform. Its manifest is a DeploymentGroup do
 
 ### Sequencing and health rollup
 
-The DeploymentGroup spec defines a sequence of steps. Each step references one or more child deployments. Steps execute in order; a step does not begin until all deployments in the previous step report healthy. This is the internal choreography — it composes with the `deploymentHealth` stage gate for cross-deployment dependencies that span different deployment groups.
+The DeploymentGroup spec defines a sequence of steps. Each step references one or more child deployments. Steps execute in order; a step does not begin until all deployments in the previous step report healthy. This is the internal choreography -- for cross-deployment dependencies that span different deployment groups, addon-driven rollout strategies can implement tasks that gate on sibling deployment health.
 
 ```
 deploymentGroup:
@@ -676,20 +652,26 @@ Dropping multi-tenancy eliminates: tenant ID threading through every code path, 
 
 ### Addon surface
 
-For addons (like MCOA), the surface remains minimal:
+All three strategy axes -- manifest, placement, and rollout -- are addon-extensible through the same integration model. The platform provides trivial built-in strategies (section 1); non-trivial logic is implemented by addons.
 
-1. **Register** a capability with a `ManifestGenerator` callback (this becomes one type of manifest strategy)
+For **manifest strategies**, the addon surface is:
+
+1. **Register** a capability with a `ManifestGenerator` callback (this becomes the `addon` manifest strategy type)
 2. **Invalidate** manifests when internal state changes (config, certs, etc.)
 3. **Generate** manifests when called by the platform
 
-The `ManifestGenerator` runs wherever the addon is deployed. The platform communicates with it through a **fleetlet channel** (the addon connects to its local fleetlet, the fleetlet connects to the platform). This decouples where the addon runs from where manifests get deployed -- the addon has zero coupling to the platform's infrastructure.
+For **placement strategies**, the addon implements `PlacementStrategy` (`Resolve(pool) -> targets`). A scored placement addon, for example, maintains its own scoring pipeline and signals the platform to re-resolve when scores shift.
+
+For **rollout strategies**, the addon implements `RolloutStrategy` (`Plan(delta) -> steps`). Steps can include tasks; when the platform encounters a task, it calls back to the strategy to evaluate it (health checks, approval gates, timed waits, etc.). Addon-driven rollout strategies can implement batching, staged progression, disruption budgets, or any custom sequencing logic.
+
+Strategy implementations run wherever the addon is deployed. The platform communicates with them through a **fleetlet channel** (the addon connects to its local fleetlet, the fleetlet connects to the platform). This decouples where the addon runs from where its strategy is used -- the addon has zero coupling to the platform's infrastructure.
 
 ### Transport options
 
-Three transport options exist for how the platform reaches the generator:
+Three transport options exist for how the platform reaches addon-provided strategy implementations:
 
-1. **In-process**: the Go `ManifestGenerator` interface is passed directly during `Register`. No network hop.
-2. **Fleetlet channel** (production): the addon registers with a `channel` identifier. The platform sends Generate requests through the fleetlet on the target where the addon runs. The addon connects to its local fleetlet via Unix socket / gRPC. This is the primary production transport for network-separated deployments.
+1. **In-process**: the Go strategy interface is passed directly during `Register`. No network hop.
+2. **Fleetlet channel** (production): the addon registers with a `channel` identifier. The platform sends requests through the fleetlet on the target where the addon runs. The addon connects to its local fleetlet via Unix socket / gRPC. This is the primary production transport for network-separated deployments.
 3. **Direct HTTP**: the addon provides a `callbackUrl`. Useful for addons reachable via HTTP directly.
 
 ### InvalidateManifests rationale
@@ -1085,9 +1067,9 @@ These are genuinely undecided design points. Established design decisions have b
 
 **Decision:** Rollout is a third strategy axis on deployments. `Deployment = ManifestStrategy × PlacementStrategy × RolloutStrategy`.
 
-Three built-in types: `immediate` (default), `rolling`, and `staged`. Staged rollouts support named stages with label selectors, concurrency limits, and gates (timed wait, approval, health check). Disruption budgets (`minAvailable` / `maxUnavailable`) are constraints on the rollout strategy spec. Pause/resume and rollback are first-class operations on the deployment.
+One built-in type: `immediate` (default). Non-trivial rollout (batching, staged progression, gates, disruption budgets) is addon-driven through the same integration model as manifest and placement strategies. Pause/resume and rollback are first-class operations on the deployment.
 
-**Rationale:** Comparison with KubeFleet's `ClusterStagedUpdateRun` / `ClusterStagedUpdateStrategy` / `ClusterApprovalRequest` / `ClusterResourcePlacementDisruptionBudget` CRD graph shows that the same (or greater) richness can be achieved with a single strategy axis integrated into the deployment spec. Key advantages over KubeFleet's model: (1) no separate CRD graph to manage, (2) health-check gates use real delivery status instead of blind timers, (3) approval is a single API call instead of a CRD patch, (4) disruption budgets are inline instead of a separate CRD, (5) the rollout strategy is orthogonal to what is deployed and where, enabling composition.
+**Rationale:** A single strategy axis integrated into the deployment spec, with the addon integration model providing extensibility, avoids the CRD graph complexity seen in KubeFleet (`ClusterStagedUpdateRun` / `ClusterStagedUpdateStrategy` / `ClusterApprovalRequest` / `ClusterResourcePlacementDisruptionBudget`). The rollout strategy is orthogonal to what is deployed and where, enabling composition.
 
 ### Rollback pacing
 
@@ -1095,27 +1077,27 @@ Three built-in types: `immediate` (default), `rolling`, and `staged`. Staged rol
 
 **Context:** KubeFleet has no built-in rollback -- operators manually stop the update run and fix the CRP. The `Rollback` endpoint is a FleetShift addition. The question is whether safety (staged rollback) or speed (immediate rollback) is the better default. A staged rollback is safer (if the rollback itself has bugs, canary catches it) but slower (the whole point of rollback is "fix it fast"). Leaning toward immediate rollback by default with an optional `"paced": true` flag that uses the deployment's rollout strategy.
 
-### Health-check failure policy
+### Task failure contract
 
-**Question:** When a health-check gate fails (targets in a completed stage report Degraded during the `stableDuration` window), should the platform (a) pause the rollout and wait for manual intervention, (b) automatically trigger rollback, or (c) make this configurable per stage?
+**Question:** When a rollout strategy's task evaluation callback returns a failure, should the platform (a) pause the rollout and wait for manual intervention, (b) automatically trigger rollback, or (c) let the strategy specify the failure policy per task?
 
-**Leaning:** Configurable per stage. A `failurePolicy` field on `StageTask` with values `pause` (default) or `rollback`. Pause is safer for production stages where an operator should investigate before undoing changes. Automatic rollback is useful for canary stages where the intent is "if canary breaks, revert immediately."
+**Leaning:** The strategy specifies a failure policy per task (pause or rollback). The platform enforces it. This keeps failure semantics addon-driven while giving the platform a generic contract.
 
-### Health-check definition
+### Delivery status signals for strategy addons
 
-**Question:** What exactly constitutes "healthy" for a health-check gate? Is it purely `DeliveryStatus.Available = True`, or should it also consider addon-reported signals (e.g., the deployed PrometheusAgent is actually scraping successfully)?
+**Question:** What delivery status signals does the platform expose for rollout strategy addons to use in task evaluation? Is it purely `DeliveryStatus.Available = True`, or should it also include addon-reported health signals?
 
-**Context:** `DeliveryStatusService.Status` reports `Applied` and `Available` conditions based on the fleetlet's local observation of manifest application. This covers "the Deployment exists and has ready pods" but not "the application is actually working." Richer health checks (HTTP probes against the deployed workload, metric thresholds) would require an extensible health-check model. Leaning toward `Available = True` as the built-in check, with a future extension point for custom health-check plugins.
+**Context:** `DeliveryStatusService.Status` reports `Applied` and `Available` conditions based on the fleetlet's local observation of manifest application. This covers "the Deployment exists and has ready pods" but not "the application is actually working." Richer signals (addon-reported health, HTTP probe results, metric thresholds) would expand what rollout strategy addons can gate on. Leaning toward `Available = True` as the baseline, with addon-reported signals available for strategies that need them.
 
 ### In-flight rollout collision
 
-**Question:** What happens when `InvalidateManifests` fires while a staged rollout is in progress? Does the platform supersede the current rollout and restart from stage 1? Push new manifests only to remaining stages? Something else?
+**Question:** What happens when `InvalidateManifests` fires while a rollout is in progress? Does the platform supersede the current rollout and restart? Push new manifests only to remaining steps? Something else?
 
 **Context:** The doc currently says "If the user changes the rollout strategy spec, it governs the next rollout" but doesn't address manifest invalidation during an in-flight rollout. This is a hard state-machine problem that needs careful design.
 
 ### Generation failures and rollout interaction
 
-**Question:** How do `Generate` failures for specific targets interact with the rollout? `Generate` is called per-target inside the batch loop. If it fails for a target, that target never enters the delivery pipeline. Should the platform skip the target and continue the batch? Block the batch until retry succeeds? Fail the batch entirely? How does this interact with rollout strategy implementations that use health checks or disruption constraints in their `AfterTasks`?
+**Question:** How do `Generate` failures for specific targets interact with the rollout? `Generate` is called per-target inside the batch loop. If it fails for a target, that target never enters the delivery pipeline. Should the platform skip the target and continue the batch? Block the batch until retry succeeds? Fail the batch entirely? How does this interact with the rollout strategy's task evaluation callbacks?
 
 **Context:** The existing "ManifestGenerator error handling" open question covers retry policy but doesn't address how failures propagate through the rollout batch execution.
 
