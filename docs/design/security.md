@@ -8,31 +8,20 @@ Principles:
 
 ## Target credential model
 
-The delivery target plugin gets a say in what credential presentation it should get. So if its a k8s agent, it needs the user's ID token. etc.
+The delivery target plugin declares what credential presentation it needs; the platform should not hard-code one token type for every target.
 
-How does this work for the service account delegation discussed later? The delivery agent in this case knows to call the token request. Its input is only identity information about the user.
+Typical contracts:
 
-Other reasonable contracts could be "give me the access token" or "I need an access token for X" (so we try to token exchange if we can, for example).
+- K8s API apply/proxy: pass through the user's token when the target directly trusts the tenant IdP.
+- AWS: ask for an ID token or SAML assertion, then `AssumeRoleWith*Identity` -> SigV4.
+- GCP: ask for an ID token, then token exchange -> GCP token.
+- Other targets: ask for "an access token for X" and let the delivery agent perform whatever target-specific exchange is needed.
 
-For APIs that leverage federation, the delivery agent handles:
+If the durability model is delegation SAs, the delivery agent derives or requests the delegated credential from user-linked identity/provenance rather than a platform-global secret.
 
-- AWS: Ask for ID token or SAML assertion. AssumeRoleWith*Identity -> sigv4
-- GCP: Ask for ID token, token exchange -> GCP token
-- etc...
+If we control the target's auth stack (for example, a Kubernetes distribution we customize), it is even better to validate access tokens and scopes/resource indicators directly rather than relying only on ID tokens. Vault-backed service-account credentials are a last resort; prefer credentials derived from the end user.
 
-As a fall back these agents could get vault credentials for a service account perhaps, but we want to work off the end user.
-
-## Doable
-
-- We can definitely use the ID token end to end, assuming a common IdP trust and reused client IDs across clusters and the platform. This works for synchronous / short run operations, limited by token lifespan.
-- We can definitely query inventory and do platform-side operations securely
-- We can sync RBAC on the platform side to kubernetes, assuming we use the user's identity to establish RBAC in the managed cluster. This requires we bootstrap new clusters with the right privileges.
-- We can run deployments for as long as we have a token. We can pause deployments waiting for reapproval.
-
-## Things you could do if you can customize the target (e.g. kube distro)
-
-- Validate access tokens instead of ID tokens
-- Take into account access token scope (or beyond, resource identifiers, etc)
+Not every operation has to cross the delivery boundary. Inventory queries and other platform-side operations are the easy secure case: they can be authorized, audited, and scoped entirely within the platform without any of the long-running or cross-target credential mechanics discussed below.
 
 ## Challenges
 
@@ -46,15 +35,15 @@ As a fall back these agents could get vault credentials for a service account pe
 
 ## Bootstrapping targets
 
-When targets (e.g. clusters) are bootstrapped we may necessarily have elevated privileges at that point for that target (e.g. a kubeconfig or a privileged user). Under that identity we assume we can bootstrap other configs like RBAC syncing. These could perhaps be their own deployments or part of the cluster deployment itself.
+When targets (e.g. clusters) are bootstrapped, some elevated privilege is unavoidable (for example, a kubeconfig or a privileged user). That privilege can bootstrap RBAC syncing and related setup, whether those are their own deployments or part of the cluster deployment itself.
 
-For the delegation SA model, bootstrapping also provisions the platform's own identity in the cluster. Its service account may get tight impersonation permissions (to impersonate delegate SAs). This is the one piece of unavoidable platform trust, but it's scoped and auditable.
+For the delegation SA model, bootstrapping also provisions the platform's own identity in the cluster. Its service account may get narrow impersonation permissions (to impersonate delegate SAs). This places trust in the platform, but it is scoped and auditable. We may not need this model.
 
-Critically, bootstrapping must not give the platform **ongoing** authority over IdP trust configuration at the target. Elevated privileges during bootstrap are acceptable because they're time-bounded and observable. But if the platform retains the ability to reconfigure which IdP the target trusts, then a platform compromise can redirect trust and forge identity — defeating all downstream verification. The platform's runtime credentials at a target should be scoped to workload operations, not authentication configuration.
+Critically, bootstrapping must not give the platform **ongoing** authority over IdP trust configuration at the target. Elevated privileges during bootstrap are acceptable because they are time-bounded and observable. But if the platform retains the ability to reconfigure which IdP the target trusts, then a platform compromise can redirect trust and forge identity — defeating all downstream verification. The platform's runtime credentials at a target should be scoped to workload operations, not authentication configuration. Any bootstrap or proxy path that relies on a privileged kubeconfig should be retired, rotated, or otherwise narrowed as soon as possible, and must not become the authority over target trust configuration.
 
 ## Distributing trust anchors
 
-Anything that verifies credentials has to have a trust root. Configuring this trust root over time must itself require something that ties back to that trust root. So if you are using OIDC, you can only change the issuer if you have OIDC credentials from the current issuer.
+Anything that verifies credentials has to have a trust root. Updating that trust root must itself require credentials that chain back to the current root. For OIDC, changing the issuer should require credentials from the current issuer, except for an explicit break-glass path.
 
 ### Why the tenant IdP is the right root
 
@@ -91,15 +80,22 @@ The platform frequently acts as an intermediary between a user and a target wher
 - **Time**: long-running rollouts outlive the user's token. The authorization must persist beyond the token's validity window.
 - **Space**: in provider delivery, the authorization must cross a trust boundary the user doesn't span directly. The user is behind the curtain with no direct authority at the factory cluster. See provider_consumer_model.md for the full provider/consumer/factory topology.
 
-Both require the platform to carry proof of the user's intent to a place or moment where the user can't present it themselves. The mechanisms below apply to both — though some (token passthrough, delegation SAs) only work when the user has direct authority at the target (no separation or intermediary in "space"), while the JWT-embedded provenance chain and signed intent models work across both dimensions.
+Both require the platform to carry proof of the user's intent to a place or moment where the user can't present it themselves. The durability modes below fall into two families:
+
+- **Run-as-you**: the target sees the user's live identity (`token passthrough`, or `refresh tokens` when the IdP can safely mint fresh ones).
+- **Run-as-platform/delegate**: the target sees a platform or delegated identity, but the operation carries proof of which user authorized it (`accepted initial authorization`, `delegation SAs`, `signed intent`).
+
+Some modes only work when the user already has direct authority at the target; others carry proof across that boundary.
+
+### Common fallback: PausedAuth and CIBA
+
+Whenever credentials are missing, expired, or no longer sufficient, the deployment transitions to `PausedAuth` instead of failing. An authorized user can resume it with fresh approval or fresh credentials. CIBA (Client-Initiated Backchannel Authentication) composes naturally with this: `PausedAuth` is the state ("we need credentials"), and CIBA is one way to obtain them ("prompt the user on another device").
 
 ### Token passthrough (synchronous baseline)
 
-The simplest model: the user's bearer token is passed through to the target. Full end-to-end user identity. Works while the token lives. Not sure if we can avoid storing this or if we can use workflow affinity to try and just use a token in memory.
+The simplest model: the user's bearer token is passed through to the target. Full end-to-end user identity. Works while the token lives. Prefer keeping it in memory only; if replay/recovery requires persistence, treat it as a short-lived credential and handle it accordingly.
 
-When the token expires mid-rollout, or on workflow replay, the deployment transitions to PausedAuth and waits for an authorized user to resume it with a fresh token. Any authorized user can resume – this is approval-gate semantics for free.
-
-PausedAuth is the universal fallback for all credential models: whenever credentials are insufficient, the deployment pauses rather than failing. CIBA (Client-Initiated Backchannel Authentication) composes naturally with PausedAuth: instead of passively waiting for a user to show up, the system actively prompts the user for re-approval on a separate device. PausedAuth is the state ("we need credentials"), CIBA is the mechanism ("reach out to the user").
+When the token expires mid-rollout, or on workflow replay, the deployment transitions to `PausedAuth` and waits for an authorized user to resume it with a fresh token. Any authorized user can resume; this gives approval-gate semantics for free.
 
 ### Accepted initial authorization with ongoing checks
 
@@ -109,9 +105,15 @@ The JWT from the initial request establishes who authorized the operation and wh
 - Re-check permissions when invalidation or other signals arrive — against synced RBAC or the IdP, not the expired JWT.
 - Track user status and permission changes over time (via SCIM/CAEP/SSF) and react accordingly — restricting, pausing, or revoking the operation.
 
-This is the weakest credential model (the JWT is stale), but it's practical for operations where the user is known, the permissions are checkable independently, and the risk of a stale authorization is bounded by the validity limit. Falls back to PausedAuth/CIBA when a check fails.
+This is the weakest credential model (the JWT is stale), but it's practical for operations where the user is known, the permissions are checkable independently, and the risk of stale authorization is bounded by the validity limit. When a check fails, the operation falls back to `PausedAuth`.
 
-This is the same fundamental tradeoff Kubernetes users already accept: `kubectl apply` authorizes at request time, the CR lives on, and the controller reconciles it with a service account — no ongoing verification of the original user's permissions. FleetShift's model is strictly better: the operation carries cryptographic proof of who authorized it (the embedded JWT), there is no god-mode controller service account, and the platform can still do ongoing permission checks and react to changes. We're not asking users to accept a new tradeoff — we're giving them one they already accept, minus the worst parts, with no stored secrets.
+This is similar to the tradeoff Kubernetes users already accept: `kubectl apply` authorizes at request time, the CR lives on, and the controller reconciles it with a service account — no ongoing verification of the original user's permissions. FleetShift's model improves on this: the operation carries cryptographic proof of who authorized it (the embedded JWT), there is no god-mode controller service account, and the platform can still do ongoing permission checks and react to changes.
+
+However, it introduces a tradeoff Kubernetes doesn't have: the platform holds the user's JWT for its validity period. In Kubernetes, the API server sees the token for one API call (milliseconds) and discards it. In FleetShift, the platform can create attestation envelopes pairing the JWT with any operation the user is authorized for — not just the one they requested. This is a token-reuse window that doesn't exist in the standard K8s model. The K8s API server *could* abuse the token during a request, but the window is tiny and the operation is specific. FleetShift's window is the JWT's entire lifetime.
+
+This tradeoff narrows with tighter token binding: RAR (RFC 9396) with a manifest hash closes it entirely (the token is only valid for the specific content the user authorized). Short JWT lifetimes further limit the window. But without content binding, the gap exists and should be acknowledged.
+
+The JWT embedded in the attestation envelope should be encrypted for the target cluster, so that only a privileged cluster-side component (the delivery agent) can decrypt it. This limits exposure: the platform stores and transports the envelope, but can't extract the JWT from delivered envelopes after creation. On the cluster, only the delivery agent's decryption key (provisioned during bootstrap) can access the token for validation.
 
 ### Service accounts specifically for delegation
 
@@ -124,15 +126,15 @@ The provisioning flow is synchronous (while the user is present):
 3. K8s prevents privilege escalation: the RBAC API rejects RoleBinding creation if the user doesn't hold the permissions being bound. The user can only delegate authority they actually have.
 4. User's token is discarded after provisioning. Never stored.
 
-The platform then impersonates the service account using its service account identity. This is a small improvement over TokenRequest:
+The platform then impersonates the service account using its service account identity. This is a small improvement over `TokenRequest`:
 
 - Impersonation is auditable; token request looks indistinguishable from any other actor with the service account
 - There is no additional token that can be used for anything else; that needs to expire, etc.
 
-Ideally: 
+Ideally:
 
 - Something expires these over time
-- When the user's permissions restricts to less than their shadow service accounts, it automatically restricts the permissions of those service accounts
+- When the user's permissions shrink below those of their shadow service accounts, the delegated service accounts are automatically restricted too
 
 You could also "just" create specific service accounts to run workloads that you wanted long-running, with strict permissions. If they ever tried to escape that, the deployment pauses for approval.
 
@@ -153,14 +155,7 @@ Ideally you'd:
 
 Refresh tokens shine when: (a) the IdP supports sender constraints and flexible token exchange (rare in practice), and (b) the targets work well with proper OAuth (access tokens, transaction tokens). For K8s with OIDC auth, delegation SAs are simpler and avoid the stored-secret problem entirely.
 
-#### Run-as-you vs. run-as-platform
-
-Refresh tokens and accepted initial authorization may not be a strict upgrade path (one replacing the other). They could be coexisting credential modes with different trust/convenience tradeoffs:
-
-- **Run-as-you (refresh token):** The platform holds a refresh token and gets fresh tokens as the user. Operations at the target see the user's live identity. Naturally tracks IdP policy over time (user disabled → refresh fails, client permissions revoked → response reflects it). Requires a stored secret. Stronger ongoing guarantees, but higher trust in the platform.
-- **Run-as-platform (initial authorization):** The platform acts under its own identity, carrying the user's initial JWT as proof of authorization. No stored secret beyond the short-lived JWT. Weaker ongoing guarantees (stale authorization), but no long-lived credential exposure.
-
-The choice could be user-driven ("I want this deployment to run as me") or policy-driven — the platform evaluates what the user is allowed to do (which resources, which contexts) and determines the available modes. Which modes a user can select is itself an authorization decision at the platform layer.
+Refresh tokens and accepted initial authorization are not a strict upgrade path where one replaces the other. They are coexisting modes with different trust and convenience tradeoffs. The choice could be user-driven ("I want this deployment to run as me") or policy-driven — the platform evaluates what the user is allowed to do (which resources, which contexts) and determines the available modes. Which modes a user can select is itself an authorization decision at the platform layer.
 
 TODO: The exact policy model is uncertain. The key insight is that these modes have different security properties and operational tradeoffs, and giving users (or administrators) a choice — gated by privilege — may be better than picking one model for all cases.
 
@@ -168,7 +163,7 @@ TODO: The exact policy model is uncertain. The key insight is that these modes h
 
 This is conceptually similar to the above, but means the platform directly impersonates the user. The fundamental problem: K8s impersonation lets the impersonator assert group membership, and K8s has no way to verify those assertions. Even with constrained impersonation (limiting which users can be impersonated via `resourceNames`), the impersonator can claim arbitrary groups for that user. If the platform can impersonate group "admins", it can put any user in that group regardless of their actual membership. These are unverifiable claims about a user.
 
-With token passthrough, the IdP is the authority on claims – groups are in the token, cryptographically signed by the IdP. With impersonation, the platform is the authority. This is a fundamentally weaker trust model for any environment where group-based authorization matters.
+With token passthrough, the IdP is the authority on claims – groups are in the token, cryptographically signed by the IdP. With impersonation, the platform is the authority. This is a fundamentally weaker trust model for any environment where group-based authorization matters. At most it should be a compatibility fallback, not the preferred steady-state model.
 
 ## IdP orchestration
 
@@ -184,36 +179,25 @@ In various scenarios, we could benefit from specific IdP configuration:
 
 ### Long lived authority
 
-This assumes we can store something per user like a scoped refresh token. There are many challenges along this path but technically securable with a sufficiently advanced IdP and configuration.
+This is the GitOps version of "run as the user over time." It assumes the platform stores something per user like a scoped refresh token and later applies with that user's own identity. With a sufficiently advanced IdP and configuration, this is technically securable, but the hard problem is still secure storage and lifecycle of long-lived user credentials.
 
-1. Signed commit establishes authn for a change
-2. User authorizes server to run changes on their behalf w/ scoped token with particular session limits
-3. Applying change runs with user's own identity & applies with their own token
-
-This could have a few models:
-- apply runs under an authorized user for the deployment, but the user's identity is used to authorized a change to the deployment
-- apply runs under the authorized user of the change, regardless of who originally created the deployment
-- apply runs under an authorized user for the deployment, and whether or not the user can edit it is up to git repo <- this is broken
-
-If a change in git is not authorized, what's the feedback loop for that? how do we get back in sync?
-
-One thing that could help matters is if there was a CI check that ran authorization through on the platform level – this could probably catch a lot.
+Open questions remain: which user's authority controls apply when multiple users edit over time, and how unauthorized git changes feed back into the desired state. A CI check that runs platform-side authorization ahead of time could catch a lot.
 
 The bigger challenge is securely storing longer lived credentials. See "Refresh tokens" above.
 
 ### Signed intent
 
-A more promising model: something cluster-side that validates "signed intents" before applying.
+A more promising model is cluster-side validation of signed intent before apply.
 
-1. A manifest in git is accompanied by a signature and a revision (ideally w/ provenance via hash)
-2. The platform delivers attested manifests to the cluster
-3. The cluster-side delivery agent validates the attestation (proof material, user identity, authorization), and applies the constituent manifests only if validation succeeds. See the attestation-based delivery section below for the concrete protocol.
+1. A manifest in git is accompanied by signed proof material and a revision/provenance hash.
+2. The platform delivers the resulting attestation envelope to the cluster.
+3. The cluster-side delivery agent validates the envelope and applies only if validation succeeds. See the attestation-based delivery section below for the concrete protocol.
 
-The original design considered keyless signing (Fulcio/cosign model), where the user proves OIDC identity to a CA and gets a short-lived certificate binding their identity to an ephemeral signing key. This has a central CA problem (see below). The JWT-embedded provenance chain replaces it.
+In this document, the concrete signed-intent mechanism is the JWT-embedded provenance chain below. The earlier keyless-signing idea (Fulcio/cosign) has a central CA problem, so it is not the default.
 
 NOTE: We should revisit this for the case the customer _already has a trusted Fulcio CA_.
 
-The platform's delivery authority is contingent on valid attestations. A compromised platform can deliver attestation envelopes, but without a valid tenant JWT embedded in the envelope, the delivery agent rejects them. The platform can't apply unattested manifests.
+The platform's delivery authority is contingent on valid attestations. It can transport envelopes, but without a valid tenant JWT embedded in the envelope, the delivery agent rejects them.
 
 #### Signed intent beyond GitOps
 
@@ -251,6 +235,8 @@ The residual risk (platform can pair a valid JWT with arbitrary manifest content
 
 The platform key is not a god key — it can only assert integrity, not identity. Its compromise alone cannot authorize anything. It could be scoped per-tenant to further limit blast radius.
 
+This is a bounded short-lived credential retention model, not a long-lived secret model like refresh tokens. The platform may retain a JWT for replay/audit purposes, but the credential expires quickly and is only one factor of two.
+
 Persisting user JWTs to a database (rather than just validating them in-memory per-request) is a deliberate architectural choice. The security question is what happens when the store is compromised. Here, the blast radius is: one user per token, only that user's authorized operations, only within the token's remaining lifetime, and only as one factor of two (the platform signature is also required). Compare to a god-mode service account: any user, any operation, indefinitely, single factor. JWTs should be encrypted at rest and purged after expiry or operation completion.
 
 #### Tightening intent-token binding
@@ -282,7 +268,7 @@ RAR is a published RFC (May 2023). IdP support is growing but not yet universal 
 
 #### Credential durability for long-running operations
 
-The JWT-embedded provenance chain proves "user X authorized this at time T," but the JWT expires shortly after. For long-running operations, the full set of credential durability mechanisms applies — see the long-running rollouts section above. The JWT-embedded model layers cleanly with any of them: accepted initial authorization with ongoing checks as the default, PausedAuth + CIBA as the fallback, refresh tokens or delegation SAs where appropriate.
+The JWT-embedded provenance chain proves "user X authorized this at time T," but the JWT expires shortly after. For long-running operations, the durability modes above still apply: accepted initial authorization with ongoing checks by default, `PausedAuth` when fresh approval is needed, and refresh tokens or delegation SAs where appropriate.
 
 #### Intent-bound tokens for GitOps
 
@@ -296,7 +282,7 @@ Two flows:
 
 CIBA separates the commit from the approval — natural for gitops where you commit, review in PR, and approve after merge as a separate step. The user doesn't need a token at commit time.
 
-When a token in git expires before the manifest is applied, the controller triggers re-approval (new CIBA flow or equivalent). This is PausedAuth semantics: expired credentials pause rather than fail.
+When a token in git expires before the manifest is applied, the controller triggers re-approval (new CIBA flow or equivalent). This is `PausedAuth` semantics: expired credentials pause rather than fail.
 
 Without full RAR support, standard scopes provide weaker but still useful binding (e.g. `scope=deploy:cluster-x:namespace-production`). Universally supported, much tighter than an unscoped token, but not 1:1 content-bound.
 
@@ -310,16 +296,16 @@ Without full RAR support, standard scopes provide weaker but still useful bindin
 
 ## Attestation-based delivery
 
-The deployment specifies its authorization mode as part of the deployment strategy. Two modes:
+The deployment first chooses a credential durability mode from the earlier sections. For K8s delivery, those modes show up in two execution forms:
 
-- **Token passthrough**: the user's token is used directly as the caller credential. No attestation envelope. Works while the token is live, PausedAuth when it expires. Only viable when the user has direct authority at the target (no space separation).
-- **Attestation**: an attestation envelope carries the user's JWT alongside the intent, signed by the platform. Required when there's space separation (the user has no direct authority at the target). Optional but valuable when there's only time separation (provides cryptographic proof of who authorized the operation, survives token expiry as an audit artifact).
+- **Token passthrough**: the user's token is used directly as the caller credential. No attestation envelope. Works while the token is live. Only viable when the user has direct authority at the target (no space separation).
+- **Attested apply**: an attestation envelope carries the user's JWT alongside the intent, signed by the platform. This is the delivery mechanism for signed intent and other run-as-platform or space-separated flows. It is required when the user has no direct authority at the target, and still useful when there is only time separation because it preserves durable proof of who authorized the operation.
 
-Which mode a deployment uses is a property of that deployment, not a global setting. The platform evaluates what modes are available and applicable based on the authorization context.
+Which execution form a deployment uses is a property of that deployment, not a global setting. The platform evaluates what combinations are available and applicable based on the authorization context.
 
 ### Attestation protocol
 
-Within attestation mode, the protocol is uniform regardless of whether the separation is in time, space, or both. The envelope and validation sequence are the same in every case.
+Within attested apply, the protocol is uniform regardless of whether the separation is in time, space, or both. The envelope and validation sequence are the same in every case.
 
 **Envelope:**
 
@@ -352,14 +338,14 @@ Dimensions affect validation strength, not protocol shape: a fresh JWT makes the
 
 ### Cluster-side delivery architecture (K8s)
 
-The delivery agent (cluster-side, part of the fleetlet) handles both authorization modes:
+The delivery agent (cluster-side, part of the fleetlet) handles both execution forms:
 
 - **Token passthrough**: the delivery agent uses the caller's token to apply manifests directly via Server-Side Apply. The target's API server validates the token and evaluates RBAC against the user's real identity.
-- **Attestation mode**: the delivery agent receives attestation envelopes, validates the proof material internally (JWT against IdP JWKS, platform signature, bindings, validity bounds), and applies real resources using its own in-cluster ServiceAccount. It has broad RBAC but is the validation gate — nothing gets applied without passing the full validation sequence.
+- **Attested apply**: the delivery agent receives attestation envelopes, validates the proof material internally (JWT against IdP JWKS, platform signature, bindings, validity bounds), and applies real resources using its own in-cluster ServiceAccount. That ServiceAccount has the write RBAC needed for managed resources, but the authority stays local to the cluster and is gated by validation — nothing gets applied without passing the full validation sequence.
 
 A separate read-only status agent watches managed resources and reports status and drift back to the platform. It has no write RBAC. If drift is detected, the platform re-delivers through the appropriate delivery path.
 
-In attestation mode there is no broadly privileged reconciler. The delivery agent combines validation and apply in one step. No intermediate CRD, no separate controller with broad RBAC acting on platform-originated data. The delivery agent's in-cluster SA credential never leaves the cluster — the platform sends delivery instructions over the fleetlet connection, and the delivery agent uses its local SA. No cluster credentials travel to the platform.
+In attested apply there is no separate broadly privileged reconciler acting on platform-originated data. The delivery agent combines validation and apply in one step. No intermediate CRD, no separate controller with broad RBAC consuming unchecked platform data. The delivery agent's in-cluster SA credential never leaves the cluster — the platform sends delivery instructions over the fleetlet connection, and the delivery agent uses its local SA. No cluster credentials travel to the platform.
 
 ### Transport as a security knob
 
@@ -374,6 +360,8 @@ The delivery agent's code is identical across transports. Dialing up the securit
 ## Practical architecture summary
 
 For K8s targets, the layered model:
+
+Credential durability, attestation, and transport are orthogonal; this table shows the common combinations.
 
 | Scenario | Mechanism | User identity at target | User presence needed |
 |----------|-----------|------------------------|---------------------|
