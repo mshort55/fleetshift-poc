@@ -8,3 +8,6 @@
 - [ ] Revisit workflow contract tests because I think these are just testing the same workflow logic tested elsewhere (so maybe just combine & use to test workflow implementations & workflow logic)
 - [ ] inline manifests need explicit types
 - [ ] In process delivery agents need to also use durable workflows (in their own addon package)
+- [ ] Incorporate "root" service account (locked up keys, rarely used) best practice?
+- [ ] Look at workload identity federation kinds of techniques for authenticating the platform or authenticating agents
+- [ ] Should RBAC "push" (bootstrapping) be done by deployments in which the pool is everything in that workspace? And then new clusters are new targets which trigger the pipeline again? This is pretty elegant and follows existing authorization model.
