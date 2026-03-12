@@ -105,6 +105,8 @@ This tradeoff narrows with tighter token binding: RAR (RFC 9396) with a manifest
 
 The JWT embedded in the attestation envelope should be encrypted for the target cluster, so that only a privileged cluster-side component (the delivery agent) can decrypt it. This limits exposure: the platform stores and transports the envelope, but can't extract the JWT from delivered envelopes after creation. On the cluster, only the delivery agent's decryption key (provisioned during bootstrap) can access the token for validation.
 
+This is different from storing authorization material in git. Encrypting a delivered attestation envelope for the target cluster limits exposure in transit and at rest after delivery. Encrypting a token for a GitOps delivery platform would instead protect confidentiality inside the repo, which is useful, but it does not by itself fix an over-broad token.
+
 ### Service accounts specifically for delegation
 
 When something is long running, the user creates a service account dedicated to run on their behalf, with a scoped subset of their permissions.
@@ -185,7 +187,7 @@ A more promising model is cluster-side validation of signed intent before apply.
 
 In this document, the concrete signed-intent mechanism is the JWT-embedded provenance chain below. The earlier keyless-signing idea (Fulcio/cosign) has a central CA problem, so it is not the default.
 
-NOTE: We should revisit this for the case the customer _already has a trusted Fulcio CA_.
+NOTE: We should revisit this for the case the customer *already has a trusted Fulcio CA*.
 
 The platform's delivery authority is contingent on valid attestations. It can transport envelopes, but without a valid tenant JWT embedded in the envelope, the delivery agent rejects them.
 
@@ -233,13 +235,15 @@ Persisting user JWTs to a database (rather than just validating them in-memory p
 
 The JWT-embedded provenance chain's main gap is that the JWT doesn't bind to specific manifest content — a compromised platform can pair a valid JWT with any manifest while the JWT is live. OAuth standards offer a spectrum of binding tightness:
 
-| Binding level | Standard | What it constrains |
-|---|---|---|
-| Identity only | OIDC core (ID token) | Who the user is |
-| Action category | OAuth scopes | Kind of action (e.g. `deploy`, `deploy:production`) |
-| Target | RFC 8707 (Resource Indicators) | Which resource server / cluster accepts the token |
-| Intent details | RFC 9396 (Rich Authorization Requests) | Structured authorization details: target, namespace, action type |
-| Exact content | RFC 9396 + content hash | Token bound to a specific manifest hash — 1:1 binding |
+
+| Binding level   | Standard                               | What it constrains                                               |
+| --------------- | -------------------------------------- | ---------------------------------------------------------------- |
+| Identity only   | OIDC core (ID token)                   | Who the user is                                                  |
+| Action category | OAuth scopes                           | Kind of action (e.g. `deploy`, `deploy:production`)              |
+| Target          | RFC 8707 (Resource Indicators)         | Which resource server / cluster accepts the token                |
+| Intent details  | RFC 9396 (Rich Authorization Requests) | Structured authorization details: target, namespace, action type |
+| Exact content   | RFC 9396 + content hash                | Token bound to a specific manifest hash — 1:1 binding            |
+
 
 Rich Authorization Requests (RFC 9396) is the key standard. The `authorization_details` parameter carries structured JSON describing what the token authorizes:
 
@@ -262,7 +266,7 @@ The JWT-embedded provenance chain proves "user X authorized this at time T," but
 
 #### Intent-bound tokens for GitOps
 
-The tighter the binding between token and content, the safer it is to include a token alongside manifests in git. An unscoped ID token in git is dangerous — it can authorize anything during its validity window. A RAR-scoped access token with `manifest_hash` is safe — it can only authorize the exact manifest it's bound to, and it expires.
+The tighter the binding between token and content, the safer it is to include a token alongside manifests in git. A token with no meaningful scoping beyond identity is risky because it can authorize too much during its validity window. A RAR-scoped access token with `manifest_hash` is the strongest form — it can only authorize the exact manifest it's bound to, and it expires.
 
 Two flows:
 
@@ -274,7 +278,11 @@ CIBA separates the commit from the approval — natural for gitops where you com
 
 When a token in git expires before the manifest is applied, the controller triggers re-approval (new CIBA flow or equivalent). This is `PausedAuth` semantics: expired credentials pause rather than fail.
 
-Without full RAR support, standard scopes provide weaker but still useful binding (e.g. `scope=deploy:cluster-x:namespace-production`). Universally supported, much tighter than an unscoped token, but not 1:1 content-bound.
+Without full RAR support, audience scoping plus standard scopes still provide a weaker but meaningful form of binding (for example, a token scoped to the GitOps platform by `aud`, plus `scope=deploy:cluster-x:namespace-production`). This is not 1:1 content-bound, but it can still be better than giving the GitOps platform its own standing god credential: the token is still tied to a user, expires, and preserves end-to-end identity at apply time.
+
+In that weaker-binding model, the remaining question is whether the residual scope is acceptable for the target environment. If it is, the token can still chain naturally into `PausedAuth`, re-approval, or refresh-token-based durability as needed. If it is not, prefer re-approval at apply time or a signed-intent/attestation path that does not rely on a repo-stored bearer credential.
+
+A useful refinement is to wrap repo-stored authorization material in a JWE encrypted for the target GitOps delivery platform. That reduces exposure in the repository while preserving a user-linked token at apply time. It does not strengthen authorization semantics on its own, so the enclosed token still needs acceptable scope, but paired with platform audience scoping and reasonable deploy scopes it can be a decent model in practice.
 
 #### Open questions
 
@@ -353,15 +361,17 @@ For K8s targets, the layered model:
 
 Credential durability, attestation, and transport are orthogonal; this table shows the common combinations.
 
-| Scenario | Mechanism | User identity at target | User presence needed |
-|----------|-----------|------------------------|---------------------|
-| Synchronous / short-lived ops | Token passthrough | Full (IdP-verified) | During operation |
-| Long-running (run-as-platform) | Accepted initial auth + JWT-embedded provenance | Proof of initial user (JWT in signed artifact) | At creation only |
-| Long-running (run-as-you) | Refresh tokens (when IdP supports it) | Full (IdP-verified, refreshed) | At creation only |
-| Long-running (K8s-specific) | Delegation SAs | SA identity (correlatable) | At creation only |
-| Any credential failure | PausedAuth + CIBA | N/A (paused) | To resume (or CIBA-prompted) |
-| GitOps | Signed intent (JWT-embedded provenance) | Proof of initial user (JWT in signed artifact) | At signing only |
-| GitOps (with RAR) | Intent-bound token | Full (IdP-verified, content-bound) | At signing only |
+
+| Scenario                       | Mechanism                                       | User identity at target                        | User presence needed         |
+| ------------------------------ | ----------------------------------------------- | ---------------------------------------------- | ---------------------------- |
+| Synchronous / short-lived ops  | Token passthrough                               | Full (IdP-verified)                            | During operation             |
+| Long-running (run-as-platform) | Accepted initial auth + JWT-embedded provenance | Proof of initial user (JWT in signed artifact) | At creation only             |
+| Long-running (run-as-you)      | Refresh tokens (when IdP supports it)           | Full (IdP-verified, refreshed)                 | At creation only             |
+| Long-running (K8s-specific)    | Delegation SAs                                  | SA identity (correlatable)                     | At creation only             |
+| Any credential failure         | PausedAuth + CIBA                               | N/A (paused)                                   | To resume (or CIBA-prompted) |
+| GitOps                         | Signed intent (JWT-embedded provenance)         | Proof of initial user (JWT in signed artifact) | At signing only              |
+| GitOps (with RAR)              | Intent-bound token                              | Full (IdP-verified, content-bound)             | At signing only              |
+
 
 Delivery transport is configurable per target profile: standard (fleetlet gRPC), hardened (buffered via S3/Kafka/NATS), or future CRD-based. The attestation format and validation logic are identical across transports.
 
@@ -379,3 +389,20 @@ Typical contracts:
 If the durability model is delegation SAs, the delivery agent derives or requests the delegated credential from user-linked identity/provenance rather than a platform-global secret.
 
 If we control the target's auth stack (for example, a Kubernetes distribution we customize), it is even better to validate access tokens and scopes/resource indicators directly rather than relying only on ID tokens. Vault-backed service-account credentials are a last resort; prefer credentials derived from the end user.
+
+### Deployment options (UX)
+
+This means when you deploy something, you (a user or an addon creating a deployment) have various options:
+
+1. Run-as who?
+  a. Me
+  1. Durably?
+    a. No – use JWT, no refresh token
+    b. Yes – get refresh token
+    1. Authorize future revisions? (Should this be an option? I don't really like it.)
+      a. No – Refresh token not used on edits
+      b. Yes – Refresh token used an edits. Platform authorizes edits. Target authorizes original user.
+      orm
+  2. Durably?
+    a. No – use
+
