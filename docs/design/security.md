@@ -13,23 +13,6 @@ Principles:
 - The main design split is between three separate knobs: credential durability (how authority persists over time), attested apply (how user intent is proven and validated at the target), and transport (how the instruction reaches the target). Keeping those separate lets the system get stricter without redesigning everything at once.
 - Bootstrap-time privilege is sometimes unavoidable, but it must not become steady-state trust authority. In particular, the platform must not be able to rewrite target trust configuration or otherwise turn temporary operational access into permanent identity authority.
 
-## Target credential model
-
-The delivery target plugin declares what credential presentation it needs; the platform should not hard-code one token type for every target.
-
-Typical contracts:
-
-- K8s API apply/proxy: pass through the user's token when the target directly trusts the tenant IdP.
-- AWS: ask for an ID token or SAML assertion, then `AssumeRoleWith*Identity` -> SigV4.
-- GCP: ask for an ID token, then token exchange -> GCP token.
-- Other targets: ask for "an access token for X" and let the delivery agent perform whatever target-specific exchange is needed.
-
-If the durability model is delegation SAs, the delivery agent derives or requests the delegated credential from user-linked identity/provenance rather than a platform-global secret.
-
-If we control the target's auth stack (for example, a Kubernetes distribution we customize), it is even better to validate access tokens and scopes/resource indicators directly rather than relying only on ID tokens. Vault-backed service-account credentials are a last resort; prefer credentials derived from the end user.
-
-Not every operation has to cross the delivery boundary. Inventory queries and other platform-side operations are the easy secure case: they can be authorized, audited, and scoped entirely within the platform without any of the long-running or cross-target credential mechanics discussed below.
-
 ## Challenges
 
 - Git ops – GitOps has a platform level indirection: the git repo is the authority, and the platform applies from there. Some tools may support tenant-specific service accounts or impersonation.
@@ -382,4 +365,17 @@ Credential durability, attestation, and transport are orthogonal; this table sho
 
 Delivery transport is configurable per target profile: standard (fleetlet gRPC), hardened (buffered via S3/Kafka/NATS), or future CRD-based. The attestation format and validation logic are identical across transports.
 
-For non-K8s targets, the delivery agent declares what credential type it needs and handles the target-specific mechanics (AssumeRole, token exchange, etc). The platform provides the user's identity information and any stored credential references.
+### Target credential presentation
+
+The delivery agent declares what credential presentation it needs; the platform should not hard-code one token type for every target.
+
+Typical contracts:
+
+- K8s API apply/proxy: pass through the user's token when the target directly trusts the tenant IdP.
+- AWS: ask for an ID token or SAML assertion, then `AssumeRoleWith*Identity` -> SigV4.
+- GCP: ask for an ID token, then token exchange -> GCP token.
+- Other targets: ask for "an access token for X" and let the delivery agent perform whatever target-specific exchange is needed.
+
+If the durability model is delegation SAs, the delivery agent derives or requests the delegated credential from user-linked identity/provenance rather than a platform-global secret.
+
+If we control the target's auth stack (for example, a Kubernetes distribution we customize), it is even better to validate access tokens and scopes/resource indicators directly rather than relying only on ID tokens. Vault-backed service-account credentials are a last resort; prefer credentials derived from the end user.
