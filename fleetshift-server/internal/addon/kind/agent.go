@@ -26,10 +26,12 @@ const ClusterResourceType domain.ResourceType = "api.kind.cluster"
 // ClusterSpec is the manifest payload accepted by the kind delivery
 // agent. Name identifies the kind cluster; Config holds the raw kind
 // cluster configuration YAML/JSON (the same format accepted by
-// kind create cluster --config).
+// kind create cluster --config). OIDC optionally configures the API
+// server's OIDC authentication; it is mutually exclusive with Config.
 type ClusterSpec struct {
 	Name   string          `json:"name"`
 	Config json.RawMessage `json:"config,omitempty"`
+	OIDC   *OIDCSpec       `json:"oidc,omitempty"`
 }
 
 // ClusterProvider abstracts the kind cluster operations needed by the
@@ -50,6 +52,13 @@ type ClusterProviderFactory func(logger log.Logger) ClusterProvider
 // Agent implements [domain.DeliveryAgent] for kind clusters.
 type Agent struct {
 	providerFactory ClusterProviderFactory
+
+	// TempDir is the directory for temporary files (e.g., CA certs) that
+	// must be visible to the container runtime. If empty, [os.TempDir]
+	// is used. Container runtimes like Podman only mount specific host
+	// paths into the VM, so callers should set this to a path the
+	// runtime can see.
+	TempDir string
 }
 
 // NewAgent returns an Agent that creates providers via the given factory.
@@ -88,6 +97,14 @@ func (a *Agent) validateManifests(manifests []domain.Manifest) ([]ClusterSpec, e
 		if specs[i].Name == "" {
 			return nil, fmt.Errorf("%w: kind cluster spec requires a name", domain.ErrInvalidArgument)
 		}
+		if specs[i].OIDC != nil && len(specs[i].Config) > 0 {
+			return nil, fmt.Errorf("%w: kind cluster spec cannot have both config and oidc", domain.ErrInvalidArgument)
+		}
+		if specs[i].OIDC != nil {
+			if err := specs[i].OIDC.validate(); err != nil {
+				return nil, fmt.Errorf("%w: %s", domain.ErrInvalidArgument, err)
+			}
+		}
 	}
 	return specs, nil
 }
@@ -114,9 +131,22 @@ func (a *Agent) deliverAsync(ctx context.Context, provider ClusterProvider, spec
 			}
 		}
 
+		rawConfig, err := a.resolveConfig(spec)
+		if err != nil {
+			signaler.Emit(ctx, domain.DeliveryEvent{
+				Kind:    domain.DeliveryEventError,
+				Message: fmt.Sprintf("resolve config for kind cluster %q: %v", spec.Name, err),
+			})
+			signaler.Done(ctx, domain.DeliveryResult{
+				State:   domain.DeliveryStateFailed,
+				Message: fmt.Sprintf("resolve config for kind cluster %q: %v", spec.Name, err),
+			})
+			return
+		}
+
 		var opts []cluster.CreateOption
-		if len(spec.Config) > 0 {
-			opts = append(opts, cluster.CreateWithRawConfig(spec.Config))
+		if rawConfig != nil {
+			opts = append(opts, cluster.CreateWithRawConfig(rawConfig))
 		}
 
 		if err := provider.Create(spec.Name, opts...); err != nil {
@@ -152,6 +182,28 @@ func (a *Agent) deliverAsync(ctx context.Context, provider ClusterProvider, spec
 		result.ProducedSecrets = append(result.ProducedSecrets, out.Secret())
 	}
 	signaler.Done(ctx, result)
+}
+
+// resolveConfig returns the raw kind config bytes for a ClusterSpec.
+// When OIDC is set, the config is generated with OIDC API server flags
+// and an optional CA cert mount. When Config is set, it is returned
+// as-is. Returns nil when neither is set (default kind config).
+func (a *Agent) resolveConfig(spec ClusterSpec) ([]byte, error) {
+	if spec.OIDC != nil {
+		var caCertHostPath string
+		if len(spec.OIDC.CABundle) > 0 {
+			path, err := writeCABundle(spec.OIDC.CABundle, a.TempDir)
+			if err != nil {
+				return nil, err
+			}
+			caCertHostPath = path
+		}
+		return BuildKindOIDCConfig(spec.OIDC, caCertHostPath)
+	}
+	if len(spec.Config) > 0 {
+		return spec.Config, nil
+	}
+	return nil, nil
 }
 
 func (a *Agent) clusterExists(provider ClusterProvider, name string) bool {

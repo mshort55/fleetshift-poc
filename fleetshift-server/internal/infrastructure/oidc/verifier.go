@@ -22,9 +22,32 @@ type Verifier struct {
 	keySets map[string]jwk.Set // jwksURI -> cached set
 }
 
+// VerifierOption configures a [Verifier].
+type VerifierOption func(*verifierConfig)
+
+type verifierConfig struct {
+	httpClient httprc.HTTPClient
+}
+
+// WithHTTPClient sets the HTTP client used for JWKS fetching. This is
+// useful for injecting custom CA trust (e.g., self-signed TLS in tests)
+// or proxy configuration.
+func WithHTTPClient(c httprc.HTTPClient) VerifierOption {
+	return func(cfg *verifierConfig) { cfg.httpClient = c }
+}
+
 // NewVerifier creates a verifier with a background JWKS cache.
-func NewVerifier(ctx context.Context) (*Verifier, error) {
-	client := httprc.NewClient()
+func NewVerifier(ctx context.Context, opts ...VerifierOption) (*Verifier, error) {
+	var cfg verifierConfig
+	for _, o := range opts {
+		o(&cfg)
+	}
+
+	var clientOpts []httprc.NewClientOption
+	if cfg.httpClient != nil {
+		clientOpts = append(clientOpts, httprc.WithHTTPClient(cfg.httpClient))
+	}
+	client := httprc.NewClient(clientOpts...)
 	cache, err := jwk.NewCache(ctx, client)
 	if err != nil {
 		return nil, fmt.Errorf("create JWK cache: %w", err)
@@ -95,8 +118,7 @@ func (v *Verifier) Verify(ctx context.Context, config domain.OIDCConfig, rawToke
 		claims.Extra["email"] = []string{email}
 	}
 
-	var groups []string
-	if err := tok.Get("groups", &groups); err == nil {
+	if groups := getStringSliceClaim(tok, "groups"); len(groups) > 0 {
 		claims.Extra["groups"] = groups
 	}
 
@@ -106,6 +128,27 @@ func (v *Verifier) Verify(ctx context.Context, config domain.OIDCConfig, rawToke
 	}
 
 	return claims, nil
+}
+
+// getStringSliceClaim extracts a string-array private claim from a JWT.
+// The jwx library deserializes JSON arrays as []interface{}, so a direct
+// Get into *[]string fails. This helper converts element-by-element.
+func getStringSliceClaim(tok jwt.Token, key string) []string {
+	var raw interface{}
+	if err := tok.Get(key, &raw); err != nil {
+		return nil
+	}
+	arr, ok := raw.([]interface{})
+	if !ok {
+		return nil
+	}
+	out := make([]string, 0, len(arr))
+	for _, v := range arr {
+		if s, ok := v.(string); ok {
+			out = append(out, s)
+		}
+	}
+	return out
 }
 
 func (v *Verifier) getKeySet(ctx context.Context, jwksURI string) (jwk.Set, error) {
