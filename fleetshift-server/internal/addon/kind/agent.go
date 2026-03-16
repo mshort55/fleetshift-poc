@@ -71,15 +71,15 @@ func NewAgent(factory ClusterProviderFactory) *Agent {
 // the actual cluster creation in a background goroutine. Kind's own
 // log output flows through the [domain.DeliverySignaler] via the
 // [observerLogger] adapter.
-func (a *Agent) Deliver(ctx context.Context, _ domain.TargetInfo, _ domain.DeliveryID, manifests []domain.Manifest, signaler *domain.DeliverySignaler) (domain.DeliveryResult, error) {
-	specs, err := a.validateManifests(manifests)
+func (a *Agent) Deliver(ctx context.Context, _ domain.TargetInfo, _ domain.DeliveryID, manifests []domain.Manifest, auth domain.DeliveryAuth, signaler *domain.DeliverySignaler) (domain.DeliveryResult, error) {
+	specs, err := a.validateManifests(manifests, auth)
 	if err != nil {
 		return domain.DeliveryResult{State: domain.DeliveryStateFailed}, err
 	}
 
 	provider := a.providerFactory(NewObserverLogger(ctx, signaler, time.Now))
 
-	go a.deliverAsync(ctx, provider, specs, signaler)
+	go a.deliverAsync(ctx, provider, specs, auth, signaler)
 
 	return domain.DeliveryResult{State: domain.DeliveryStateAccepted}, nil
 }
@@ -88,7 +88,7 @@ func (a *Agent) Remove(_ context.Context, _ domain.TargetInfo, _ domain.Delivery
 	return nil
 }
 
-func (a *Agent) validateManifests(manifests []domain.Manifest) ([]ClusterSpec, error) {
+func (a *Agent) validateManifests(manifests []domain.Manifest, auth domain.DeliveryAuth) ([]ClusterSpec, error) {
 	specs := make([]ClusterSpec, len(manifests))
 	for i, m := range manifests {
 		if err := json.Unmarshal(m.Raw, &specs[i]); err != nil {
@@ -100,16 +100,17 @@ func (a *Agent) validateManifests(manifests []domain.Manifest) ([]ClusterSpec, e
 		if specs[i].OIDC != nil && len(specs[i].Config) > 0 {
 			return nil, fmt.Errorf("%w: kind cluster spec cannot have both config and oidc", domain.ErrInvalidArgument)
 		}
-		if specs[i].OIDC != nil {
-			if err := specs[i].OIDC.validate(); err != nil {
-				return nil, fmt.Errorf("%w: %s", domain.ErrInvalidArgument, err)
-			}
+		if specs[i].OIDC != nil && auth.Caller == nil {
+			return nil, fmt.Errorf("%w: OIDC cluster creation requires an authenticated caller", domain.ErrInvalidArgument)
+		}
+		if specs[i].OIDC != nil && len(auth.Audience) == 0 {
+			return nil, fmt.Errorf("%w: OIDC cluster creation requires a caller audience", domain.ErrInvalidArgument)
 		}
 	}
 	return specs, nil
 }
 
-func (a *Agent) deliverAsync(ctx context.Context, provider ClusterProvider, specs []ClusterSpec, signaler *domain.DeliverySignaler) {
+func (a *Agent) deliverAsync(ctx context.Context, provider ClusterProvider, specs []ClusterSpec, auth domain.DeliveryAuth, signaler *domain.DeliverySignaler) {
 	var outputs []ClusterOutput
 
 	for _, spec := range specs {
@@ -131,7 +132,7 @@ func (a *Agent) deliverAsync(ctx context.Context, provider ClusterProvider, spec
 			}
 		}
 
-		rawConfig, err := a.resolveConfig(spec)
+		rawConfig, err := a.resolveConfig(spec, auth)
 		if err != nil {
 			signaler.Emit(ctx, domain.DeliveryEvent{
 				Kind:    domain.DeliveryEventError,
@@ -168,6 +169,24 @@ func (a *Agent) deliverAsync(ctx context.Context, provider ClusterProvider, spec
 				Message: fmt.Sprintf("get kubeconfig for %q: %v", spec.Name, err),
 			})
 		} else {
+			if spec.OIDC != nil && auth.Caller != nil {
+				signaler.Emit(ctx, domain.DeliveryEvent{
+					Kind:    domain.DeliveryEventProgress,
+					Message: fmt.Sprintf("Bootstrapping RBAC for %s on %q", auth.Caller.ID, spec.Name),
+				})
+				if err := bootstrapRBAC(ctx, []byte(kc), auth.Caller.Issuer, auth.Caller); err != nil {
+					signaler.Emit(ctx, domain.DeliveryEvent{
+						Kind:    domain.DeliveryEventError,
+						Message: fmt.Sprintf("bootstrap RBAC on %q: %v", spec.Name, err),
+					})
+					signaler.Done(ctx, domain.DeliveryResult{
+						State:   domain.DeliveryStateFailed,
+						Message: fmt.Sprintf("bootstrap RBAC on %q: %v", spec.Name, err),
+					})
+					return
+				}
+			}
+
 			outputs = append(outputs, ClusterOutput{
 				TargetID:   domain.TargetID("k8s-" + spec.Name),
 				Name:       spec.Name,
@@ -186,9 +205,10 @@ func (a *Agent) deliverAsync(ctx context.Context, provider ClusterProvider, spec
 
 // resolveConfig returns the raw kind config bytes for a ClusterSpec.
 // When OIDC is set, the config is generated with OIDC API server flags
-// and an optional CA cert mount. When Config is set, it is returned
-// as-is. Returns nil when neither is set (default kind config).
-func (a *Agent) resolveConfig(spec ClusterSpec) ([]byte, error) {
+// and an optional CA cert mount; the issuer and audience are derived
+// from the caller's identity. When Config is set, it is returned as-is.
+// Returns nil when neither is set (default kind config).
+func (a *Agent) resolveConfig(spec ClusterSpec, auth domain.DeliveryAuth) ([]byte, error) {
 	if spec.OIDC != nil {
 		var caCertHostPath string
 		if len(spec.OIDC.CABundle) > 0 {
@@ -198,7 +218,10 @@ func (a *Agent) resolveConfig(spec ClusterSpec) ([]byte, error) {
 			}
 			caCertHostPath = path
 		}
-		return BuildKindOIDCConfig(spec.OIDC, caCertHostPath)
+		// TODO: audience policy -- for now we use the first audience from
+		// the caller's token. This couples the cluster's oidc-client-id to
+		// whatever audience the platform validated the user against.
+		return BuildKindOIDCConfig(auth.Caller.Issuer, auth.Audience[0], spec.OIDC, caCertHostPath)
 	}
 	if len(spec.Config) > 0 {
 		return spec.Config, nil

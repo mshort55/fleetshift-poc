@@ -33,10 +33,10 @@ type discoveryDocument struct {
 
 // FetchMetadata retrieves the OIDC discovery document from the issuer's
 // well-known endpoint.
-func (c *DiscoveryClient) FetchMetadata(ctx context.Context, issuerURL string) (domain.OIDCMetadata, error) {
-	url := issuerURL + "/.well-known/openid-configuration"
+func (c *DiscoveryClient) FetchMetadata(ctx context.Context, issuerURL domain.IssuerURL) (domain.OIDCMetadata, error) {
+	endpoint := string(issuerURL) + "/.well-known/openid-configuration"
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
 		return domain.OIDCMetadata{}, fmt.Errorf("create request: %w", err)
 	}
@@ -62,9 +62,9 @@ func (c *DiscoveryClient) FetchMetadata(ctx context.Context, issuerURL string) (
 	}
 
 	return domain.OIDCMetadata{
-		Issuer:                doc.Issuer,
-		AuthorizationEndpoint: doc.AuthorizationEndpoint,
-		TokenEndpoint:         doc.TokenEndpoint,
-		JWKSURI:               doc.JWKSURI,
+		Issuer:                domain.IssuerURL(doc.Issuer),
+		AuthorizationEndpoint: domain.EndpointURL(doc.AuthorizationEndpoint),
+		TokenEndpoint:         domain.EndpointURL(doc.TokenEndpoint),
+		JWKSURI:               domain.EndpointURL(doc.JWKSURI),
 	}, nil
 }

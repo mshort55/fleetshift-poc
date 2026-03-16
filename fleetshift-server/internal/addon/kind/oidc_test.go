@@ -12,14 +12,11 @@ import (
 )
 
 func TestBuildKindOIDCConfig_BasicFlags(t *testing.T) {
-	spec := &kind.OIDCSpec{
-		IssuerURL: "https://idp.example.com",
-		ClientID:  "fleetshift",
-	}
+	spec := &kind.OIDCSpec{}
 
-	cfg, err := kind.BuildKindOIDCConfig(spec, "")
+	cfg, err := kind.BuildKindOIDCConfig("https://idp.example.com", "fleetshift", spec, "")
 	if err != nil {
-		t.Fatalf("buildKindOIDCConfig: %v", err)
+		t.Fatalf("BuildKindOIDCConfig: %v", err)
 	}
 
 	s := string(cfg)
@@ -40,14 +37,12 @@ func TestBuildKindOIDCConfig_BasicFlags(t *testing.T) {
 
 func TestBuildKindOIDCConfig_WithCABundle(t *testing.T) {
 	spec := &kind.OIDCSpec{
-		IssuerURL: "https://host.docker.internal:9443",
-		ClientID:  "fleetshift",
-		CABundle:  []byte("-----BEGIN CERTIFICATE-----\nfake\n-----END CERTIFICATE-----"),
+		CABundle: []byte("-----BEGIN CERTIFICATE-----\nfake\n-----END CERTIFICATE-----"),
 	}
 
-	cfg, err := kind.BuildKindOIDCConfig(spec, "/tmp/ca.pem")
+	cfg, err := kind.BuildKindOIDCConfig("https://host.docker.internal:9443", "fleetshift", spec, "/tmp/ca.pem")
 	if err != nil {
-		t.Fatalf("buildKindOIDCConfig: %v", err)
+		t.Fatalf("BuildKindOIDCConfig: %v", err)
 	}
 
 	s := string(cfg)
@@ -59,15 +54,13 @@ func TestBuildKindOIDCConfig_WithCABundle(t *testing.T) {
 
 func TestBuildKindOIDCConfig_CustomClaims(t *testing.T) {
 	spec := &kind.OIDCSpec{
-		IssuerURL:     "https://idp.example.com",
-		ClientID:      "my-app",
 		UsernameClaim: "email",
 		GroupsClaim:   "roles",
 	}
 
-	cfg, err := kind.BuildKindOIDCConfig(spec, "")
+	cfg, err := kind.BuildKindOIDCConfig("https://idp.example.com", "my-app", spec, "")
 	if err != nil {
-		t.Fatalf("buildKindOIDCConfig: %v", err)
+		t.Fatalf("BuildKindOIDCConfig: %v", err)
 	}
 
 	s := string(cfg)
@@ -77,15 +70,16 @@ func TestBuildKindOIDCConfig_CustomClaims(t *testing.T) {
 
 func TestBuildKindOIDCConfig_ValidationErrors(t *testing.T) {
 	tests := []struct {
-		name string
-		spec *kind.OIDCSpec
+		name      string
+		issuerURL domain.IssuerURL
+		audience  domain.Audience
 	}{
-		{"missing issuer", &kind.OIDCSpec{ClientID: "x"}},
-		{"missing clientID", &kind.OIDCSpec{IssuerURL: "https://x"}},
+		{"missing issuer", "", "aud"},
+		{"missing audience", "https://x", ""},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			_, err := kind.BuildKindOIDCConfig(tt.spec, "")
+			_, err := kind.BuildKindOIDCConfig(tt.issuerURL, tt.audience, &kind.OIDCSpec{}, "")
 			if err == nil {
 				t.Error("expected validation error")
 			}
@@ -93,46 +87,13 @@ func TestBuildKindOIDCConfig_ValidationErrors(t *testing.T) {
 	}
 }
 
-func TestAgent_Deliver_OIDCSpec(t *testing.T) {
-	provider := newFakeProvider()
-	obs := newChannelDeliveryObserver()
-	signaler := newChannelSignaler(obs)
-	agent := kind.NewAgent(fakeFactory(provider))
-
-	spec := kind.ClusterSpec{
-		Name: "oidc-cluster",
-		OIDC: &kind.OIDCSpec{
-			IssuerURL: "https://host.docker.internal:9443",
-			ClientID:  "fleetshift",
-			CABundle:  []byte("-----BEGIN CERTIFICATE-----\nfake\n-----END CERTIFICATE-----"),
+func callerAuth() domain.DeliveryAuth {
+	return domain.DeliveryAuth{
+		Caller: &domain.SubjectClaims{
+			ID:     "alice",
+			Issuer: "https://host.docker.internal:9443",
 		},
-	}
-	specBytes, err := json.Marshal(spec)
-	if err != nil {
-		t.Fatalf("marshal spec: %v", err)
-	}
-
-	target := domain.TargetInfo{ID: "k1", Type: kind.TargetType, Name: "local-kind"}
-	manifests := []domain.Manifest{{
-		ResourceType: kind.ClusterResourceType,
-		Raw:          json.RawMessage(specBytes),
-	}}
-
-	result, err := agent.Deliver(context.Background(), target, "d1:k1", manifests, signaler)
-	if err != nil {
-		t.Fatalf("Deliver: %v", err)
-	}
-	if result.State != domain.DeliveryStateAccepted {
-		t.Errorf("State = %q, want %q", result.State, domain.DeliveryStateAccepted)
-	}
-
-	doneResult := <-obs.done
-	if doneResult.State != domain.DeliveryStateDelivered {
-		t.Fatalf("done State = %q, want %q", doneResult.State, domain.DeliveryStateDelivered)
-	}
-
-	if !provider.hasCluster("oidc-cluster") {
-		t.Error("expected cluster 'oidc-cluster' to be created")
+		Audience: []domain.Audience{"fleetshift"},
 	}
 }
 
@@ -143,7 +104,7 @@ func TestAgent_Deliver_OIDCAndConfigMutuallyExclusive(t *testing.T) {
 	spec := kind.ClusterSpec{
 		Name:   "bad-cluster",
 		Config: json.RawMessage(`{"kind":"Cluster"}`),
-		OIDC:   &kind.OIDCSpec{IssuerURL: "https://x", ClientID: "y"},
+		OIDC:   &kind.OIDCSpec{},
 	}
 	specBytes, _ := json.Marshal(spec)
 
@@ -153,7 +114,7 @@ func TestAgent_Deliver_OIDCAndConfigMutuallyExclusive(t *testing.T) {
 		Raw:          json.RawMessage(specBytes),
 	}}
 
-	result, err := agent.Deliver(context.Background(), target, "d1:k1", manifests, nop)
+	result, err := agent.Deliver(context.Background(), target, "d1:k1", manifests, callerAuth(), nop)
 	if err == nil {
 		t.Fatal("expected error for config + oidc")
 	}
@@ -165,13 +126,13 @@ func TestAgent_Deliver_OIDCAndConfigMutuallyExclusive(t *testing.T) {
 	}
 }
 
-func TestAgent_Deliver_OIDCMissingIssuerURL(t *testing.T) {
+func TestAgent_Deliver_OIDCWithoutCallerRejected(t *testing.T) {
 	provider := newFakeProvider()
 	agent := kind.NewAgent(fakeFactory(provider))
 
 	spec := kind.ClusterSpec{
 		Name: "bad-cluster",
-		OIDC: &kind.OIDCSpec{ClientID: "y"},
+		OIDC: &kind.OIDCSpec{},
 	}
 	specBytes, _ := json.Marshal(spec)
 
@@ -181,9 +142,9 @@ func TestAgent_Deliver_OIDCMissingIssuerURL(t *testing.T) {
 		Raw:          json.RawMessage(specBytes),
 	}}
 
-	result, err := agent.Deliver(context.Background(), target, "d1:k1", manifests, nop)
+	result, err := agent.Deliver(context.Background(), target, "d1:k1", manifests, domain.DeliveryAuth{}, nop)
 	if err == nil {
-		t.Fatal("expected error for missing issuerURL")
+		t.Fatal("expected error for OIDC without caller")
 	}
 	if !errors.Is(err, domain.ErrInvalidArgument) {
 		t.Errorf("expected ErrInvalidArgument, got: %v", err)

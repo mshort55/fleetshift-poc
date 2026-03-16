@@ -58,6 +58,7 @@ type DeliverInput struct {
 	DeliveryID   DeliveryID
 	DeploymentID DeploymentID
 	Manifests    []Manifest
+	Auth         DeliveryAuth
 }
 
 // RemoveInput is the input to the remove-from-target activity.
@@ -226,7 +227,7 @@ func (s *OrchestrationWorkflowSpec) DeliverToTarget() Activity[DeliverInput, Del
 			s.DeliveryObserver,
 		)
 
-		return s.Delivery.Deliver(context.Background(), in.Target, in.DeliveryID, in.Manifests, signaler)
+		return s.Delivery.Deliver(context.Background(), in.Target, in.DeliveryID, in.Manifests, in.Auth, signaler)
 	})
 }
 

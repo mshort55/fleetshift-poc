@@ -19,34 +19,36 @@ import (
 	"github.com/fleetshift/fleetshift-poc/fleetshift-server/internal/infrastructure/oidc/oidctest"
 )
 
-// TestKindAddon_OIDCAuth creates a kind cluster with OIDC authentication
-// configured via the kind delivery agent, then verifies that JWTs from
-// the fake OIDC provider are accepted by the K8s API server.
-//
-// Requires Docker or Podman (skipped when unavailable or -short).
-// Requires host.docker.internal to resolve inside the kind container
-// (Docker Desktop on macOS/Windows, or Podman with user-mode networking).
-func TestKindAddon_OIDCAuth(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping real Docker test in short mode")
-	}
+// oidcClusterResult holds the outputs of createOIDCCluster.
+type oidcClusterResult struct {
+	ClusterName string
+	IDP         *oidctest.Provider
+	IssuerURL   domain.IssuerURL
+	Kubeconfig  string
+}
+
+// createOIDCCluster creates a kind cluster with OIDC trust derived from
+// the caller's identity. It starts a fake OIDC provider, delivers the
+// cluster via the kind agent, and returns the kubeconfig and provider.
+func createOIDCCluster(t *testing.T, clusterName string, auth domain.DeliveryAuth) oidcClusterResult {
+	t.Helper()
 
 	checker := cluster.NewProvider()
 	if _, err := checker.List(); err != nil {
 		t.Skipf("container runtime not available: %v", err)
 	}
 
-	const clusterName = "fleetshift-oidc-test"
-
 	t.Cleanup(func() { _ = checker.Delete(clusterName, "") })
 	_ = checker.Delete(clusterName, "")
 
 	idp := oidctest.Start(t,
 		oidctest.WithListenAddress("0.0.0.0:0"),
-		oidctest.WithAudience("fleetshift"),
+		oidctest.WithAudience(string(auth.Audience[0])),
 	)
-	dockerIssuer := fmt.Sprintf("https://host.docker.internal:%s", idp.Port())
+	dockerIssuer := domain.IssuerURL(fmt.Sprintf("https://host.docker.internal:%s", idp.Port()))
 	idp.SetIssuerURL(dockerIssuer)
+
+	auth.Caller.Issuer = dockerIssuer
 
 	kindAgent := kindaddon.NewAgent(func(logger log.Logger) kindaddon.ClusterProvider {
 		return cluster.NewProvider(cluster.ProviderWithLogger(logger))
@@ -56,9 +58,7 @@ func TestKindAddon_OIDCAuth(t *testing.T) {
 	spec := kindaddon.ClusterSpec{
 		Name: clusterName,
 		OIDC: &kindaddon.OIDCSpec{
-			IssuerURL: dockerIssuer,
-			ClientID:  "fleetshift",
-			CABundle:  idp.CACertPEM(),
+			CABundle: idp.CACertPEM(),
 		},
 	}
 	specBytes, err := json.Marshal(spec)
@@ -78,7 +78,7 @@ func TestKindAddon_OIDCAuth(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 
-	result, err := kindAgent.Deliver(ctx, target, "d1:oidc-kind", manifests, signaler)
+	result, err := kindAgent.Deliver(ctx, target, "d1:oidc-kind", manifests, auth, signaler)
 	if err != nil {
 		t.Fatalf("Deliver: %v", err)
 	}
@@ -100,12 +100,18 @@ func TestKindAddon_OIDCAuth(t *testing.T) {
 		t.Fatalf("KubeConfig: %v", err)
 	}
 
-	token := idp.IssueToken(t, oidctest.TokenClaims{
-		Subject: "alice",
-		Groups:  []string{"developers"},
-	})
+	return oidcClusterResult{
+		ClusterName: clusterName,
+		IDP:         idp,
+		IssuerURL:   dockerIssuer,
+		Kubeconfig:  kcStr,
+	}
+}
 
-	restCfg, err := clientcmd.RESTConfigFromKubeConfig([]byte(kcStr))
+// oidcK8sClient builds a K8s client using the kubeconfig and a bearer token.
+func oidcK8sClient(t *testing.T, kubeconfig, token string) *kubernetes.Clientset {
+	t.Helper()
+	restCfg, err := clientcmd.RESTConfigFromKubeConfig([]byte(kubeconfig))
 	if err != nil {
 		t.Fatalf("parse kubeconfig: %v", err)
 	}
@@ -121,15 +127,41 @@ func TestKindAddon_OIDCAuth(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewForConfig: %v", err)
 	}
+	return client
+}
+
+// TestKindAddon_OIDCAuth creates a kind cluster with OIDC authentication
+// derived from the caller's identity, then verifies that JWTs from the
+// fake OIDC provider are accepted by the K8s API server.
+//
+// Requires Docker or Podman (skipped when unavailable or -short).
+func TestKindAddon_OIDCAuth(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping real Docker test in short mode")
+	}
+
+	auth := domain.DeliveryAuth{
+		Caller:   &domain.SubjectClaims{ID: "alice"},
+		Audience: []domain.Audience{"fleetshift"},
+	}
+	res := createOIDCCluster(t, "fleetshift-oidc-test", auth)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	token := res.IDP.IssueToken(t, oidctest.TokenClaims{
+		Subject: "alice",
+		Groups:  []string{"developers"},
+	})
+
+	client := oidcK8sClient(t, res.Kubeconfig, token)
 
 	ssr, err := client.AuthenticationV1().SelfSubjectReviews().Create(ctx, &authv1.SelfSubjectReview{}, metav1.CreateOptions{})
 	if err != nil {
 		t.Fatalf("SelfSubjectReview: %v", err)
 	}
 
-	// K8s OIDC authentication prefixes the issuer URL to the subject
-	// claim: "issuer#sub". See https://kubernetes.io/docs/reference/access-authn-authz/authentication/#openid-connect-tokens
-	wantUsername := dockerIssuer + "#alice"
+	wantUsername := string(res.IssuerURL) + "#alice"
 	if ssr.Status.UserInfo.Username != wantUsername {
 		t.Errorf("Username = %q, want %q", ssr.Status.UserInfo.Username, wantUsername)
 	}
@@ -145,18 +177,52 @@ func TestKindAddon_OIDCAuth(t *testing.T) {
 		t.Errorf("Groups = %v, expected to contain %q", ssr.Status.UserInfo.Groups, "developers")
 	}
 
-	expiredToken := idp.IssueToken(t, oidctest.TokenClaims{
+	expiredToken := res.IDP.IssueToken(t, oidctest.TokenClaims{
 		Subject: "alice",
 		Expiry:  -time.Hour,
 	})
-	restCfg.BearerToken = expiredToken
-	expiredClient, err := kubernetes.NewForConfig(restCfg)
-	if err != nil {
-		t.Fatalf("NewForConfig (expired): %v", err)
-	}
-
+	expiredClient := oidcK8sClient(t, res.Kubeconfig, expiredToken)
 	_, err = expiredClient.AuthenticationV1().SelfSubjectReviews().Create(ctx, &authv1.SelfSubjectReview{}, metav1.CreateOptions{})
 	if err == nil {
 		t.Error("expected error for expired token, got nil")
+	}
+}
+
+// TestKindAddon_OIDCAuthWithRBAC verifies that the RBAC bootstrap
+// grants the caller cluster-admin. Alice (the caller) can list
+// namespaces; bob (not bootstrapped) gets 403.
+//
+// Requires Docker or Podman (skipped when unavailable or -short).
+func TestKindAddon_OIDCAuthWithRBAC(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping real Docker test in short mode")
+	}
+
+	auth := domain.DeliveryAuth{
+		Caller:   &domain.SubjectClaims{ID: "alice"},
+		Audience: []domain.Audience{"fleetshift"},
+	}
+	res := createOIDCCluster(t, "fleetshift-rbac-test", auth)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	aliceToken := res.IDP.IssueToken(t, oidctest.TokenClaims{Subject: "alice"})
+	aliceClient := oidcK8sClient(t, res.Kubeconfig, aliceToken)
+
+	nsList, err := aliceClient.CoreV1().Namespaces().List(ctx, metav1.ListOptions{})
+	if err != nil {
+		t.Fatalf("alice Namespaces().List: %v", err)
+	}
+	if len(nsList.Items) == 0 {
+		t.Error("expected at least one namespace")
+	}
+
+	bobToken := res.IDP.IssueToken(t, oidctest.TokenClaims{Subject: "bob"})
+	bobClient := oidcK8sClient(t, res.Kubeconfig, bobToken)
+
+	_, err = bobClient.CoreV1().Namespaces().List(ctx, metav1.ListOptions{})
+	if err == nil {
+		t.Error("expected bob to be forbidden, got nil error")
 	}
 }

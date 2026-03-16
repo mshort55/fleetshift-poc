@@ -34,21 +34,30 @@ func (m AuthMethod) Validate() error {
 	return nil
 }
 
+// IssuerURL identifies an OIDC issuer.
+type IssuerURL string
+
+// Audience identifies the intended recipient of a token (the aud claim).
+type Audience string
+
+// EndpointURL is a URL for an OIDC protocol endpoint (JWKS, authorize, token).
+type EndpointURL string
+
 // OIDCConfig holds the configuration for an OIDC authentication method.
 type OIDCConfig struct {
-	IssuerURL             string
-	Audience              string
-	JWKSURI               string // resolved from discovery
-	AuthorizationEndpoint string // resolved from discovery
-	TokenEndpoint         string // resolved from discovery
+	IssuerURL             IssuerURL
+	Audience              Audience
+	JWKSURI               EndpointURL // resolved from discovery
+	AuthorizationEndpoint EndpointURL // resolved from discovery
+	TokenEndpoint         EndpointURL // resolved from discovery
 }
 
 // OIDCMetadata is the resolved OIDC discovery document.
 type OIDCMetadata struct {
-	Issuer                string
-	AuthorizationEndpoint string
-	TokenEndpoint         string
-	JWKSURI               string
+	Issuer                IssuerURL
+	AuthorizationEndpoint EndpointURL
+	TokenEndpoint         EndpointURL
+	JWKSURI               EndpointURL
 }
 
 // SubjectID uniquely identifies an authenticated subject.
@@ -58,7 +67,7 @@ type SubjectID string
 // a credential via any supported protocol.
 type SubjectClaims struct {
 	ID     SubjectID
-	Issuer string
+	Issuer IssuerURL
 	Extra  map[string][]string // groups, email, custom claims
 }
 
@@ -84,5 +93,5 @@ type OIDCTokenVerifier interface {
 // Used by the application service during auth method creation to resolve
 // the discovery document and populate [OIDCConfig] with endpoints.
 type OIDCDiscoveryClient interface {
-	FetchMetadata(ctx context.Context, issuerURL string) (OIDCMetadata, error)
+	FetchMetadata(ctx context.Context, issuerURL IssuerURL) (OIDCMetadata, error)
 }

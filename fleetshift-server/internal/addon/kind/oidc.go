@@ -1,31 +1,27 @@
 package kind
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"strings"
+
+	rbacv1 "k8s.io/api/rbac/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/tools/clientcmd"
+
+	"github.com/fleetshift/fleetshift-poc/fleetshift-server/internal/domain"
 )
 
 // OIDCSpec configures the K8s API server's OIDC authentication on a
-// kind cluster. When set on a [ClusterSpec], the agent generates the
-// kind cluster config with the appropriate kubeadmConfigPatches and
-// CA cert extraMount.
+// kind cluster. The issuer URL and audience (client ID) are derived
+// from the caller's identity via [domain.DeliveryAuth]; this spec
+// carries only infrastructure config that can't be derived.
 type OIDCSpec struct {
-	IssuerURL     string `json:"issuerURL"`
-	ClientID      string `json:"clientID"`
 	UsernameClaim string `json:"usernameClaim,omitempty"` // default: "sub"
 	GroupsClaim   string `json:"groupsClaim,omitempty"`   // default: "groups"
-	CABundle      []byte `json:"caBundle,omitempty"`      // PEM-encoded CA cert
-}
-
-func (s *OIDCSpec) validate() error {
-	if s.IssuerURL == "" {
-		return fmt.Errorf("oidc: issuerURL is required")
-	}
-	if s.ClientID == "" {
-		return fmt.Errorf("oidc: clientID is required")
-	}
-	return nil
+	CABundle      []byte `json:"caBundle,omitempty"`      // PEM-encoded CA cert; for self-signed issuers
 }
 
 func (s *OIDCSpec) usernameClaim() string {
@@ -45,17 +41,21 @@ func (s *OIDCSpec) groupsClaim() string {
 const oidcCACertContainerPath = "/etc/kubernetes/pki/oidc-ca.pem"
 
 // BuildKindOIDCConfig generates a kind cluster config YAML with OIDC
-// API server flags and (optionally) a CA cert mount. caCertHostPath is
-// the host-side path to the CA certificate file; it may be empty if no
-// CABundle is configured.
-func BuildKindOIDCConfig(spec *OIDCSpec, caCertHostPath string) ([]byte, error) {
-	if err := spec.validate(); err != nil {
-		return nil, err
+// API server flags and (optionally) a CA cert mount. issuerURL and
+// audience are derived from the caller's identity; spec provides
+// infrastructure config (claim mappings, CA bundle). caCertHostPath
+// may be empty if no CA bundle is configured.
+func BuildKindOIDCConfig(issuerURL domain.IssuerURL, audience domain.Audience, spec *OIDCSpec, caCertHostPath string) ([]byte, error) {
+	if issuerURL == "" {
+		return nil, fmt.Errorf("oidc: issuerURL is required")
+	}
+	if audience == "" {
+		return nil, fmt.Errorf("oidc: audience is required")
 	}
 
 	var extraArgs strings.Builder
-	fmt.Fprintf(&extraArgs, "        oidc-issuer-url: %q\n", spec.IssuerURL)
-	fmt.Fprintf(&extraArgs, "        oidc-client-id: %q\n", spec.ClientID)
+	fmt.Fprintf(&extraArgs, "        oidc-issuer-url: %q\n", string(issuerURL))
+	fmt.Fprintf(&extraArgs, "        oidc-client-id: %q\n", string(audience))
 	fmt.Fprintf(&extraArgs, "        oidc-username-claim: %q\n", spec.usernameClaim())
 	fmt.Fprintf(&extraArgs, "        oidc-groups-claim: %q\n", spec.groupsClaim())
 	if caCertHostPath != "" {
@@ -83,6 +83,45 @@ nodes:
 %s`, extraMounts, extraArgs.String())
 
 	return []byte(config), nil
+}
+
+// bootstrapRBAC creates a ClusterRoleBinding granting the caller
+// cluster-admin on the newly created kind cluster. This uses the
+// admin kubeconfig the kind agent already has in hand.
+func bootstrapRBAC(ctx context.Context, kubeconfig []byte, issuerURL domain.IssuerURL, caller *domain.SubjectClaims) error {
+	cfg, err := clientcmd.RESTConfigFromKubeConfig(kubeconfig)
+	if err != nil {
+		return fmt.Errorf("parse kubeconfig: %w", err)
+	}
+	client, err := kubernetes.NewForConfig(cfg)
+	if err != nil {
+		return fmt.Errorf("create kubernetes client: %w", err)
+	}
+
+	// K8s OIDC authentication formats the username as "issuer#sub".
+	username := string(issuerURL) + "#" + string(caller.ID)
+
+	binding := &rbacv1.ClusterRoleBinding{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "fleetshift-admin-" + string(caller.ID),
+		},
+		Subjects: []rbacv1.Subject{{
+			Kind:     "User",
+			Name:     username,
+			APIGroup: "rbac.authorization.k8s.io",
+		}},
+		RoleRef: rbacv1.RoleRef{
+			Kind:     "ClusterRole",
+			Name:     "cluster-admin",
+			APIGroup: "rbac.authorization.k8s.io",
+		},
+	}
+
+	_, err = client.RbacV1().ClusterRoleBindings().Create(ctx, binding, metav1.CreateOptions{})
+	if err != nil {
+		return fmt.Errorf("create ClusterRoleBinding for %q: %w", username, err)
+	}
+	return nil
 }
 
 // writeCABundle writes the CA bundle to a temp file in dir and returns

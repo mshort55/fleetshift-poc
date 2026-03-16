@@ -32,12 +32,12 @@ func (stubVerifier) Verify(_ context.Context, _ domain.OIDCConfig, _ string) (do
 // stubDiscovery returns fixed test metadata.
 type stubDiscovery struct{}
 
-func (stubDiscovery) FetchMetadata(_ context.Context, issuerURL string) (domain.OIDCMetadata, error) {
+func (stubDiscovery) FetchMetadata(_ context.Context, issuerURL domain.IssuerURL) (domain.OIDCMetadata, error) {
 	return domain.OIDCMetadata{
 		Issuer:                issuerURL,
-		AuthorizationEndpoint: issuerURL + "/authorize",
-		TokenEndpoint:         issuerURL + "/token",
-		JWKSURI:               issuerURL + "/jwks",
+		AuthorizationEndpoint: domain.EndpointURL(string(issuerURL) + "/authorize"),
+		TokenEndpoint:         domain.EndpointURL(string(issuerURL) + "/token"),
+		JWKSURI:               domain.EndpointURL(string(issuerURL) + "/jwks"),
 	}, nil
 }
 

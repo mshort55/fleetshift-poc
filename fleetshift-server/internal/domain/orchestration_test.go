@@ -281,7 +281,7 @@ func (r *stubRegistry) RegisterCreateDeployment(_ *domain.CreateDeploymentWorkfl
 // tests where workflows execute in a single goroutine without locks.
 type noopDelivery struct{}
 
-func (noopDelivery) Deliver(ctx context.Context, _ domain.TargetInfo, _ domain.DeliveryID, _ []domain.Manifest, signaler *domain.DeliverySignaler) (domain.DeliveryResult, error) {
+func (noopDelivery) Deliver(ctx context.Context, _ domain.TargetInfo, _ domain.DeliveryID, _ []domain.Manifest, _ domain.DeliveryAuth, signaler *domain.DeliverySignaler) (domain.DeliveryResult, error) {
 	result := domain.DeliveryResult{State: domain.DeliveryStateDelivered}
 	signaler.Done(ctx, result)
 	return result, nil
@@ -298,7 +298,7 @@ type asyncDelivery struct {
 	done chan struct{}
 }
 
-func (a *asyncDelivery) Deliver(ctx context.Context, _ domain.TargetInfo, _ domain.DeliveryID, _ []domain.Manifest, signaler *domain.DeliverySignaler) (domain.DeliveryResult, error) {
+func (a *asyncDelivery) Deliver(ctx context.Context, _ domain.TargetInfo, _ domain.DeliveryID, _ []domain.Manifest, _ domain.DeliveryAuth, signaler *domain.DeliverySignaler) (domain.DeliveryResult, error) {
 	go func() {
 		signaler.Done(ctx, domain.DeliveryResult{State: domain.DeliveryStateDelivered})
 		if a.done != nil {
@@ -319,7 +319,7 @@ type outputProducingDelivery struct {
 	secrets []domain.ProducedSecret
 }
 
-func (d *outputProducingDelivery) Deliver(ctx context.Context, _ domain.TargetInfo, _ domain.DeliveryID, _ []domain.Manifest, signaler *domain.DeliverySignaler) (domain.DeliveryResult, error) {
+func (d *outputProducingDelivery) Deliver(ctx context.Context, _ domain.TargetInfo, _ domain.DeliveryID, _ []domain.Manifest, _ domain.DeliveryAuth, signaler *domain.DeliverySignaler) (domain.DeliveryResult, error) {
 	result := domain.DeliveryResult{
 		State:              domain.DeliveryStateDelivered,
 		ProvisionedTargets: d.targets,
@@ -780,7 +780,7 @@ type recordingDelivery struct {
 	delivered map[domain.TargetID][]domain.Manifest
 }
 
-func (d *recordingDelivery) Deliver(ctx context.Context, target domain.TargetInfo, _ domain.DeliveryID, manifests []domain.Manifest, signaler *domain.DeliverySignaler) (domain.DeliveryResult, error) {
+func (d *recordingDelivery) Deliver(ctx context.Context, target domain.TargetInfo, _ domain.DeliveryID, manifests []domain.Manifest, _ domain.DeliveryAuth, signaler *domain.DeliverySignaler) (domain.DeliveryResult, error) {
 	d.mu.Lock()
 	if d.delivered == nil {
 		d.delivered = make(map[domain.TargetID][]domain.Manifest)

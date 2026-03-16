@@ -11,9 +11,10 @@ type authzContextKey struct{}
 // AuthorizationContext is the full authentication result for a request.
 // Transport builds it; application services consume it.
 type AuthorizationContext struct {
-	Subject *domain.SubjectClaims // nil if anonymous
-	Client  *ClientClaims         // nil if no client info
-	Request RequestClaims
+	Subject  *domain.SubjectClaims // nil if anonymous
+	Client   *ClientClaims         // nil if no client info
+	Audience []domain.Audience     // token audience (aud claim)
+	Request  RequestClaims
 }
 
 // ClientID identifies an OAuth client.

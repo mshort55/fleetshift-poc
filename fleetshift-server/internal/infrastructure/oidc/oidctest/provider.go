@@ -219,15 +219,15 @@ func Start(t *testing.T, opts ...Option) *Provider {
 // SetIssuerURL overrides the issuer URL after startup. This is useful
 // when the listen port is ephemeral and the Docker-reachable URL can
 // only be computed after the server starts.
-func (p *Provider) SetIssuerURL(url string) {
-	p.issuerURL = url
+func (p *Provider) SetIssuerURL(url domain.IssuerURL) {
+	p.issuerURL = string(url)
 }
 
 // IssuerURL returns the OIDC issuer URL.
-func (p *Provider) IssuerURL() string { return p.issuerURL }
+func (p *Provider) IssuerURL() domain.IssuerURL { return domain.IssuerURL(p.issuerURL) }
 
 // Audience returns the configured audience.
-func (p *Provider) Audience() string { return p.audience }
+func (p *Provider) Audience() domain.Audience { return domain.Audience(p.audience) }
 
 // Port returns the TCP port the server is listening on.
 func (p *Provider) Port() string {
@@ -250,11 +250,11 @@ func (p *Provider) HTTPClient() *http.Client { return p.httpClient }
 // provider's issuer, audience, and endpoint URLs.
 func (p *Provider) OIDCConfig() domain.OIDCConfig {
 	return domain.OIDCConfig{
-		IssuerURL:             p.issuerURL,
-		Audience:              p.audience,
-		JWKSURI:               p.issuerURL + "/jwks",
-		AuthorizationEndpoint: p.issuerURL + "/authorize",
-		TokenEndpoint:         p.issuerURL + "/token",
+		IssuerURL:             domain.IssuerURL(p.issuerURL),
+		Audience:              domain.Audience(p.audience),
+		JWKSURI:               domain.EndpointURL(p.issuerURL + "/jwks"),
+		AuthorizationEndpoint: domain.EndpointURL(p.issuerURL + "/authorize"),
+		TokenEndpoint:         domain.EndpointURL(p.issuerURL + "/token"),
 	}
 }
 

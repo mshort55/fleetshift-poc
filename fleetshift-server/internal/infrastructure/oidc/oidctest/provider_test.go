@@ -22,7 +22,7 @@ func TestProvider_Discovery(t *testing.T) {
 	if meta.Issuer != idp.IssuerURL() {
 		t.Errorf("Issuer = %q, want %q", meta.Issuer, idp.IssuerURL())
 	}
-	wantJWKS := idp.IssuerURL() + "/jwks"
+	wantJWKS := domain.EndpointURL(string(idp.IssuerURL()) + "/jwks")
 	if meta.JWKSURI != wantJWKS {
 		t.Errorf("JWKSURI = %q, want %q", meta.JWKSURI, wantJWKS)
 	}

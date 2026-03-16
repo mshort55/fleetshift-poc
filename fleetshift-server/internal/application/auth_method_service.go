@@ -37,6 +37,7 @@ func (s *AuthMethodService) Create(ctx context.Context, id domain.AuthMethodID, 
 		method.OIDC.JWKSURI = meta.JWKSURI
 		method.OIDC.AuthorizationEndpoint = meta.AuthorizationEndpoint
 		method.OIDC.TokenEndpoint = meta.TokenEndpoint
+	
 	}
 
 	if err := s.Methods.Save(ctx, method); err != nil {

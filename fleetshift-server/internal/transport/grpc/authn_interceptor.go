@@ -91,6 +91,7 @@ func (a *AuthnInterceptor) authenticate(ctx context.Context, fullMethod string) 
 
 	var subject *domain.SubjectClaims
 	var client *application.ClientClaims
+	var matchedAudience []domain.Audience
 	var matchedType domain.AuthMethodType
 
 	for _, m := range methods {
@@ -109,6 +110,7 @@ func (a *AuthnInterceptor) authenticate(ctx context.Context, fullMethod string) 
 			}
 			subject = &claims
 			matchedType = m.Type
+			matchedAudience = []domain.Audience{m.OIDC.Audience}
 			// TODO: this is inappropriate here
 			if azp, ok := claims.Extra["azp"]; ok && len(azp) > 0 {
 				client = &application.ClientClaims{ID: application.ClientID(azp[0])}
@@ -129,9 +131,10 @@ func (a *AuthnInterceptor) authenticate(ctx context.Context, fullMethod string) 
 	reqClaims.PeerAddr = reqInfo.PeerAddr
 
 	authzCtx := &application.AuthorizationContext{
-		Subject: subject,
-		Client:  client,
-		Request: reqClaims,
+		Subject:  subject,
+		Client:   client,
+		Audience: matchedAudience,
+		Request:  reqClaims,
 	}
 	return application.ContextWithAuth(ctx, authzCtx), nil
 }

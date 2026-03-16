@@ -5,6 +5,14 @@ import (
 	"time"
 )
 
+// DeliveryAuth carries the caller's credentials into a delivery. Agents
+// use this to act on behalf of the caller (e.g., bootstrapping RBAC for
+// the user who created a cluster).
+type DeliveryAuth struct {
+	Caller   *SubjectClaims // identity of the user who initiated the delivery
+	Audience []Audience     // token audience; used to derive target OIDC client ID
+}
+
 // DeliveryState indicates where a delivery is in its lifecycle.
 type DeliveryState string
 

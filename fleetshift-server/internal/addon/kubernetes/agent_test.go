@@ -77,7 +77,7 @@ func TestAgent_Deliver_MissingKubeconfigRef(t *testing.T) {
 		Properties: map[string]string{},
 	}
 
-	result, err := agent.Deliver(context.Background(), target, "d1", nil, &domain.DeliverySignaler{})
+	result, err := agent.Deliver(context.Background(), target, "d1", nil, domain.DeliveryAuth{}, &domain.DeliverySignaler{})
 	if err == nil {
 		t.Fatal("expected error for missing kubeconfig_ref")
 	}
@@ -104,7 +104,7 @@ func TestAgent_Deliver_VaultNotFound(t *testing.T) {
 		},
 	}
 
-	result, err := agent.Deliver(context.Background(), target, "d1", nil, signaler)
+	result, err := agent.Deliver(context.Background(), target, "d1", nil, domain.DeliveryAuth{}, signaler)
 	if err != nil {
 		t.Fatalf("Deliver should not return error after ack: %v", err)
 	}
@@ -140,7 +140,7 @@ func TestAgent_Deliver_InvalidKubeconfig(t *testing.T) {
 		Raw:          json.RawMessage(`{"apiVersion":"v1","kind":"ConfigMap","metadata":{"name":"test","namespace":"default"},"data":{"key":"value"}}`),
 	}}
 
-	result, err := agent.Deliver(context.Background(), target, "d1", manifests, signaler)
+	result, err := agent.Deliver(context.Background(), target, "d1", manifests, domain.DeliveryAuth{}, signaler)
 	if err != nil {
 		t.Fatalf("Deliver should not return error after ack: %v", err)
 	}

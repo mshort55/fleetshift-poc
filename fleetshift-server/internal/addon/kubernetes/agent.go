@@ -48,7 +48,7 @@ func NewAgent(vault domain.Vault) *Agent {
 // runs in a background goroutine; on completion the goroutine calls
 // [domain.DeliverySignaler.Done] so the workflow receives the terminal
 // result via signal rather than activity return value.
-func (a *Agent) Deliver(ctx context.Context, target domain.TargetInfo, _ domain.DeliveryID, manifests []domain.Manifest, signaler *domain.DeliverySignaler) (domain.DeliveryResult, error) {
+func (a *Agent) Deliver(ctx context.Context, target domain.TargetInfo, _ domain.DeliveryID, manifests []domain.Manifest, _ domain.DeliveryAuth, signaler *domain.DeliverySignaler) (domain.DeliveryResult, error) {
 	if _, ok := target.Properties["kubeconfig_ref"]; !ok {
 		return domain.DeliveryResult{State: domain.DeliveryStateFailed},
 			fmt.Errorf("%w: target %q missing kubeconfig_ref property", domain.ErrInvalidArgument, target.ID)

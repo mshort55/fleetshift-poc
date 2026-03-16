@@ -140,7 +140,7 @@ func TestAgent_Deliver_CreatesCluster(t *testing.T) {
 		Raw:          json.RawMessage(`{"name": "dev-cluster"}`),
 	}}
 
-	result, err := agent.Deliver(context.Background(), target, "d1:k1", manifests, nop)
+	result, err := agent.Deliver(context.Background(), target, "d1:k1", manifests, domain.DeliveryAuth{}, nop)
 	if err != nil {
 		t.Fatalf("Deliver: %v", err)
 	}
@@ -165,7 +165,7 @@ func TestAgent_Deliver_RecreatesExistingCluster(t *testing.T) {
 		Raw:          json.RawMessage(`{"name": "dev-cluster"}`),
 	}}
 
-	result, err := agent.Deliver(context.Background(), target, "d1:k1", manifests, nop)
+	result, err := agent.Deliver(context.Background(), target, "d1:k1", manifests, domain.DeliveryAuth{}, nop)
 	if err != nil {
 		t.Fatalf("Deliver: %v", err)
 	}
@@ -189,7 +189,7 @@ func TestAgent_Deliver_MissingNameReturnsError(t *testing.T) {
 		Raw:          json.RawMessage(`{}`),
 	}}
 
-	result, err := agent.Deliver(context.Background(), target, "d1:k1", manifests, nop)
+	result, err := agent.Deliver(context.Background(), target, "d1:k1", manifests, domain.DeliveryAuth{}, nop)
 	if err == nil {
 		t.Fatal("expected error for missing cluster name")
 	}
@@ -214,7 +214,7 @@ func TestAgent_Deliver_CreateFailureEmitsError(t *testing.T) {
 		Raw:          json.RawMessage(`{"name": "dev-cluster"}`),
 	}}
 
-	result, err := agent.Deliver(context.Background(), target, "d1:k1", manifests, signaler)
+	result, err := agent.Deliver(context.Background(), target, "d1:k1", manifests, domain.DeliveryAuth{}, signaler)
 	if err != nil {
 		t.Fatalf("Deliver should not return error after ack: %v", err)
 	}
@@ -256,7 +256,7 @@ func TestAgent_Deliver_MultipleManifests(t *testing.T) {
 		{ResourceType: kind.ClusterResourceType, Raw: json.RawMessage(`{"name": "cluster-b"}`)},
 	}
 
-	result, err := agent.Deliver(context.Background(), target, "d1:k1", manifests, nop)
+	result, err := agent.Deliver(context.Background(), target, "d1:k1", manifests, domain.DeliveryAuth{}, nop)
 	if err != nil {
 		t.Fatalf("Deliver: %v", err)
 	}
@@ -283,7 +283,7 @@ func TestAgent_Deliver_WiresObserverLogger(t *testing.T) {
 		Raw:          json.RawMessage(`{"name": "dev-cluster"}`),
 	}}
 
-	result, err := agent.Deliver(context.Background(), target, "d1:k1", manifests, signaler)
+	result, err := agent.Deliver(context.Background(), target, "d1:k1", manifests, domain.DeliveryAuth{}, signaler)
 	if err != nil {
 		t.Fatalf("Deliver: %v", err)
 	}
@@ -311,7 +311,7 @@ func TestAgent_Deliver_ProducesTargetAndSecretOutputs(t *testing.T) {
 		Raw:          json.RawMessage(`{"name": "dev-cluster"}`),
 	}}
 
-	_, err := agent.Deliver(context.Background(), target, "d1:k1", manifests, signaler)
+	_, err := agent.Deliver(context.Background(), target, "d1:k1", manifests, domain.DeliveryAuth{}, signaler)
 	if err != nil {
 		t.Fatalf("Deliver: %v", err)
 	}
@@ -364,7 +364,7 @@ func TestAgent_Deliver_MultipleManifests_ProducesMultipleOutputs(t *testing.T) {
 		{ResourceType: kind.ClusterResourceType, Raw: json.RawMessage(`{"name": "cluster-b"}`)},
 	}
 
-	_, err := agent.Deliver(context.Background(), target, "d1:k1", manifests, signaler)
+	_, err := agent.Deliver(context.Background(), target, "d1:k1", manifests, domain.DeliveryAuth{}, signaler)
 	if err != nil {
 		t.Fatalf("Deliver: %v", err)
 	}
