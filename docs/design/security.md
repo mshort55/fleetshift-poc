@@ -233,32 +233,52 @@ Persisting user JWTs to a database (rather than just validating them in-memory p
 
 #### Tightening intent-token binding
 
-The JWT-embedded provenance chain's main gap is that the JWT doesn't bind to specific manifest content — a compromised platform can pair a valid JWT with any manifest while the JWT is live. OAuth standards offer a spectrum of binding tightness:
+The JWT-embedded provenance chain's main gap is that the JWT doesn't bind to what the user authorized — a compromised platform can pair a valid JWT with any manifest while the JWT is live. The token needs to express what the user authorized, and the delivery agent needs to check that generated manifests fall within that authorization.
 
+OAuth `scope` and RFC 9396 `authorization_details` both serve this purpose — they express what the token authorizes, at different granularity. The delivery agent enforces the same check regardless of how the authorization is expressed: do the generated manifests fall within what the token authorizes?
 
 | Binding level   | Standard                               | What it constrains                                               |
 | --------------- | -------------------------------------- | ---------------------------------------------------------------- |
 | Identity only   | OIDC core (ID token)                   | Who the user is                                                  |
 | Action category | OAuth scopes                           | Kind of action (e.g. `deploy`, `deploy:production`)              |
 | Target          | RFC 8707 (Resource Indicators)         | Which resource server / cluster accepts the token                |
-| Intent details  | RFC 9396 (Rich Authorization Requests) | Structured authorization details: target, namespace, action type |
-| Exact content   | RFC 9396 + content hash                | Token bound to a specific manifest hash — 1:1 binding            |
+| Intent details  | RFC 9396 (Rich Authorization Requests) | Structured authorization of the user's intent: tenant, target, namespace, resource types |
+| Exact intent    | RFC 9396 + intent hash                 | Token bound to a specific intent (deployment spec) via content hash — 1:1 binding |
 
-
-Rich Authorization Requests (RFC 9396) is the key standard. The `authorization_details` parameter carries structured JSON describing what the token authorizes:
+Rich Authorization Requests (RFC 9396) is the key standard for structured intent binding. The `authorization_details` parameter carries structured JSON describing what the user authorized — at the intent level, not the manifest level. The user may never see the rendered manifests (and in managed service provider scenarios, shouldn't):
 
 ```json
 {
   "type": "fleetshift_deploy",
+  "tenant": "acme",
   "target": "cluster-x",
   "namespace": "production",
-  "manifest_hash": "sha256:e3b0c44298fc..."
+  "intent_hash": "sha256:e3b0c44298fc..."
 }
 ```
 
-With `manifest_hash` in `authorization_details`, the token is only valid for this exact manifest. Any change to the manifest invalidates the token. This closes the content-binding gap entirely — the platform can't pair the token with a different manifest because the hash won't match.
+Validation has two levels:
 
-RAR is a published RFC (May 2023). IdP support is growing but not yet universal (Keycloak has partial support via custom protocol mappers, full RAR is in progress). The architecture should accommodate the tightest binding the IdP supports and degrade gracefully: check manifest hash if present in `authorization_details`, fall back to scope-level checks, reject or require re-approval if no binding is present.
+1. **Manifests → intent** (always structural): the delivery agent checks that generated manifests are consistent with the intent they were rendered from. If the intent says `tenant=acme, namespace=production`, no manifest can target a different tenant or namespace. This is always structural field matching because the manifests are rendered from the intent, not identical to it.
+2. **Intent → token** (hash or structural): the delivery agent checks that the intent matches what the token authorized. With `intent_hash`, this is exact — a compromised platform can't swap in a different intent. Without it, the check is structural field matching against the token's `authorization_details` or `scope`.
+
+Both levels apply regardless. The hash tightens level 2 (intent-to-token) if available.
+
+This binding is compatible with manifest invalidation. When manifests are re-generated (e.g., config rotation triggers `InvalidateManifests`), the intent hasn't changed — the token still authorizes the same intent. The new manifests must still satisfy the same field matching rules. The token binds to the intent, not to specific manifest content, so re-generation doesn't require a new token.
+
+The tradeoff: a compromised platform can generate new manifests that satisfy the field matching rules — anything within the authorized intent. This is inherent to the lazy rendering model (the platform generates manifests from the intent). Tighter intent binding (more fields in `authorization_details`) narrows this. With refresh tokens, the IdP also validates the user is still active on each refresh, but the scope of what can be generated is the same.
+
+#### Field mapping rules
+
+Both validation levels require mapping rules: which token fields correspond to which intent fields (level 2), and which intent fields correspond to which manifest fields (level 1). These rules are the enforcement mechanism — they determine what "consistent with the authorization" actually means structurally.
+
+Start with hardcoded rules in the delivery agent for well-known fields (TBD, but e.g. `namespace`, `tenant` label, resource types). This is code, auditable, and as trustworthy as the delivery agent binary itself. An attacker would need to replace the binary, not just modify a config.
+
+If configurable rules are needed later (dynamic resource types, addons), updates to those rules must be secured by a trust anchor external to the platform — e.g., a token from the platform administrator's IdP, validated the same way any trust configuration change is validated. The platform must not be able to unilaterally loosen the mapping rules on a target. The same principle as IdP trust configuration applies: the platform is a courier for rule updates, not the authority.
+
+#### IdP support
+
+RAR is a published RFC (May 2023). IdP support is growing but not yet universal (Keycloak has partial support via custom protocol mappers, full RAR is in progress). The architecture should accommodate the tightest binding the IdP supports and degrade gracefully: check `authorization_details` fields if present, fall back to `scope`-level checks, reject or require re-approval if no binding is present.
 
 #### Credential durability for long-running operations
 
@@ -286,9 +306,6 @@ A useful refinement is to wrap repo-stored authorization material in a JWE encry
 
 #### Open questions
 
-- Signed intent is viable for K8s (admission webhooks are a natural fit). For other targets, it's a lot to ask – probably K8s-specific.
-- TODO: Could the JWT-embedded provenance model extend to the "signed intent beyond GitOps" use case (lazy signing)? The hash chain from generated manifest → manifest input → JWT is essentially the provenance chain that lazy signing requires.
-- SubjectAccessReview in the webhook needs the user's groups. ID tokens typically carry `sub` and `iss`, not always groups. The webhook may need to query the IdP for group membership or rely on a synced group mapping.
 - RAR (RFC 9396) adoption is still early. The architecture should degrade gracefully when the IdP only supports scopes or audiences. What's the minimum binding level we're willing to accept before falling back to PausedAuth / re-approval?
 - For the CIBA gitops flow: how does CI authenticate to initiate the CIBA flow? It needs its own client credentials with the IdP, which is itself a stored secret. This is a narrow, well-scoped secret (can only initiate approval requests, can't issue tokens without user consent), but it exists.
 
@@ -303,7 +320,7 @@ Which execution form a deployment uses is a property of that deployment, not a g
 
 ### Attestation protocol
 
-Within attested apply, the protocol is uniform regardless of whether the separation is in time, space, or both. The envelope and validation sequence are the same in every case.
+Within attested apply, the protocol is uniform regardless of whether the separation is in time, space, or both. The envelope and validation sequence could be the same in every case (see note below, however, that the gRPC transport makes the signatures mostly moot.)
 
 **Envelope:**
 
@@ -351,9 +368,11 @@ The attestation contract (envelope in → validate → apply) is the same regard
 
 - **Standard**: attestation envelopes delivered over the fleetlet gRPC connection. Simple, low latency. The platform has a live connection to the delivery agent process.
 - **Hardened**: attestation envelopes written to a buffer (S3, Kafka, NATS). The delivery agent reads from the buffer, validates, applies. No direct connection between the platform and the privileged component. The buffer is the airgap. See provider_consumer_model.md for the full buffer mode discussion.
-- **Future option**: SignedIntent CRDs as a K8s-native transport. The delivery agent watches the API server for SignedIntent resources instead of reading from gRPC or a buffer. Adds standard K8s semantics (watch, list, kubectl visibility) without changing the validation contract.
+- **CRD-based (not preferred)**: SignedIntent CRDs as a K8s-native transport. The delivery agent watches the API server for SignedIntent resources instead of reading from gRPC or a buffer. Adds standard K8s semantics (watch, list, kubectl visibility) without changing the validation contract. However, this introduces artificial intermediate resources on the cluster that aren't part of the actual workload — the cluster sees SignedIntent CRs alongside its real resources. The standard and hardened options are preferred because the end cluster only sees the real manifests that were delivered, which is more transparent.
 
 The delivery agent's code is identical across transports. Dialing up the security knob (from standard to hardened to CRD-based) requires no changes to the validation logic or the attestation format — only a transport configuration change.
+
+Note on platform signatures and transport: for the standard (gRPC) transport, the fleetlet connection is already authenticated (mTLS or workload identity). The delivery agent knows the message came from the real platform via connection auth, so a platform signature on the envelope is redundant — the JWT validation (against the tenant IdP) is the meaningful check. The platform signature becomes valuable for buffered transport, where there is no connection-level auth and anyone with write access to the buffer could inject messages. The signature can be deferred until buffer transport is needed without changing the envelope format — it's an additive field.
 
 ## Practical architecture summary
 
