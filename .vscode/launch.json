@@ -1,0 +1,27 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "fleetshift serve",
+      "type": "go",
+      "request": "launch",
+      "mode": "debug",
+      "program": "${workspaceFolder}/fleetshift-server/cmd/fleetshift",
+      "preLaunchTask": "make-debug-tmpdir",
+      "args": ["serve", "--log-level", "debug", "--db", "${workspaceFolder}/.vscode/.debug-tmpdir/fleetshift-debug.db", "--http-addr", ":8090"],
+      "cwd": "${workspaceFolder}/fleetshift-server",
+      "console": "integratedTerminal"
+    },
+    {
+      "name": "fleetshift serve (info)",
+      "type": "go",
+      "request": "launch",
+      "mode": "debug",
+      "program": "${workspaceFolder}/fleetshift-server/cmd/fleetshift",
+      "preLaunchTask": "make-debug-tmpdir",
+      "args": ["serve", "--db", "${workspaceFolder}/.vscode/.debug-tmpdir/fleetshift-debug.db", "--http-addr", ":8090"],
+      "cwd": "${workspaceFolder}/fleetshift-server",
+      "console": "integratedTerminal"
+    }
+  ]
+}
