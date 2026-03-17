@@ -9,7 +9,7 @@
 - [ ] What happens if agent is offline during delivery? Does it stall the whole stage? ([FCN-192](https://redhat.atlassian.net/browse/FCN-192))
 - [ ] How do we securely store tokens used for deployment while being able to place to new targets if placement is updated? I wanted to encrypt per target but that would require reauth on new placement (maybe that is one option). Do we require refresh tokens for this, or store the initial JWT encrypted with a platform key? ([FCN-201](https://redhat.atlassian.net/browse/FCN-201))
 - [ ] How should IdP resolution work for new clusters? In a single tenant situation with a single IdP this is easy. But what about when this is a multitenant provider? ([FCN-202](https://redhat.atlassian.net/browse/FCN-202))
-- [ ] Look at controlled fleet wide upgrades (see related agent conversation)
+- [ ] Look at upgrades (rolling out updates to deployments themselves) (see related agent conversation, "Controlled fleet-wide upgrades with FleetShift")
 
 ## Functionality
 
@@ -23,6 +23,7 @@
 ## Implementation detail (nontrivial)
 
 - [ ] Consider the durable workflow invalidation path – the current "always running" model doesn't work well with DBOS. Do we care? See transcript "Workflow engine behavior during deployment events"
+- [ ] Not sure about the credential design (should we assume one raw token? what about other token types?)
 
 ## Code / Trivial
 
