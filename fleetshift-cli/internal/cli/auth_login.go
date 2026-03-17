@@ -79,7 +79,11 @@ func runAuthLogin(cmd *cobra.Command, _ *cmdContext) error {
 			return
 		}
 		codeCh <- code
-		fmt.Fprint(w, "Authentication successful! You can close this tab.")
+		w.Header().Set("Content-Type", "text/html")
+		fmt.Fprint(w, `<!DOCTYPE html><html><body>
+<p>Authentication successful!</p>
+<script>window.close()</script>
+</body></html>`)
 	})
 
 	server := &http.Server{Handler: mux}
