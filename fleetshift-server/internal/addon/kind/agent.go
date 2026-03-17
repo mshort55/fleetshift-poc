@@ -53,6 +53,10 @@ type ClusterProviderFactory func(logger log.Logger) ClusterProvider
 type Agent struct {
 	providerFactory ClusterProviderFactory
 
+	// Observer receives structured events during cluster delivery.
+	// If nil, a [NoOpAgentObserver] is used.
+	Observer AgentObserver
+
 	// TempDir is the directory for temporary files (e.g., CA certs) that
 	// must be visible to the container runtime. If empty, [os.TempDir]
 	// is used. Container runtimes like Podman only mount specific host
@@ -64,6 +68,13 @@ type Agent struct {
 // NewAgent returns an Agent that creates providers via the given factory.
 func NewAgent(factory ClusterProviderFactory) *Agent {
 	return &Agent{providerFactory: factory}
+}
+
+func (a *Agent) observer() AgentObserver {
+	if a.Observer != nil {
+		return a.Observer
+	}
+	return NoOpAgentObserver{}
 }
 
 // Deliver validates all manifests synchronously. If validation passes,
@@ -114,84 +125,12 @@ func (a *Agent) deliverAsync(ctx context.Context, provider ClusterProvider, spec
 	var outputs []ClusterOutput
 
 	for _, spec := range specs {
-		if a.clusterExists(provider, spec.Name) {
-			signaler.Emit(ctx, domain.DeliveryEvent{
-				Kind:    domain.DeliveryEventProgress,
-				Message: fmt.Sprintf("Deleting existing cluster %q for recreate", spec.Name),
-			})
-			if err := provider.Delete(spec.Name, ""); err != nil {
-				signaler.Emit(ctx, domain.DeliveryEvent{
-					Kind:    domain.DeliveryEventError,
-					Message: fmt.Sprintf("delete existing kind cluster %q for recreate: %v", spec.Name, err),
-				})
-				signaler.Done(ctx, domain.DeliveryResult{
-					State:   domain.DeliveryStateFailed,
-					Message: fmt.Sprintf("delete existing kind cluster %q for recreate: %v", spec.Name, err),
-				})
-				return
-			}
-		}
-
-		rawConfig, err := a.resolveConfig(spec, auth)
-		if err != nil {
-			signaler.Emit(ctx, domain.DeliveryEvent{
-				Kind:    domain.DeliveryEventError,
-				Message: fmt.Sprintf("resolve config for kind cluster %q: %v", spec.Name, err),
-			})
-			signaler.Done(ctx, domain.DeliveryResult{
-				State:   domain.DeliveryStateFailed,
-				Message: fmt.Sprintf("resolve config for kind cluster %q: %v", spec.Name, err),
-			})
+		out, ok := a.deliverCluster(ctx, provider, spec, auth, signaler)
+		if !ok {
 			return
 		}
-
-		var opts []cluster.CreateOption
-		if rawConfig != nil {
-			opts = append(opts, cluster.CreateWithRawConfig(rawConfig))
-		}
-
-		if err := provider.Create(spec.Name, opts...); err != nil {
-			signaler.Emit(ctx, domain.DeliveryEvent{
-				Kind:    domain.DeliveryEventError,
-				Message: fmt.Sprintf("create kind cluster %q: %v", spec.Name, err),
-			})
-			signaler.Done(ctx, domain.DeliveryResult{
-				State:   domain.DeliveryStateFailed,
-				Message: fmt.Sprintf("create kind cluster %q: %v", spec.Name, err),
-			})
-			return
-		}
-
-		kc, err := provider.KubeConfig(spec.Name, false)
-		if err != nil {
-			signaler.Emit(ctx, domain.DeliveryEvent{
-				Kind:    domain.DeliveryEventWarning,
-				Message: fmt.Sprintf("get kubeconfig for %q: %v", spec.Name, err),
-			})
-		} else {
-			if spec.OIDC != nil && auth.Caller != nil {
-				signaler.Emit(ctx, domain.DeliveryEvent{
-					Kind:    domain.DeliveryEventProgress,
-					Message: fmt.Sprintf("Bootstrapping RBAC for %s on %q", auth.Caller.ID, spec.Name),
-				})
-				if err := bootstrapRBAC(ctx, []byte(kc), auth.Caller.Issuer, auth.Caller); err != nil {
-					signaler.Emit(ctx, domain.DeliveryEvent{
-						Kind:    domain.DeliveryEventError,
-						Message: fmt.Sprintf("bootstrap RBAC on %q: %v", spec.Name, err),
-					})
-					signaler.Done(ctx, domain.DeliveryResult{
-						State:   domain.DeliveryStateFailed,
-						Message: fmt.Sprintf("bootstrap RBAC on %q: %v", spec.Name, err),
-					})
-					return
-				}
-			}
-
-			outputs = append(outputs, ClusterOutput{
-				TargetID:   domain.TargetID("k8s-" + spec.Name),
-				Name:       spec.Name,
-				KubeConfig: []byte(kc),
-			})
+		if out != nil {
+			outputs = append(outputs, *out)
 		}
 	}
 
@@ -203,30 +142,120 @@ func (a *Agent) deliverAsync(ctx context.Context, provider ClusterProvider, spec
 	signaler.Done(ctx, result)
 }
 
-// resolveConfig returns the raw kind config bytes for a ClusterSpec.
-// When OIDC is set, the config is generated with OIDC API server flags
-// and an optional CA cert mount; the issuer and audience are derived
-// from the caller's identity. When Config is set, it is returned as-is.
-// Returns nil when neither is set (default kind config).
-func (a *Agent) resolveConfig(spec ClusterSpec, auth domain.DeliveryAuth) ([]byte, error) {
+// deliverCluster handles a single cluster spec. Returns the output on
+// success and true to continue, or nil and false if the delivery failed
+// (signaler.Done already called).
+func (a *Agent) deliverCluster(ctx context.Context, provider ClusterProvider, spec ClusterSpec, auth domain.DeliveryAuth, signaler *domain.DeliverySignaler) (*ClusterOutput, bool) {
+	ctx, probe := a.observer().ClusterDeliverStarted(ctx, spec.Name)
+	defer probe.End()
+
+	if a.clusterExists(provider, spec.Name) {
+		signaler.Emit(ctx, domain.DeliveryEvent{
+			Kind:    domain.DeliveryEventProgress,
+			Message: fmt.Sprintf("Deleting existing cluster %q for recreate", spec.Name),
+		})
+		if err := provider.Delete(spec.Name, ""); err != nil {
+			probe.Error(err)
+			failDelivery(ctx, signaler, "delete existing kind cluster %q for recreate: %v", spec.Name, err)
+			return nil, false
+		}
+	}
+
+	rawConfig, source, err := a.resolveConfig(spec, auth)
+	if err != nil {
+		probe.Error(err)
+		failDelivery(ctx, signaler, "resolve config for kind cluster %q: %v", spec.Name, err)
+		return nil, false
+	}
+
+	var issuer domain.IssuerURL
+	var aud domain.Audience
+	if source == ConfigSourceOIDC {
+		issuer = auth.Caller.Issuer
+		aud = auth.Audience[0]
+	}
+	probe.ConfigResolved(source, issuer, aud)
+
+	var opts []cluster.CreateOption
+	if rawConfig != nil {
+		opts = append(opts, cluster.CreateWithRawConfig(rawConfig))
+	}
+
+	if err := provider.Create(spec.Name, opts...); err != nil {
+		probe.Error(err)
+		failDelivery(ctx, signaler, "create kind cluster %q: %v", spec.Name, err)
+		return nil, false
+	}
+
+	kc, err := provider.KubeConfig(spec.Name, false)
+	if err != nil {
+		signaler.Emit(ctx, domain.DeliveryEvent{
+			Kind:    domain.DeliveryEventWarning,
+			Message: fmt.Sprintf("get kubeconfig for %q: %v", spec.Name, err),
+		})
+		return nil, true
+	}
+
+	if spec.OIDC != nil && auth.Caller != nil {
+		signaler.Emit(ctx, domain.DeliveryEvent{
+			Kind:    domain.DeliveryEventProgress,
+			Message: fmt.Sprintf("Bootstrapping RBAC for %s on %q", auth.Caller.ID, spec.Name),
+		})
+		username := string(auth.Caller.Issuer) + "#" + string(auth.Caller.ID)
+		if err := bootstrapRBAC(ctx, []byte(kc), auth.Caller.Issuer, auth.Caller); err != nil {
+			probe.Error(err)
+			failDelivery(ctx, signaler, "bootstrap RBAC on %q: %v", spec.Name, err)
+			return nil, false
+		}
+		probe.RBACBootstrapped(auth.Caller.ID, username)
+	}
+
+	out := ClusterOutput{
+		TargetID:   domain.TargetID("k8s-" + spec.Name),
+		Name:       spec.Name,
+		KubeConfig: []byte(kc),
+	}
+	return &out, true
+}
+
+func failDelivery(ctx context.Context, signaler *domain.DeliverySignaler, format string, args ...any) {
+	msg := fmt.Sprintf(format, args...)
+	signaler.Emit(ctx, domain.DeliveryEvent{
+		Kind:    domain.DeliveryEventError,
+		Message: msg,
+	})
+	signaler.Done(ctx, domain.DeliveryResult{
+		State:   domain.DeliveryStateFailed,
+		Message: msg,
+	})
+}
+
+// resolveConfig returns the raw kind config bytes and the
+// [ConfigSource] for a ClusterSpec. When OIDC is set, the config is
+// generated with OIDC API server flags and an optional CA cert mount;
+// the issuer and audience are derived from the caller's identity. When
+// Config is set, it is returned as-is. Returns nil when neither is set
+// (default kind config).
+func (a *Agent) resolveConfig(spec ClusterSpec, auth domain.DeliveryAuth) ([]byte, ConfigSource, error) {
 	if spec.OIDC != nil {
 		var caCertHostPath string
 		if len(spec.OIDC.CABundle) > 0 {
 			path, err := writeCABundle(spec.OIDC.CABundle, a.TempDir)
 			if err != nil {
-				return nil, err
+				return nil, "", err
 			}
 			caCertHostPath = path
 		}
 		// TODO: audience policy -- for now we use the first audience from
 		// the caller's token. This couples the cluster's oidc-client-id to
 		// whatever audience the platform validated the user against.
-		return BuildKindOIDCConfig(auth.Caller.Issuer, auth.Audience[0], spec.OIDC, caCertHostPath)
+		cfg, err := BuildKindOIDCConfig(auth.Caller.Issuer, auth.Audience[0], spec.OIDC, caCertHostPath)
+		return cfg, ConfigSourceOIDC, err
 	}
 	if len(spec.Config) > 0 {
-		return spec.Config, nil
+		return spec.Config, ConfigSourceCustom, nil
 	}
-	return nil, nil
+	return nil, ConfigSourceDefault, nil
 }
 
 func (a *Agent) clusterExists(provider ClusterProvider, name string) bool {

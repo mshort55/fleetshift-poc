@@ -81,18 +81,19 @@ func runServe(ctx context.Context, f *serveFlags) error {
 
 	router := delivery.NewRoutingDeliveryService()
 
-	kindAgent := kindaddon.NewAgent(func(logger kindlog.Logger) kindaddon.ClusterProvider {
-		return cluster.NewProvider(cluster.ProviderWithLogger(logger))
-	})
-	router.Register(kindaddon.TargetType, kindAgent)
-
-	kubeAgent := kubernetesaddon.NewAgent(vault)
-	router.Register(kubernetesaddon.TargetType, kubeAgent)
-
 	logger, err := buildLogger(f.logLevel, f.logFormat)
 	if err != nil {
 		return err
 	}
+
+	kindAgent := kindaddon.NewAgent(func(logger kindlog.Logger) kindaddon.ClusterProvider {
+		return cluster.NewProvider(cluster.ProviderWithLogger(logger))
+	})
+	kindAgent.Observer = kindaddon.NewSlogAgentObserver(logger)
+	router.Register(kindaddon.TargetType, kindAgent)
+
+	kubeAgent := kubernetesaddon.NewAgent(vault)
+	router.Register(kubernetesaddon.TargetType, kubeAgent)
 
 	wfBackend := wfsqlite.NewSqliteBackend(f.dbPath,
 		wfsqlite.WithBackendOptions(wfbackend.WithLogger(logger)),

@@ -400,3 +400,147 @@ func (o *recordingDeliveryObserver) EventEmitted(ctx context.Context, _ domain.D
 func (o *recordingDeliveryObserver) Completed(ctx context.Context, _ domain.DeliveryID, _ domain.TargetInfo, _ domain.DeliveryResult) (context.Context, domain.CompletedProbe) {
 	return ctx, domain.NoOpCompletedProbe{}
 }
+
+// recordingAgentObserver captures [kind.ClusterDeliverProbe] events.
+type recordingAgentObserver struct {
+	kind.NoOpAgentObserver
+	mu      sync.Mutex
+	probes  []*recordingClusterProbe
+}
+
+func (o *recordingAgentObserver) ClusterDeliverStarted(ctx context.Context, clusterName string) (context.Context, kind.ClusterDeliverProbe) {
+	p := &recordingClusterProbe{clusterName: clusterName}
+	o.mu.Lock()
+	o.probes = append(o.probes, p)
+	o.mu.Unlock()
+	return ctx, p
+}
+
+type recordingClusterProbe struct {
+	kind.NoOpClusterDeliverProbe
+	clusterName string
+	source      kind.ConfigSource
+	issuerURL   domain.IssuerURL
+	audience    domain.Audience
+	rbacSubject domain.SubjectID
+	rbacUser    string
+	err         error
+	ended       bool
+}
+
+func (p *recordingClusterProbe) ConfigResolved(source kind.ConfigSource, issuerURL domain.IssuerURL, audience domain.Audience) {
+	p.source = source
+	p.issuerURL = issuerURL
+	p.audience = audience
+}
+
+func (p *recordingClusterProbe) RBACBootstrapped(subjectID domain.SubjectID, username string) {
+	p.rbacSubject = subjectID
+	p.rbacUser = username
+}
+
+func (p *recordingClusterProbe) Error(err error) { p.err = err }
+func (p *recordingClusterProbe) End()            { p.ended = true }
+
+func TestAgent_Observer_DefaultConfig(t *testing.T) {
+	provider := newFakeProvider()
+	obs := newChannelDeliveryObserver()
+	signaler := newChannelSignaler(obs)
+
+	agentObs := &recordingAgentObserver{}
+	agent := kind.NewAgent(fakeFactory(provider))
+	agent.Observer = agentObs
+
+	manifests := []domain.Manifest{{
+		ResourceType: kind.ClusterResourceType,
+		Raw:          json.RawMessage(`{"name": "default-cfg"}`),
+	}}
+
+	_, err := agent.Deliver(context.Background(), domain.TargetInfo{}, "d1:k1", manifests, domain.DeliveryAuth{}, signaler)
+	if err != nil {
+		t.Fatalf("Deliver: %v", err)
+	}
+	<-obs.done
+
+	agentObs.mu.Lock()
+	defer agentObs.mu.Unlock()
+
+	if len(agentObs.probes) != 1 {
+		t.Fatalf("expected 1 probe, got %d", len(agentObs.probes))
+	}
+	p := agentObs.probes[0]
+	if p.clusterName != "default-cfg" {
+		t.Errorf("clusterName = %q, want %q", p.clusterName, "default-cfg")
+	}
+	if p.source != kind.ConfigSourceDefault {
+		t.Errorf("source = %q, want %q", p.source, kind.ConfigSourceDefault)
+	}
+	if !p.ended {
+		t.Error("probe.End() was not called")
+	}
+}
+
+func TestAgent_Observer_CustomConfig(t *testing.T) {
+	provider := newFakeProvider()
+	obs := newChannelDeliveryObserver()
+	signaler := newChannelSignaler(obs)
+
+	agentObs := &recordingAgentObserver{}
+	agent := kind.NewAgent(fakeFactory(provider))
+	agent.Observer = agentObs
+
+	manifests := []domain.Manifest{{
+		ResourceType: kind.ClusterResourceType,
+		Raw:          json.RawMessage(`{"name": "custom-cfg", "config": "kind: Cluster\napiVersion: kind.x-k8s.io/v1alpha4"}`),
+	}}
+
+	_, err := agent.Deliver(context.Background(), domain.TargetInfo{}, "d1:k1", manifests, domain.DeliveryAuth{}, signaler)
+	if err != nil {
+		t.Fatalf("Deliver: %v", err)
+	}
+	<-obs.done
+
+	agentObs.mu.Lock()
+	defer agentObs.mu.Unlock()
+
+	if len(agentObs.probes) != 1 {
+		t.Fatalf("expected 1 probe, got %d", len(agentObs.probes))
+	}
+	if agentObs.probes[0].source != kind.ConfigSourceCustom {
+		t.Errorf("source = %q, want %q", agentObs.probes[0].source, kind.ConfigSourceCustom)
+	}
+}
+
+func TestAgent_Observer_MultipleSpecs(t *testing.T) {
+	provider := newFakeProvider()
+	obs := newChannelDeliveryObserver()
+	signaler := newChannelSignaler(obs)
+
+	agentObs := &recordingAgentObserver{}
+	agent := kind.NewAgent(fakeFactory(provider))
+	agent.Observer = agentObs
+
+	manifests := []domain.Manifest{
+		{ResourceType: kind.ClusterResourceType, Raw: json.RawMessage(`{"name": "a"}`)},
+		{ResourceType: kind.ClusterResourceType, Raw: json.RawMessage(`{"name": "b"}`)},
+	}
+
+	_, err := agent.Deliver(context.Background(), domain.TargetInfo{}, "d1:k1", manifests, domain.DeliveryAuth{}, signaler)
+	if err != nil {
+		t.Fatalf("Deliver: %v", err)
+	}
+	<-obs.done
+
+	agentObs.mu.Lock()
+	defer agentObs.mu.Unlock()
+
+	if len(agentObs.probes) != 2 {
+		t.Fatalf("expected 2 probes (one per cluster), got %d", len(agentObs.probes))
+	}
+	if agentObs.probes[0].clusterName != "a" {
+		t.Errorf("probes[0].clusterName = %q, want %q", agentObs.probes[0].clusterName, "a")
+	}
+	if agentObs.probes[1].clusterName != "b" {
+		t.Errorf("probes[1].clusterName = %q, want %q", agentObs.probes[1].clusterName, "b")
+	}
+}
