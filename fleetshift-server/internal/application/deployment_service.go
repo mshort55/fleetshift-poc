@@ -20,6 +20,13 @@ func (s *DeploymentService) Create(ctx context.Context, in domain.CreateDeployme
 		return domain.Deployment{}, fmt.Errorf("%w: deployment ID is required", domain.ErrInvalidArgument)
 	}
 
+	if ac := AuthFromContext(ctx); ac != nil && ac.Subject != nil {
+		in.Auth = domain.DeliveryAuth{
+			Caller:   ac.Subject,
+			Audience: ac.Audience,
+		}
+	}
+
 	exec, err := s.CreateWF.Start(ctx, in)
 	if err != nil {
 		return domain.Deployment{}, fmt.Errorf("start create-deployment workflow: %w", err)

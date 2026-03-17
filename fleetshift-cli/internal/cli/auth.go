@@ -11,6 +11,7 @@ func newAuthCmd(ctx *cmdContext) *cobra.Command {
 	cmd.AddCommand(
 		newAuthSetupCmd(ctx),
 		newAuthLoginCmd(ctx),
+		newAuthInspectTokenCmd(ctx),
 	)
 
 	return cmd

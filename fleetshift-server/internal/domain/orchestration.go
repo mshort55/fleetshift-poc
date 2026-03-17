@@ -551,6 +551,7 @@ func (s *OrchestrationWorkflowSpec) executeRolloutPlan(
 					DeliveryID:   did,
 					DeploymentID: deploymentID,
 					Manifests:    manifests,
+					Auth:         dep.Auth,
 				}); err != nil {
 					return fmt.Errorf("deliver to target %s: %w", target.ID, err)
 				}

@@ -14,6 +14,7 @@ type CreateDeploymentInput struct {
 	ManifestStrategy  ManifestStrategySpec
 	PlacementStrategy PlacementStrategySpec
 	RolloutStrategy   *RolloutStrategySpec
+	Auth              DeliveryAuth
 }
 
 // CreateDeploymentWorkflowSpec is a short-lived parent workflow that
@@ -55,6 +56,7 @@ func (s *CreateDeploymentWorkflowSpec) PersistDeployment() Activity[CreateDeploy
 			ManifestStrategy:  in.ManifestStrategy,
 			PlacementStrategy: in.PlacementStrategy,
 			RolloutStrategy:   in.RolloutStrategy,
+			Auth:              in.Auth,
 			State:             DeploymentStateCreating,
 			CreatedAt:         now,
 			UpdatedAt:         now,

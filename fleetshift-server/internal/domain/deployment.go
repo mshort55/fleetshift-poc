@@ -21,6 +21,7 @@ type Deployment struct {
 	RolloutStrategy   *RolloutStrategySpec // nil means immediate
 	ResolvedTargets   []TargetID
 	State             DeploymentState
+	Auth              DeliveryAuth // authorization context; may change over time (e.g. token refresh)
 	CreatedAt         time.Time
 	UpdatedAt         time.Time
 	Etag              string
