@@ -52,27 +52,48 @@ type ClusterProviderFactory func(logger log.Logger) ClusterProvider
 // Agent implements [domain.DeliveryAgent] for kind clusters.
 type Agent struct {
 	providerFactory ClusterProviderFactory
+	observer        AgentObserver
+	tempDir         string
+	oidcCABundle    []byte
+}
 
-	// Observer receives structured events during cluster delivery.
-	// If nil, a [NoOpAgentObserver] is used.
-	Observer AgentObserver
+// AgentOption configures an [Agent].
+type AgentOption func(*Agent)
 
-	// TempDir is the directory for temporary files (e.g., CA certs) that
-	// must be visible to the container runtime. If empty, [os.TempDir]
-	// is used. Container runtimes like Podman only mount specific host
-	// paths into the VM, so callers should set this to a path the
-	// runtime can see.
-	TempDir string
+// WithObserver sets the [AgentObserver] for delivery lifecycle events.
+func WithObserver(o AgentObserver) AgentOption {
+	return func(a *Agent) { a.observer = o }
+}
+
+// WithTempDir sets the directory for temporary files (e.g., CA certs)
+// that must be visible to the container runtime. If unset, [os.TempDir]
+// is used. Container runtimes like Podman only mount specific host
+// paths into the VM, so callers should set this to a path the runtime
+// can see.
+func WithTempDir(dir string) AgentOption {
+	return func(a *Agent) { a.tempDir = dir }
+}
+
+// WithOIDCCABundle sets a PEM-encoded CA certificate for trusting the
+// OIDC issuer's TLS. When set, the agent mounts it into kind nodes and
+// configures --oidc-ca-file. When empty, the API server uses its system
+// trust store.
+func WithOIDCCABundle(pem []byte) AgentOption {
+	return func(a *Agent) { a.oidcCABundle = pem }
 }
 
 // NewAgent returns an Agent that creates providers via the given factory.
-func NewAgent(factory ClusterProviderFactory) *Agent {
-	return &Agent{providerFactory: factory}
+func NewAgent(factory ClusterProviderFactory, opts ...AgentOption) *Agent {
+	a := &Agent{providerFactory: factory}
+	for _, o := range opts {
+		o(a)
+	}
+	return a
 }
 
-func (a *Agent) observer() AgentObserver {
-	if a.Observer != nil {
-		return a.Observer
+func (a *Agent) agentObserver() AgentObserver {
+	if a.observer != nil {
+		return a.observer
 	}
 	return NoOpAgentObserver{}
 }
@@ -111,11 +132,8 @@ func (a *Agent) validateManifests(manifests []domain.Manifest, auth domain.Deliv
 		if specs[i].OIDC != nil && len(specs[i].Config) > 0 {
 			return nil, fmt.Errorf("%w: kind cluster spec cannot have both config and oidc", domain.ErrInvalidArgument)
 		}
-		if specs[i].OIDC != nil && auth.Caller == nil {
-			return nil, fmt.Errorf("%w: OIDC cluster creation requires an authenticated caller", domain.ErrInvalidArgument)
-		}
-		if specs[i].OIDC != nil && len(auth.Audience) == 0 {
-			return nil, fmt.Errorf("%w: OIDC cluster creation requires a caller audience", domain.ErrInvalidArgument)
+		if len(specs[i].Config) > 0 && auth.Caller != nil {
+			return nil, fmt.Errorf("%w: kind cluster spec cannot have both config and an authenticated caller", domain.ErrInvalidArgument)
 		}
 	}
 	return specs, nil
@@ -146,7 +164,7 @@ func (a *Agent) deliverAsync(ctx context.Context, provider ClusterProvider, spec
 // success and true to continue, or nil and false if the delivery failed
 // (signaler.Done already called).
 func (a *Agent) deliverCluster(ctx context.Context, provider ClusterProvider, spec ClusterSpec, auth domain.DeliveryAuth, signaler *domain.DeliverySignaler) (*ClusterOutput, bool) {
-	ctx, probe := a.observer().ClusterDeliverStarted(ctx, spec.Name)
+	ctx, probe := a.agentObserver().ClusterDeliverStarted(ctx, spec.Name)
 	defer probe.End()
 
 	if a.clusterExists(provider, spec.Name) {
@@ -196,7 +214,7 @@ func (a *Agent) deliverCluster(ctx context.Context, provider ClusterProvider, sp
 		return nil, true
 	}
 
-	if spec.OIDC != nil && auth.Caller != nil {
+	if auth.Caller != nil {
 		signaler.Emit(ctx, domain.DeliveryEvent{
 			Kind:    domain.DeliveryEventProgress,
 			Message: fmt.Sprintf("Bootstrapping RBAC for %s on %q", auth.Caller.ID, spec.Name),
@@ -231,25 +249,29 @@ func failDelivery(ctx context.Context, signaler *domain.DeliverySignaler, format
 }
 
 // resolveConfig returns the raw kind config bytes and the
-// [ConfigSource] for a ClusterSpec. When OIDC is set, the config is
-// generated with OIDC API server flags and an optional CA cert mount;
-// the issuer and audience are derived from the caller's identity. When
-// Config is set, it is returned as-is. Returns nil when neither is set
-// (default kind config).
+// [ConfigSource] for a ClusterSpec. When an authenticated caller is
+// present, the config includes OIDC API server flags derived from the
+// caller's identity, with an optional CA cert mount. When Config is
+// set (no caller), it is returned as-is. Returns nil when neither
+// applies (default kind config).
 func (a *Agent) resolveConfig(spec ClusterSpec, auth domain.DeliveryAuth) ([]byte, ConfigSource, error) {
-	if spec.OIDC != nil {
+	if auth.Caller != nil {
 		var caCertHostPath string
-		if len(spec.OIDC.CABundle) > 0 {
-			path, err := writeCABundle(spec.OIDC.CABundle, a.TempDir)
+		if len(a.oidcCABundle) > 0 {
+			path, err := writeCABundle(a.oidcCABundle, a.tempDir)
 			if err != nil {
 				return nil, "", err
 			}
 			caCertHostPath = path
 		}
+		oidcSpec := spec.OIDC
+		if oidcSpec == nil {
+			oidcSpec = &OIDCSpec{}
+		}
 		// TODO: audience policy -- for now we use the first audience from
 		// the caller's token. This couples the cluster's oidc-client-id to
 		// whatever audience the platform validated the user against.
-		cfg, err := BuildKindOIDCConfig(auth.Caller.Issuer, auth.Audience[0], spec.OIDC, caCertHostPath)
+		cfg, err := BuildKindOIDCConfig(auth.Caller.Issuer, auth.Audience[0], oidcSpec, caCertHostPath)
 		return cfg, ConfigSourceOIDC, err
 	}
 	if len(spec.Config) > 0 {

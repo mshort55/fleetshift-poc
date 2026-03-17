@@ -40,11 +40,12 @@ import (
 )
 
 type serveFlags struct {
-	grpcAddr  string
-	httpAddr  string
-	dbPath    string
-	logLevel  string
-	logFormat string
+	grpcAddr   string
+	httpAddr   string
+	dbPath     string
+	logLevel   string
+	logFormat  string
+	oidcCAFile string
 }
 
 func newServeCmd() *cobra.Command {
@@ -61,6 +62,7 @@ func newServeCmd() *cobra.Command {
 	cmd.Flags().StringVar(&f.dbPath, "db", "fleetshift.db", "SQLite database path")
 	cmd.Flags().StringVar(&f.logLevel, "log-level", "info", "log level (debug, info, warn, error)")
 	cmd.Flags().StringVar(&f.logFormat, "log-format", "text", "log format (text, json)")
+	cmd.Flags().StringVar(&f.oidcCAFile, "oidc-ca-file", "", "PEM CA certificate for OIDC issuers (for kind clusters trusting self-signed or local CAs)")
 	return cmd
 }
 
@@ -86,10 +88,22 @@ func runServe(ctx context.Context, f *serveFlags) error {
 		return err
 	}
 
-	kindAgent := kindaddon.NewAgent(func(logger kindlog.Logger) kindaddon.ClusterProvider {
-		return cluster.NewProvider(cluster.ProviderWithLogger(logger))
-	})
-	kindAgent.Observer = kindaddon.NewSlogAgentObserver(logger)
+	kindOpts := []kindaddon.AgentOption{
+		kindaddon.WithObserver(kindaddon.NewSlogAgentObserver(logger)),
+	}
+	if f.oidcCAFile != "" {
+		caBundle, err := os.ReadFile(f.oidcCAFile)
+		if err != nil {
+			return fmt.Errorf("read OIDC CA file: %w", err)
+		}
+		kindOpts = append(kindOpts, kindaddon.WithOIDCCABundle(caBundle))
+	}
+	kindAgent := kindaddon.NewAgent(
+		func(logger kindlog.Logger) kindaddon.ClusterProvider {
+			return cluster.NewProvider(cluster.ProviderWithLogger(logger))
+		},
+		kindOpts...,
+	)
 	router.Register(kindaddon.TargetType, kindAgent)
 
 	kubeAgent := kubernetesaddon.NewAgent(vault)

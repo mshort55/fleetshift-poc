@@ -52,14 +52,13 @@ func createOIDCCluster(t *testing.T, clusterName string, auth domain.DeliveryAut
 
 	kindAgent := kindaddon.NewAgent(func(logger log.Logger) kindaddon.ClusterProvider {
 		return cluster.NewProvider(cluster.ProviderWithLogger(logger))
-	})
-	kindAgent.TempDir = t.TempDir()
+	},
+		kindaddon.WithTempDir(t.TempDir()),
+		kindaddon.WithOIDCCABundle(idp.CACertPEM()),
+	)
 
 	spec := kindaddon.ClusterSpec{
 		Name: clusterName,
-		OIDC: &kindaddon.OIDCSpec{
-			CABundle: idp.CACertPEM(),
-		},
 	}
 	specBytes, err := json.Marshal(spec)
 	if err != nil {

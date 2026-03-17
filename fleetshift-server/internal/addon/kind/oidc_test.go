@@ -35,10 +35,8 @@ func TestBuildKindOIDCConfig_BasicFlags(t *testing.T) {
 	}
 }
 
-func TestBuildKindOIDCConfig_WithCABundle(t *testing.T) {
-	spec := &kind.OIDCSpec{
-		CABundle: []byte("-----BEGIN CERTIFICATE-----\nfake\n-----END CERTIFICATE-----"),
-	}
+func TestBuildKindOIDCConfig_WithCACertPath(t *testing.T) {
+	spec := &kind.OIDCSpec{}
 
 	cfg, err := kind.BuildKindOIDCConfig("https://host.docker.internal:9443", "fleetshift", spec, "/tmp/ca.pem")
 	if err != nil {
@@ -97,14 +95,13 @@ func callerAuth() domain.DeliveryAuth {
 	}
 }
 
-func TestAgent_Deliver_OIDCAndConfigMutuallyExclusive(t *testing.T) {
+func TestAgent_Deliver_ConfigWithCallerRejected(t *testing.T) {
 	provider := newFakeProvider()
 	agent := kind.NewAgent(fakeFactory(provider))
 
 	spec := kind.ClusterSpec{
 		Name:   "bad-cluster",
 		Config: json.RawMessage(`{"kind":"Cluster"}`),
-		OIDC:   &kind.OIDCSpec{},
 	}
 	specBytes, _ := json.Marshal(spec)
 
@@ -116,35 +113,7 @@ func TestAgent_Deliver_OIDCAndConfigMutuallyExclusive(t *testing.T) {
 
 	result, err := agent.Deliver(context.Background(), target, "d1:k1", manifests, callerAuth(), nop)
 	if err == nil {
-		t.Fatal("expected error for config + oidc")
-	}
-	if !errors.Is(err, domain.ErrInvalidArgument) {
-		t.Errorf("expected ErrInvalidArgument, got: %v", err)
-	}
-	if result.State != domain.DeliveryStateFailed {
-		t.Errorf("State = %q, want %q", result.State, domain.DeliveryStateFailed)
-	}
-}
-
-func TestAgent_Deliver_OIDCWithoutCallerRejected(t *testing.T) {
-	provider := newFakeProvider()
-	agent := kind.NewAgent(fakeFactory(provider))
-
-	spec := kind.ClusterSpec{
-		Name: "bad-cluster",
-		OIDC: &kind.OIDCSpec{},
-	}
-	specBytes, _ := json.Marshal(spec)
-
-	target := domain.TargetInfo{ID: "k1", Type: kind.TargetType, Name: "local-kind"}
-	manifests := []domain.Manifest{{
-		ResourceType: kind.ClusterResourceType,
-		Raw:          json.RawMessage(specBytes),
-	}}
-
-	result, err := agent.Deliver(context.Background(), target, "d1:k1", manifests, domain.DeliveryAuth{}, nop)
-	if err == nil {
-		t.Fatal("expected error for OIDC without caller")
+		t.Fatal("expected error for config + authenticated caller")
 	}
 	if !errors.Is(err, domain.ErrInvalidArgument) {
 		t.Errorf("expected ErrInvalidArgument, got: %v", err)

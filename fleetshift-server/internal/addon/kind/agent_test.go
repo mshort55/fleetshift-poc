@@ -448,8 +448,7 @@ func TestAgent_Observer_DefaultConfig(t *testing.T) {
 	signaler := newChannelSignaler(obs)
 
 	agentObs := &recordingAgentObserver{}
-	agent := kind.NewAgent(fakeFactory(provider))
-	agent.Observer = agentObs
+	agent := kind.NewAgent(fakeFactory(provider), kind.WithObserver(agentObs))
 
 	manifests := []domain.Manifest{{
 		ResourceType: kind.ClusterResourceType,
@@ -486,8 +485,7 @@ func TestAgent_Observer_CustomConfig(t *testing.T) {
 	signaler := newChannelSignaler(obs)
 
 	agentObs := &recordingAgentObserver{}
-	agent := kind.NewAgent(fakeFactory(provider))
-	agent.Observer = agentObs
+	agent := kind.NewAgent(fakeFactory(provider), kind.WithObserver(agentObs))
 
 	manifests := []domain.Manifest{{
 		ResourceType: kind.ClusterResourceType,
@@ -517,8 +515,7 @@ func TestAgent_Observer_MultipleSpecs(t *testing.T) {
 	signaler := newChannelSignaler(obs)
 
 	agentObs := &recordingAgentObserver{}
-	agent := kind.NewAgent(fakeFactory(provider))
-	agent.Observer = agentObs
+	agent := kind.NewAgent(fakeFactory(provider), kind.WithObserver(agentObs))
 
 	manifests := []domain.Manifest{
 		{ResourceType: kind.ClusterResourceType, Raw: json.RawMessage(`{"name": "a"}`)},

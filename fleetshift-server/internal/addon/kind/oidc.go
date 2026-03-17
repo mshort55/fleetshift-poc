@@ -16,12 +16,12 @@ import (
 
 // OIDCSpec configures the K8s API server's OIDC authentication on a
 // kind cluster. The issuer URL and audience (client ID) are derived
-// from the caller's identity via [domain.DeliveryAuth]; this spec
-// carries only infrastructure config that can't be derived.
+// from the caller's identity via [domain.DeliveryAuth]. CA trust for
+// the OIDC issuer is infrastructure config on the [Agent], not
+// per-cluster config.
 type OIDCSpec struct {
 	UsernameClaim string `json:"usernameClaim,omitempty"` // default: "sub"
 	GroupsClaim   string `json:"groupsClaim,omitempty"`   // default: "groups"
-	CABundle      []byte `json:"caBundle,omitempty"`      // PEM-encoded CA cert; for self-signed issuers
 }
 
 func (s *OIDCSpec) usernameClaim() string {
