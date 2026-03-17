@@ -38,3 +38,6 @@ go.work.sum
 *.db
 *.db-shm
 *.db-wal
+
+# Local test certs
+*.pem
