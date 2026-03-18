@@ -6,32 +6,21 @@ Principles:
 - End to end user identity everywhere – auditable, no confused deputy
 - It follows that trust anchors must be external to the platform. The platform is a consumer of tenant trust or addon trust, never an authority over them. Compromising the platform must not be sufficient to forge identity or redirect trust.
 
-## Big ideas
+## The delivery problem
 
-- The easy secure case is platform-side work like inventory, search, and other operations the platform can authorize and audit locally. The hard case is delivery: acting later, elsewhere, or both, when the user is no longer making the target API call directly.
-- Prefer direct user identity at the target when possible (`token passthrough`). When that is not durable enough, the fallback is not "give the platform broad standing power"; it is to carry proof of user intent forward (`accepted initial authorization`, `signed intent`) or use tightly scoped delegation (`delegation SAs`, sometimes refresh tokens).
-- The main design split is between three separate knobs: credential durability (how authority persists over time), attested apply (how user intent is proven and validated at the target), and transport (how the instruction reaches the target). Keeping those separate lets the system get stricter without redesigning everything at once.
-- Bootstrap-time privilege is sometimes unavoidable, but it must not become steady-state trust authority. In particular, the platform must not be able to rewrite target trust configuration or otherwise turn temporary operational access into permanent identity authority.
+The platform frequently acts as an intermediary between a user and a target where the user isn't making the API call directly. This is a problem in both time and space:
 
-## Challenges
+- **Time**: long-running rollouts outlive the user's token. The authorization must persist beyond the token's validity window.
+- **Space**: in provider delivery, the authorization must cross a trust boundary the user doesn't span directly. The user is behind the curtain with no direct authority at the factory cluster. See provider_consumer_model.md for the full provider/consumer/factory topology.
 
-- Git ops – GitOps has a platform level indirection: the git repo is the authority, and the platform applies from there. Some tools may support tenant-specific service accounts or impersonation.
-- Audience scoping – if we want to scope tokens to particular clusters, we need separate audiences for those. More IdP configuration to do. Hard to make dynamic. Token Exchange (RFC 8693) can address this: exchange a platform-audience token for a target-audience token at the IdP. The IdP controls policy (which exchanges are allowed, for which audiences). This avoids per-cluster client IDs but requires IdP support (Keycloak, Dex have it; Auth0/Okta partial).
-- Reconciliation – this is similar to the gitops challenge.
-- Permission tracking – when a delegation service account's RBAC should track the creating user's permissions over time.
-- Root user – there should be some non-IdP issued credential or out of band channel for configuring IdP trust. If your IdP is down or compromised or you messed up the configuration and you need to reconfigure, you need some escape hatch.
-- Trust anchor distribution – this might be solved but it is tricky to think through end to end. If you are trying to avoid privileged service accounts, then you also need to be very careful about how trust is established to tenant-level roots itself. If a compromise can reconfigure all of those, then all of the end to end verification is not helping there.
-- BMC credentials are unavoidable – maybe they can only be retrieved with a user token
+Both require the platform to carry proof of the user's intent to a place or moment where the user can't present it themselves. The solutions fall into two families:
 
-## Bootstrapping targets
+- **Run-as-you**: the target sees the user's live identity (`token passthrough`, or `refresh tokens` when the IdP can safely mint fresh ones).
+- **Run-as-platform/delegate**: the target sees a platform or delegated identity, but the operation carries proof of which user authorized it (`accepted initial authorization`, `delegation SAs`, `signed intent`).
 
-When targets (e.g. clusters) are bootstrapped, some elevated privilege is unavoidable (for example, a kubeconfig or a privileged user). That privilege can bootstrap RBAC syncing and related setup, whether those are their own deployments or part of the cluster deployment itself.
+Some modes only work when the user already has direct authority at the target; others carry proof across that boundary. The trust model, design approach, and authorization modes below address how these families are realized.
 
-For the delegation SA model, bootstrapping also provisions the platform's own identity in the cluster. Its service account may get narrow impersonation permissions (to impersonate delegate SAs). This places trust in the platform, but it is scoped and auditable. We may not need this model.
-
-Critically, bootstrapping must not give the platform **ongoing** authority over IdP trust configuration at the target. Elevated privileges during bootstrap are acceptable because they are time-bounded and observable. But if the platform retains the ability to reconfigure which IdP the target trusts, then a platform compromise can redirect trust and forge identity — defeating all downstream verification. The platform's runtime credentials at a target should be scoped to workload operations, not authentication configuration. Any bootstrap or proxy path that relies on a privileged kubeconfig should be retired, rotated, or otherwise narrowed as soon as possible, and must not become the authority over target trust configuration.
-
-## Distributing trust anchors
+## Trust model
 
 Anything that verifies credentials has to have a trust root. Updating that trust root must itself require credentials that chain back to the current root. For OIDC, changing the issuer should require credentials from the current issuer, except for an explicit break-glass path.
 
@@ -63,19 +52,14 @@ For self-managed clusters: how IdP trust reaches the target is TBD. The key cons
 
 A compromised platform cannot subvert IdP trust on existing targets — the trust is already established and the platform has no write access to it. Only new targets during a compromise window are at risk, and only if the platform is in the trust establishment path for those targets. For cloud-managed clusters this risk is eliminated by IAM separation.
 
-## Durable user authorization
+## Design approach
 
-The platform frequently acts as an intermediary between a user and a target where the user isn't making the API call directly. This is a problem in both time and space:
+- Platform-side work (inventory, search, local operations) is the easy case — the platform can authorize and audit those locally. The delivery problem above is where the design must be careful.
+- Prefer direct user identity at the target when possible (`token passthrough`). When that is not durable enough, the fallback is not "give the platform broad standing power"; it is to carry proof of user intent forward (`accepted initial authorization`, `signed intent`) or use tightly scoped delegation (`delegation SAs`, sometimes refresh tokens).
+- The main design split is between two separate dimensions: provenance (how the operation proves who authorized it — ranging from a live token through an attested envelope to a user signature) and transport (how the instruction reaches the target). These are genuinely orthogonal: any provenance strategy works over any transport. The authorization modes below are different provenance strategies, not independent knobs to be combined.
+- Bootstrap-time privilege is sometimes unavoidable, but it must not become steady-state trust authority. In particular, the platform must not be able to rewrite target trust configuration or otherwise turn temporary operational access into permanent identity authority.
 
-- **Time**: long-running rollouts outlive the user's token. The authorization must persist beyond the token's validity window.
-- **Space**: in provider delivery, the authorization must cross a trust boundary the user doesn't span directly. The user is behind the curtain with no direct authority at the factory cluster. See provider_consumer_model.md for the full provider/consumer/factory topology.
-
-Both require the platform to carry proof of the user's intent to a place or moment where the user can't present it themselves. The durability modes below fall into two families:
-
-- **Run-as-you**: the target sees the user's live identity (`token passthrough`, or `refresh tokens` when the IdP can safely mint fresh ones).
-- **Run-as-platform/delegate**: the target sees a platform or delegated identity, but the operation carries proof of which user authorized it (`accepted initial authorization`, `delegation SAs`, `signed intent`).
-
-Some modes only work when the user already has direct authority at the target; others carry proof across that boundary.
+## Authorization modes
 
 ### Common fallback: PausedAuth and CIBA
 
@@ -157,32 +141,12 @@ This is conceptually similar to the above, but means the platform directly imper
 
 With token passthrough, the IdP is the authority on claims – groups are in the token, cryptographically signed by the IdP. With impersonation, the platform is the authority. This is a fundamentally weaker trust model for any environment where group-based authorization matters. At most it should be a compatibility fallback, not the preferred steady-state model.
 
-## IdP orchestration
+## Signed intent
 
-In various scenarios, we could benefit from specific IdP configuration:
+The strongest verification model is cluster-side validation of signed intent before apply. Rather than relying solely on the platform's authority, the delivery target independently verifies that a real user authorized the operation.
 
-- Per cluster client IDs (audiences)
-- Permission-level scoping (assuming you have an authorizer which takes this into account)
-- If an IdP can handle the refresh token route... setup for that
-- Token exchange (RFC 8693) for audience swapping without per-cluster client IDs
-- CAEP/Shared Signals Framework (SSF) for real-time session revocation and permission change events
-
-## Git ops models
-
-### Long lived authority
-
-This is the GitOps version of "run as the user over time." It assumes the platform stores something per user like a scoped refresh token and later applies with that user's own identity. With a sufficiently advanced IdP and configuration, this is technically securable, but the hard problem is still secure storage and lifecycle of long-lived user credentials.
-
-Open questions remain: which user's authority controls apply when multiple users edit over time, and how unauthorized git changes feed back into the desired state. A CI check that runs platform-side authorization ahead of time could catch a lot.
-
-The bigger challenge is securely storing longer lived credentials. See "Refresh tokens" above.
-
-### Signed intent
-
-A more promising model is cluster-side validation of signed intent before apply.
-
-1. A manifest in git is accompanied by signed proof material and a revision/provenance hash.
-2. The platform delivers the resulting attestation envelope to the cluster.
+1. A deployment is accompanied by signed proof material (attestation envelope) containing the user's identity and intent.
+2. The platform delivers the envelope to the target cluster.
 3. The cluster-side delivery agent validates the envelope and applies only if validation succeeds. See the attestation-based delivery section below for the concrete protocol.
 
 Two concrete signed-intent mechanisms are described below: the JWT-embedded provenance chain (platform holds the user's JWT as one factor of two) and user-level intent signing (user signs the intent directly with their own key, eliminating per-request JWT storage). The earlier keyless-signing idea (Fulcio/cosign) has a central CA problem, so it is not the default.
@@ -191,9 +155,9 @@ NOTE: We should revisit this for the case the customer *already has a trusted Fu
 
 The platform's delivery authority is contingent on valid attestations. It can transport envelopes, but without a valid tenant JWT embedded in the envelope, the delivery agent rejects them.
 
-#### Signed intent beyond GitOps
+### Eager vs. lazy signing
 
-Could the deployment itself be the "durable tightly scoped approval" via signing? Two models:
+Two models for what gets signed:
 
 **Eager signing**: generate all manifests upfront, user signs the rendered output, deliver signed artifacts. No provenance chain needed – the signed artifact IS the applied artifact. Clean. But every invalidation requires re-generation, re-review, and re-signing. The user must be present for every invalidation, which is operationally equivalent to PausedAuth. The benefit over PausedAuth is the trust model: cryptographic proof of intent at the target, not just "the platform had a valid token."
 
@@ -201,15 +165,15 @@ Could the deployment itself be the "durable tightly scoped approval" via signing
 
 Eager signing is the simpler and more honest model but converges to PausedAuth UX for invalidation. Lazy signing avoids the UX problem but reintroduces trust for rendering correctness. Neither is strictly better than delegation SAs for the invalidation case.
 
-With passkeys (web) and keychain-backed signing (CLI), signed intent is practical for interactive deployments too — not just GitOps. Signed intent is compelling wherever cryptographic proof of user intent matters, including interactive long-running deployments where user signing eliminates the need for per-request JWT storage.
+With passkeys (web) and keychain-backed signing (CLI), signed intent is practical for interactive deployments — not limited to batch or GitOps workflows. Signed intent is compelling wherever cryptographic proof of user intent matters, including interactive long-running deployments where user signing eliminates the need for per-request JWT storage.
 
-#### Certificate authority problem
+### Certificate authority problem
 
 The Fulcio/keyless signing model introduces a central CA whose root key, if compromised, can forge certificates for any user for any intent. The transparency log (Rekor) provides detection after the fact but not prevention. This violates the "no god-mode keys" principle — the CA root key is exactly such a key.
 
 We want signing authority to derive from the tenant's own trust infrastructure (their IdP), not from a platform-operated CA. Ideally this requires only standard OIDC support from the IdP.
 
-#### JWT-embedded provenance chain
+### JWT-embedded provenance chain
 
 An alternative to the Fulcio model that uses only standard OIDC + a platform integrity key. Two-factor: the tenant's JWT provides identity/authorization, a platform-owned key provides integrity. Neither alone is sufficient.
 
@@ -231,7 +195,7 @@ This is a bounded short-lived credential retention model, not a long-lived secre
 
 Persisting user JWTs to a database (rather than just validating them in-memory per-request) is a deliberate architectural choice. The security question is what happens when the store is compromised. Here, the blast radius is: one user per token, only that user's authorized operations, only within the token's remaining lifetime, and only as one factor of two (the platform signature is also required). Compare to a god-mode service account: any user, any operation, indefinitely, single factor. JWTs should be encrypted at rest and purged after expiry or operation completion. With user-level intent signing, this per-request JWT persistence becomes unnecessary — the signed intent replaces the stored JWT as the durable proof. The JWT-embedded model remains valid as a fallback when user signing is not available.
 
-#### Tightening intent-token binding
+### Tightening intent-token binding
 
 The JWT-embedded provenance chain's main gap is that the JWT doesn't bind to what the user authorized — a compromised platform can pair a valid JWT with any manifest while the JWT is live. The token needs to express what the user authorized, and the delivery agent needs to check that generated manifests fall within that authorization.
 
@@ -280,7 +244,7 @@ Start with hardcoded rules in the delivery agent for well-known fields (TBD, but
 
 If configurable rules are needed later (dynamic resource types, addons), updates to those rules must be secured by a trust anchor external to the platform — e.g., a token from the platform administrator's IdP, validated the same way any trust configuration change is validated. The platform must not be able to unilaterally loosen the mapping rules on a target. The same principle as IdP trust configuration applies: the platform is a courier for rule updates, not the authority.
 
-#### User-level intent signing
+### User-level intent signing
 
 JWT with RAR containing an intent hash achieves perfect 1:1 intent-to-user binding — the token is cryptographically tied to exactly one intent. User signing achieves the same binding strength. The difference is operational, not cryptographic:
 
@@ -289,7 +253,7 @@ JWT with RAR containing an intent hash achieves perfect 1:1 intent-to-user bindi
 
 With perfect binding, the platform is reduced to a courier that can delay or misdirect, but can't forge intent. The platform can't create new intents, only deliver ones that real users actually signed. User signing achieves this without per-deployment token storage, without centralized signing keys, and without IdP-level RAR support.
 
-##### How it composes with the existing model
+#### How it composes with the existing model
 
 - JWT proves identity (from the tenant IdP, in this case for establishing a trust chain from the user's configured public key)
 - User signature proves intent authorization (the user signed THIS specific intent)
@@ -304,7 +268,7 @@ Validation with user signing adds a third level to the existing two-level model:
 2. **Intent → token** (hash or structural, unchanged): the intent matches what the token authorized.
 3. **Intent → user signature** (cryptographic): the user directly signed this specific intent. Independent of the token — even if the token were somehow replayed, it can't authorize a different intent than what the user signed.
 
-##### Three signing surfaces
+#### Three signing surfaces
 
 All three follow the same model: a per-user key pair is generated during enrollment, the private key stays with the user, the public key is registered via an OIDC-authenticated ceremony.
 
@@ -312,7 +276,7 @@ All three follow the same model: a per-user key pair is generated during enrollm
 - **CLI — Generated signing key:** `fleetshift auth enroll-signing` generates a dedicated ECDSA key pair. Private key stored in the OS keychain (macOS Keychain / Secure Enclave, Linux secret-service, Windows Credential Manager) — hardware-backed where available. On `fleetshift deploy`, the CLI signs `hash(intent)` with the stored key; user sees a keychain prompt (biometric on macOS Touch ID, PIN elsewhere). SSH keys supported as an opt-in alternative.
 - **GitOps — Signed intent in git:** The user (or tooling like `fleetshift gitops sign`, a pre-commit hook, or a CI step) signs the intent hash with their signing key and stores the signature in the git repo alongside the source content. The platform reads the signature from the repo, renders manifests if needed, and delivers everything in the same attestation envelope as web/CLI. The delivery agent's verification is identical to the other surfaces — no git metadata forwarding, no special GitOps verification path. Git is just the transport/storage medium for the signed intent. The same signing key used for `fleetshift deploy` works for `fleetshift gitops sign`. Standard git commit signing (`git commit -S`) is orthogonal: it provides git-level integrity (defense in depth) but is not the FleetShift verification mechanism.
 
-##### Key binding trust model
+#### Key binding trust model
 
 The delivery agent must verify that a public key genuinely belongs to a given user. If the platform controls the key registry, a compromised platform can swap a user's key and forge intents. The key-to-user binding must be anchored to the IdP, not to the platform.
 
@@ -338,7 +302,7 @@ A compromised platform can't swap the key because it would need a JWT with `sub=
 
 TODO: Can different key registries be pluggable? The high level API is the same (validate this signature for this user) but the implementations are quite different.
 
-##### IdP key rotation and key binding verification
+#### IdP key rotation and key binding verification
 
 Keeping a JWKS history (caching old IdP signing keys) would undermine the purpose of key rotation — you rotate keys to limit the blast radius of compromise, and keeping old keys trusted defeats that. Instead, we integrate with rotation rather than circumventing it.
 
@@ -354,7 +318,7 @@ The delivery agent uses only the **current** JWKS from the IdP (fetched directly
 
 **UX softening for rotation events:** The platform watches the IdP's JWKS. When it detects a rotation, it proactively notifies users whose key bindings were signed with the rotating key. If CIBA is available, the platform can push out-of-band re-authentication requests. An interactive user agent (web UI, CLI) can do an automatic renewal with the user already present. Inactive users whose key bindings expire enter PausedAuth on their next interaction — standard flow.
 
-##### Multi-signature for high availability and audit
+#### Multi-signature for high availability and audit
 
 A deployment can carry multiple signatures over the same intent from different authorized users. The delivery agent accepts the intent if at least one signature is verifiable against a valid key binding. Benefits:
 
@@ -363,7 +327,7 @@ A deployment can carry multiple signatures over the same intent from different a
 
 Reactive re-signing (any authorized user re-signs the current intent when a key binding is approaching expiry) already falls out of the existing "updates by different users" model. Multi-signature adds proactive redundancy on top: signatures are collected at creation/update time, not just when someone re-signs later.
 
-##### Updates and anti-replay
+#### Updates and anti-replay
 
 Deployments can be updated by different authorized users. Each update requires the editor to sign the new intent. The delivery agent verifies the new signature.
 
@@ -373,11 +337,11 @@ A compromised platform can't forge a new signed intent (no user signing key). Re
 - **Withholding:** refuse to deliver a valid signed intent (DoS). Observable — the user sees their deployment isn't progressing.
 - **Misdirection:** deliver a legitimately signed intent to the wrong target. Defense: the signed intent includes target scope; the delivery agent checks consistency.
 
-##### Interaction with invalidation
+#### Interaction with invalidation
 
 The user signed the intent (deployment spec). On manifest invalidation, the intent hasn't changed — the same signature is still valid. New manifests are validated structurally against the same signed intent (manifests → intent field matching). No re-signing needed unless the intent itself changes (user edits the deployment spec), which requires the editor to sign the new intent.
 
-##### Placement enforcement and removal protection
+#### Placement enforcement and removal protection
 
 If a compromised platform can trigger removal of all resources (by manipulating placement or sending unsigned deletions), the signing model hasn't bought much. The delivery agent must be able to independently verify that any placement or removal action is legitimate.
 
@@ -399,45 +363,21 @@ Examples of how these compose:
 - *Label-based workload placement:* removal allowed by placement change (dimension 1). Platform says "remove because label changed." Agent verifies the label change provenance (dimension 2) — who changed it, was it in scope. If verified, agent accepts the removal.
 - *Score-based rebalancing:* scoring addon signs its placement decisions independently (dimension 3). Agent trusts the addon's authority. Platform routes the decision but can't forge it.
 
-##### Considered and not recommended
+#### Considered and not recommended
 
 - **Web Crypto API (SubtleCrypto):** Fallback for environments without passkey support. Weaker: no hardware protection (keys are JS-accessible, vulnerable to XSS), browser/origin-specific, no biometric UX.
 - **HTTP Message Signatures (RFC 9421):** Signs components of an HTTP *request* (method, path, headers, body digest) for hop-by-hop transport integrity. The signature is bound to the HTTP request lifecycle and doesn't survive beyond it. For FleetShift, the signature must travel from the user to the delivery agent through intermediaries (platform, rendering, transport) — a content signature over the intent hash, not a transport signature over one HTTP hop.
 - **Git commit signing as the verification mechanism:** Git commit signatures are bound to the git object model (tree hash, parent, author). Using them for delivery verification requires either forwarding git metadata to the delivery agent (fragile, doesn't survive rendering) or having the agent pull from git directly (heavy). Instead, GitOps uses the same signed-intent model as web/CLI: tooling signs the intent and stores the signature in git. Git commit signing is orthogonal git-level integrity.
 
-#### IdP support
+### IdP support
 
 RAR is a published RFC (May 2023). IdP support is growing but not yet universal (Keycloak has partial support via custom protocol mappers, full RAR is in progress). The architecture should accommodate the tightest binding the IdP supports and degrade gracefully: check `authorization_details` fields if present, fall back to `scope`-level checks, reject or require re-approval if no binding is present.
 
-#### Credential durability for long-running operations
+### Credential durability for long-running operations
 
-The JWT-embedded provenance chain proves "user X authorized this at time T," but the JWT expires shortly after. For long-running operations, the durability modes above still apply: accepted initial authorization with ongoing checks by default, `PausedAuth` when fresh approval is needed, and refresh tokens or delegation SAs where appropriate.
+The JWT-embedded provenance chain proves "user X authorized this at time T," but the JWT expires shortly after. For long-running operations, the authorization modes above still apply: accepted initial authorization with ongoing checks by default, `PausedAuth` when fresh approval is needed, and refresh tokens or delegation SAs where appropriate.
 
-#### Intent-bound tokens for GitOps
-
-With user-level intent signing (above), the GitOps verification model is unified with web/CLI: tooling signs the intent hash and stores the signature in the git repo alongside the source content. The delivery agent's verification path is identical across all surfaces — no git metadata forwarding, no special GitOps verification path. Git commit signing (`git commit -S`) provides orthogonal git-level integrity (defense in depth, recommended but not required by FleetShift). The git hosting platform's public key endpoints remain available as a fallback/additional verification source for the delivery agent.
-
-The token-based flows below remain relevant when user signing is not available, or as a complement to it:
-
-The tighter the binding between token and content, the safer it is to include a token alongside manifests in git. A token with no meaningful scoping beyond identity is risky because it can authorize too much during its validity window. A RAR-scoped access token with `manifest_hash` is the strongest form — it can only authorize the exact manifest it's bound to, and it expires.
-
-Two flows:
-
-**Token before commit (user-driven):** The user's CLI computes `hash(manifest)`, requests an access token from the IdP with `authorization_details` containing the manifest hash (via RAR), and commits the manifest + token together. The gitops controller validates the token against the tenant's IdP JWKS, checks that `authorization_details.manifest_hash` matches the actual manifest, and delivers if valid.
-
-**Approval after commit (CIBA):** The user commits the manifest without a token. CI detects the change, computes the manifest hash, and initiates a CIBA (Client-Initiated Backchannel Authentication, an OIDC extension) flow. The user receives an approval prompt on a separate device showing what they're approving (via CIBA's `binding_message` parameter). On approval, CI receives a RAR-scoped token and attaches it for the gitops controller.
-
-CIBA separates the commit from the approval — natural for gitops where you commit, review in PR, and approve after merge as a separate step. The user doesn't need a token at commit time.
-
-When a token in git expires before the manifest is applied, the controller triggers re-approval (new CIBA flow or equivalent). This is `PausedAuth` semantics: expired credentials pause rather than fail.
-
-Without full RAR support, audience scoping plus standard scopes still provide a weaker but meaningful form of binding (for example, a token scoped to the GitOps platform by `aud`, plus `scope=deploy:cluster-x:namespace-production`). This is not 1:1 content-bound, but it can still be better than giving the GitOps platform its own standing god credential: the token is still tied to a user, expires, and preserves end-to-end identity at apply time.
-
-In that weaker-binding model, the remaining question is whether the residual scope is acceptable for the target environment. If it is, the token can still chain naturally into `PausedAuth`, re-approval, or refresh-token-based durability as needed. If it is not, prefer re-approval at apply time or a signed-intent/attestation path that does not rely on a repo-stored bearer credential.
-
-A useful refinement is to wrap repo-stored authorization material in a JWE encrypted for the target GitOps delivery platform. That reduces exposure in the repository while preserving a user-linked token at apply time. It does not strengthen authorization semantics on its own, so the enclosed token still needs acceptable scope, but paired with platform audience scoping and reasonable deploy scopes it can be a decent model in practice.
-
-#### Open questions
+### Open questions
 
 - RAR (RFC 9396) adoption is still early. The architecture should degrade gracefully when the IdP only supports scopes or audiences. What's the minimum binding level we're willing to accept before falling back to PausedAuth / re-approval?
 - For the CIBA gitops flow: how does CI authenticate to initiate the CIBA flow? It needs its own client credentials with the IdP, which is itself a stored secret. This is a narrow, well-scoped secret (can only initiate approval requests, can't issue tokens without user consent), but it exists.
@@ -452,7 +392,7 @@ A useful refinement is to wrap repo-stored authorization material in a JWE encry
 
 ## Attestation-based delivery
 
-The deployment first chooses a credential durability mode from the earlier sections. For K8s delivery, those modes show up in two execution forms:
+The deployment first chooses an authorization mode from the earlier sections. For K8s delivery, those modes show up in two execution forms:
 
 - **Token passthrough**: the user's token is used directly as the caller credential. No attestation envelope. Works while the token is live. Only viable when the user has direct authority at the target (no space separation).
 - **Attested apply**: an attestation envelope carries the user's JWT alongside the intent, signed by the platform. This is the delivery mechanism for signed intent and other run-as-platform or space-separated flows. It is required when the user has no direct authority at the target, and still useful when there is only time separation because it preserves durable proof of who authorized the operation.
@@ -530,11 +470,77 @@ The delivery agent's code is identical across transports. Dialing up the securit
 
 Note on platform signatures and transport: for the standard (gRPC) transport, the fleetlet connection is already authenticated (mTLS or workload identity). The delivery agent knows the message came from the real platform via connection auth, so a platform signature on the envelope is redundant — the JWT validation (against the tenant IdP) is the meaningful check. The platform signature becomes valuable for buffered transport, where there is no connection-level auth and anyone with write access to the buffer could inject messages. The signature can be deferred until buffer transport is needed without changing the envelope format — it's an additive field.
 
+## GitOps
+
+GitOps workflows introduce a specific challenge: the git repo is the source of truth, and the platform applies from there. The signed intent and attestation models above apply to GitOps — the verification contract is the same regardless of whether the intent originates from an interactive session or a git commit.
+
+### Long-lived authority
+
+This is the GitOps version of "run as the user over time." It assumes the platform stores something per user like a scoped refresh token and later applies with that user's own identity. With a sufficiently advanced IdP and configuration, this is technically securable, but the hard problem is still secure storage and lifecycle of long-lived user credentials.
+
+Open questions remain: which user's authority controls apply when multiple users edit over time, and how unauthorized git changes feed back into the desired state. A CI check that runs platform-side authorization ahead of time could catch a lot.
+
+The bigger challenge is securely storing longer lived credentials. See the refresh tokens section above.
+
+### Intent-bound tokens for GitOps
+
+With user-level intent signing, the GitOps verification model is unified with web/CLI: tooling signs the intent hash and stores the signature in the git repo alongside the source content. The delivery agent's verification path is identical across all surfaces — no git metadata forwarding, no special GitOps verification path. Git commit signing (`git commit -S`) provides orthogonal git-level integrity (defense in depth, recommended but not required by FleetShift). The git hosting platform's public key endpoints remain available as a fallback/additional verification source for the delivery agent.
+
+The token-based flows below remain relevant when user signing is not available, or as a complement to it:
+
+The tighter the binding between token and content, the safer it is to include a token alongside manifests in git. A token with no meaningful scoping beyond identity is risky because it can authorize too much during its validity window. A RAR-scoped access token with `manifest_hash` is the strongest form — it can only authorize the exact manifest it's bound to, and it expires.
+
+Two flows:
+
+**Token before commit (user-driven):** The user's CLI computes `hash(manifest)`, requests an access token from the IdP with `authorization_details` containing the manifest hash (via RAR), and commits the manifest + token together. The gitops controller validates the token against the tenant's IdP JWKS, checks that `authorization_details.manifest_hash` matches the actual manifest, and delivers if valid.
+
+**Approval after commit (CIBA):** The user commits the manifest without a token. CI detects the change, computes the manifest hash, and initiates a CIBA (Client-Initiated Backchannel Authentication, an OIDC extension) flow. The user receives an approval prompt on a separate device showing what they're approving (via CIBA's `binding_message` parameter). On approval, CI receives a RAR-scoped token and attaches it for the gitops controller.
+
+CIBA separates the commit from the approval — natural for gitops where you commit, review in PR, and approve after merge as a separate step. The user doesn't need a token at commit time.
+
+When a token in git expires before the manifest is applied, the controller triggers re-approval (new CIBA flow or equivalent). This is `PausedAuth` semantics: expired credentials pause rather than fail.
+
+Without full RAR support, audience scoping plus standard scopes still provide a weaker but meaningful form of binding (for example, a token scoped to the GitOps platform by `aud`, plus `scope=deploy:cluster-x:namespace-production`). This is not 1:1 content-bound, but it can still be better than giving the GitOps platform its own standing god credential: the token is still tied to a user, expires, and preserves end-to-end identity at apply time.
+
+In that weaker-binding model, the remaining question is whether the residual scope is acceptable for the target environment. If it is, the token can still chain naturally into `PausedAuth`, re-approval, or refresh-token-based durability as needed. If it is not, prefer re-approval at apply time or a signed-intent/attestation path that does not rely on a repo-stored bearer credential.
+
+A useful refinement is to wrap repo-stored authorization material in a JWE encrypted for the target GitOps delivery platform. That reduces exposure in the repository while preserving a user-linked token at apply time. It does not strengthen authorization semantics on its own, so the enclosed token still needs acceptable scope, but paired with platform audience scoping and reasonable deploy scopes it can be a decent model in practice.
+
+## Operational concerns
+
+### Bootstrapping targets
+
+When targets (e.g. clusters) are bootstrapped, some elevated privilege is unavoidable (for example, a kubeconfig or a privileged user). That privilege can bootstrap RBAC syncing and related setup, whether those are their own deployments or part of the cluster deployment itself.
+
+For the delegation SA model, bootstrapping also provisions the platform's own identity in the cluster. Its service account may get narrow impersonation permissions (to impersonate delegate SAs). This places trust in the platform, but it is scoped and auditable. We may not need this model.
+
+Critically, bootstrapping must not give the platform **ongoing** authority over IdP trust configuration at the target. Elevated privileges during bootstrap are acceptable because they are time-bounded and observable. But if the platform retains the ability to reconfigure which IdP the target trusts, then a platform compromise can redirect trust and forge identity — defeating all downstream verification. The platform's runtime credentials at a target should be scoped to workload operations, not authentication configuration. Any bootstrap or proxy path that relies on a privileged kubeconfig should be retired, rotated, or otherwise narrowed as soon as possible, and must not become the authority over target trust configuration.
+
+### IdP orchestration
+
+In various scenarios, we could benefit from specific IdP configuration:
+
+- Per cluster client IDs (audiences)
+- Permission-level scoping (assuming you have an authorizer which takes this into account)
+- If an IdP can handle the refresh token route... setup for that
+- Token exchange (RFC 8693) for audience swapping without per-cluster client IDs
+- CAEP/Shared Signals Framework (SSF) for real-time session revocation and permission change events
+
+### Open challenges
+
+- Git ops – GitOps has a platform level indirection: the git repo is the authority, and the platform applies from there. Some tools may support tenant-specific service accounts or impersonation.
+- Audience scoping – if we want to scope tokens to particular clusters, we need separate audiences for those. More IdP configuration to do. Hard to make dynamic. Token Exchange (RFC 8693) can address this: exchange a platform-audience token for a target-audience token at the IdP. The IdP controls policy (which exchanges are allowed, for which audiences). This avoids per-cluster client IDs but requires IdP support (Keycloak, Dex have it; Auth0/Okta partial).
+- Reconciliation – this is similar to the gitops challenge.
+- Permission tracking – when a delegation service account's RBAC should track the creating user's permissions over time.
+- Root user – there should be some non-IdP issued credential or out of band channel for configuring IdP trust. If your IdP is down or compromised or you messed up the configuration and you need to reconfigure, you need some escape hatch.
+- Trust anchor distribution – this might be solved but it is tricky to think through end to end. If you are trying to avoid privileged service accounts, then you also need to be very careful about how trust is established to tenant-level roots itself. If a compromise can reconfigure all of those, then all of the end to end verification is not helping there.
+- BMC credentials are unavoidable – maybe they can only be retrieved with a user token
+
 ## Practical architecture summary
 
 For K8s targets, the layered model:
 
-Credential durability, attestation, and transport are orthogonal; this table shows the common combinations.
+Provenance (how the operation proves who authorized it) and transport (how the instruction reaches the target) are the two orthogonal dimensions. Each row is a provenance strategy; transport is configurable independently.
 
 
 | Scenario                       | Mechanism                                       | User identity at target                          | User presence needed         |
@@ -577,4 +583,3 @@ On the deployment, this reduces to 3 high level options (with refresh variants):
 3. Run as platform w/ attestation (w/ optional refresh, w/ optional user signing)
   - If refresh, this becomes a property of the original manifest intent that can't be forged later–we'll see that it requires a recent token and reject otherwise.
   - With user signing, per-request JWT storage is eliminated and the token-reuse concern disappears. The user signs the intent with their own key; the delivery agent verifies the signature against the key binding bundle. This is a refinement of option 3, not a fourth option — the deployment still runs as the platform, but with stronger intent binding.
-
