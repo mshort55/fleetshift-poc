@@ -158,7 +158,11 @@ The delivery agent must verify that a public key genuinely belongs to a given us
 1. **Platform distribution through a "JWT binding bundle."** This binds a public key entry to a user's own JWT, self-signed, tracing trust back to an IdP rather than the platform, while retaining the platform as the distribution mechanism.
 2. **External key source** such as GitHub or GitLab APIs (which both offer unauthenticated key endpoints for retrieving public key material per user). As in IdP trust / JWKS, these external sources must be configured with the appropriate authority and validated at the delivery agent.
 
-**Key binding bundle (model 1):** At registration time, the user creates a self-certifying bundle:
+TODO: Can different key registries be pluggable? The high level API is the same (validate this signature for this user) but the implementations, at least in these two cases, are quite different.
+
+#### Platform distribution
+
+At "registration time" (login, or at auto-detected intervals by the user agent), the user creates a self-certifying bundle:
 
 1. User authenticates to their IdP → gets a JWT
 2. User generates key pair (or uses an existing one)
@@ -176,19 +180,23 @@ A compromised platform can't swap the key because it would need a JWT with `sub=
 
 **Key binding TTL and renewal:** Key bindings have a TTL (e.g., 30-90 days). Before expiry, the client auto-renews by creating a fully fresh bundle: authenticate to IdP → get new JWT (signed with current IdP key) → re-sign the key binding doc with updated timestamp (fresh proof of possession) → replace the old bundle. Everything in the renewed bundle is from the same point in time. Automatable if the client has a session or refresh token. Provides a natural revocation boundary: even if a key is compromised, the binding expires within the TTL.
 
-**GitOps key registry:** With the unified signing model, GitOps uses the same key binding bundle as web/CLI — the primary verification mechanism is identical across all surfaces. The git hosting platform's public key endpoints (GitHub `GET /users/:username/ssh_signing_keys`, `GET /users/:username/gpg_keys`; GitLab `GET /users/:id/keys`) remain available as an additional or fallback verification source, fetched directly by the delivery agent (not through the platform). These endpoints are unauthenticated and function like JWKS endpoints.
-
-TODO: Can different key registries be pluggable? The high level API is the same (validate this signature for this user) but the implementations are quite different.
-
 **IdP key rotation:** In the case of platform-stored keys (with key binding bundle), there is a security vs availability tension. When JWKS changes, all keys need to be resigned. Keeping a JWKS history (caching old IdP signing keys) however undermines, to some extent, the purpose of key rotation — you rotate keys to limit the blast radius of compromise, and keeping old keys trusted defeats that. On the other hand, routine rotation becomes regular toil for those authorizing deployments, when a lack of authorization means provisioning is unavailable.
 
 We should consider independent TTLs for the key bundles/JWKS so we can reduce the risk that routine rotation causes mass toil or availability issues. Key binding bundles must be renewed before the signing key leaves the history of stored JWKSs.
+
+Another option is to consider a "Transparency log / Rekor-style append-only log" which can be used for a trusted source of history.
+
+Because of this, the right choice **may** be to use an external key registry. TBD.
 
 **Emergency rotation (compromise response):** IdP immediately removes old key. All key bindings signed with that key become unverifiable unless we keep history. Affected deployments enter PausedAuth. This is correct behavior — if the IdP rotated due to compromise, old key bindings should be invalidated. JWKS history  undermines this, in order to reduce toil as part of regular rotation. If we do keep history, an administrative "do not trust this kid" would be required.
 
 **UX softening for rotation events:** The platform watches the IdP's JWKS. When it detects a rotation, it proactively notifies users whose key bindings were signed with the rotating key. If CIBA is available, the platform can push out-of-band re-authentication requests. An interactive user agent (web UI, CLI) can do an automatic renewal with the user already present. Inactive users whose key bindings expire enter PausedAuth on their next interaction — standard flow.
 
 TODO: Look at how this interacts with "root" accounts
+
+#### External distribution
+
+**GitOps key registry:** With the unified signing model, GitOps uses the same key binding bundle as web/CLI — the primary verification mechanism is identical across all surfaces. The git hosting platform's public key endpoints (GitHub `GET /users/:username/ssh_signing_keys`, `GET /users/:username/gpg_keys`; GitLab `GET /users/:id/keys`) remain available as an additional or fallback verification source, fetched directly by the delivery agent (not through the platform). These endpoints are unauthenticated and function like JWKS endpoints.
 
 ### Multi-signature for high availability and audit
 
@@ -384,13 +392,11 @@ In various scenarios, we could benefit from specific IdP configuration:
 
 ### Open challenges
 
-- Git ops – GitOps has a platform level indirection: the git repo is the authority, and the platform applies from there. Some tools may support tenant-specific service accounts or impersonation.
 - Audience scoping – if we want to scope tokens to particular clusters, we need separate audiences for those. More IdP configuration to do. Hard to make dynamic. Token Exchange (RFC 8693) can address this: exchange a platform-audience token for a target-audience token at the IdP. The IdP controls policy (which exchanges are allowed, for which audiences). This avoids per-cluster client IDs but requires IdP support (Keycloak, Dex have it; Auth0/Okta partial).
-- Reconciliation – this is similar to the gitops challenge.
-- Permission tracking – when a delegation service account's RBAC should track the creating user's permissions over time.
 - Root user – there should be some non-IdP issued credential or out of band channel for configuring IdP trust. If your IdP is down or compromised or you messed up the configuration and you need to reconfigure, you need some escape hatch.
 - Trust anchor distribution – this might be solved but it is tricky to think through end to end. If you are trying to avoid privileged service accounts, then you also need to be very careful about how trust is established to tenant-level roots itself. If a compromise can reconfigure all of those, then all of the end to end verification is not helping there.
 - BMC credentials are unavoidable – maybe they can only be retrieved with a user token
+- Key rotation (as discussed) is difficult to balance security, availability, and UX (toil). The right choice may be an external public key store.
 
 ## Practical architecture summary
 
