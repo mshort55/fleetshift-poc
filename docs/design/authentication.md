@@ -23,6 +23,41 @@ Both require the platform to carry proof of the user's authorization to a place 
 
 These are independent: any provenance strategy works with any credential-presentation mode. The trust model, design approach, and authorization details below address how both concerns are realized.
 
+## Summary of deployment options
+
+When deploying something, a user is presented with options based on:
+
+- Who they want to see in the end target (e.g. cluster)
+- What authority they have there
+- Their security allowance.
+  - Level 1: Low trust. Trusts the platform with durable, scoped user credentials. (This can still be an improvement over common management platform approaches.)
+  - Level 2: Brief trust. Trusts the platform with temporary scoped user credentials.
+  - Level 3: Near-zero trust. Trusts the platform with tightly-bound signed intent.
+  - Level 4: Zero trust. Does not trust the platform at all. Pure courier of end to end signed manifests.
+- Their availability constraints.
+
+**In all cases**, the platform itself still enforces its own authorization rules, which it tries to make coherent with targets through syncing. Because of this, **deployments are not tightly coupled to individual users, even if their auth is used.** If they are unavailable, any other authorized user can approve and "take over" the deployment. Additional approvers can be added preemptively.
+
+### Credential presentation
+
+| Run as (identity at target) | Use when                                                                                                                                                  | Authority       | Base security (before provenance) | Availability | Commentary                                                                                                 |
+| --------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------- | -------- | ------------ | ----------------------------------------------------------------------------------------------------------------- |
+| Me                          | <ol><li>The delivery target does not support platform verification (e.g. AWS, GCP, ...)<li>Operations are short-lived or few<li>You have permissions</ol> | Target cluster  | Level 2  | Low          | Simple & secure for when it fits.                                                                                 |
+| Me (+ refresh tokens)       | <ol><li>The delivery target does not support platform verification<li>Operations are long-lived<li>You have advanced IdP features</ol>                    | Target cluster  | Level 1* | Medium       | Makes sense if you want to realy track the user.<p>*Depends on IdP features.                               |
+| Delegate service account    | <ol><li>The delivery target does not support platform verification<li>Operations are long-lived</ol>                                                      | Target cluster* | Level 1  | High         | Depends on some advanced orchestration for the service account<p>*RBAC orchestrated by platform (itself w/ E2E auth) |
+| Standalone service account  | <ol><li>The delivery target does not support platform verification<li>Operations are long-lived<li>You do not have direct permissions</ol>                | Target cluster  | Level 1  | High         | Exists mainly as a fallback.                                                                                      |
+| Platform                    | <ol><li>The delivery target supports platform verification<li>You do not want to, or cannot, authorize the end user as the target</ol>                    | Platform        | N/A*     | Medium*      | Probably the best balance but *requires target provenance verification support.<p>Especially attractive to multi-tenant service providers.               |
+
+### Provenance
+
+Provenance adds a high degree of security and enables a zero-trust platform architecture. It comes at the cost of some availability: signing keys must be made available. Tenants need to set up external key registries, or users need to ensure they periodically login to refresh their key during IdP key rotation intervals.
+
+| Provenance        | Security            | Availability                                        | Commentary |
+|-------------------|---------------------|-----------------------------------------------------| ---------- |
+| None              | Credential baseline | Credential baseline                                 | The fallback for non platform targets (e.g. third party APIs) |
+| Signed intent     | Level 3             | Credential baseline * public key availability       | A good default. |
+| Signed manifests  | Level 4             | Low - user interaction required for all deployments | EXTREME security for rare, extremely sensitive deployments. |
+
 ## Trust model
 
 The platform is never a trust root. Anything that verifies credentials or signatures has to have a trust anchor, and those anchors must be external to the platform. The platform consumes trust — it does not establish it. Updating a trust anchor must itself require credentials that chain back to the current anchor.
@@ -417,7 +452,7 @@ Signing verification level can be dialed up per deployment: intent signing (defa
 
 **Without a delivery agent capable of verification**, the credential-presentation table still applies but provenance is platform-audit-only — no target-side cryptographic verification. The credential modes work unchanged; only the provenance column weakens.
 
-Delivery transport is configurable per target profile: standard (fleetlet gRPC), hardened (buffered via S3/Kafka/NATS), or future CRD-based. The attestation format and validation logic are identical across transports.
+Delivery transport is configurable per target profile: standard (fleetlet gRPC) or hardened (buffered via S3/Kafka/NATS). The attestation format and validation logic are identical across transports.
 
 ### Target credential presentation
 
@@ -557,3 +592,4 @@ User signing is preferred for the same reasons it supersedes JWT-embedded proven
 - **Web Crypto API (SubtleCrypto):** Fallback for environments without passkey support. Weaker: no hardware protection (keys are JS-accessible, vulnerable to XSS), browser/origin-specific, no biometric UX.
 - **HTTP Message Signatures (RFC 9421):** Signs components of an HTTP *request* (method, path, headers, body digest) for hop-by-hop transport integrity. The signature is bound to the HTTP request lifecycle and doesn't survive beyond it. For FleetShift, the signature must travel from the user to the delivery agent through intermediaries (platform, rendering, transport) — a content signature over the intent hash, not a transport signature over one HTTP hop.
 - **Git commit signing as the verification mechanism:** Git commit signatures are bound to the git object model (tree hash, parent, author). Using them for delivery verification requires either forwarding git metadata to the delivery agent (fragile, doesn't survive rendering) or having the agent pull from git directly (heavy). Instead, GitOps uses the same signing model as web/CLI: tooling signs the content and stores the signature in git. Git commit signing is orthogonal git-level integrity.
+
