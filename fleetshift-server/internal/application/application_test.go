@@ -4,14 +4,15 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/fleetshift/fleetshift-poc/fleetshift-server/internal/application"
 	"github.com/fleetshift/fleetshift-poc/fleetshift-server/internal/domain"
 	"github.com/fleetshift/fleetshift-poc/fleetshift-server/internal/infrastructure/delivery"
-	"github.com/fleetshift/fleetshift-poc/fleetshift-server/internal/infrastructure/sqlite"
 	"github.com/fleetshift/fleetshift-poc/fleetshift-server/internal/infrastructure/memworkflow"
+	"github.com/fleetshift/fleetshift-poc/fleetshift-server/internal/infrastructure/sqlite"
 )
 
 type testHarness struct {
@@ -22,17 +23,16 @@ type testHarness struct {
 
 const testTargetType domain.TargetType = "test"
 
-func setup(t *testing.T) testHarness {
+func newStore(t *testing.T) *sqlite.Store {
 	t.Helper()
-	db := sqlite.OpenTestDB(t)
-	store := &sqlite.Store{DB: db}
+	return &sqlite.Store{DB: sqlite.OpenTestDB(t)}
+}
 
-	recordingAgent := &sqlite.RecordingDeliveryService{
-		Store: store,
-		Now:   func() time.Time { return time.Date(2026, 2, 27, 12, 0, 0, 0, time.UTC) },
-	}
+func setupWithStoreAndAgent(t *testing.T, store domain.Store, agent domain.DeliveryAgent) testHarness {
+	t.Helper()
+
 	router := delivery.NewRoutingDeliveryService()
-	router.Register(testTargetType, recordingAgent)
+	router.Register(testTargetType, agent)
 
 	reg := &memworkflow.Registry{}
 
@@ -61,9 +61,20 @@ func setup(t *testing.T) testHarness {
 		deployments: &application.DeploymentService{
 			Store:    store,
 			CreateWF: createWf,
+			Registry: reg,
 		},
 		store: store,
 	}
+}
+
+func setup(t *testing.T) testHarness {
+	t.Helper()
+	store := newStore(t)
+	agent := &sqlite.RecordingDeliveryService{
+		Store: store,
+		Now:   func() time.Time { return time.Date(2026, 2, 27, 12, 0, 0, 0, time.UTC) },
+	}
+	return setupWithStoreAndAgent(t, store, agent)
 }
 
 func awaitDeploymentState(ctx context.Context, t *testing.T, store domain.Store, id domain.DeploymentID, want domain.DeploymentState) domain.Deployment {
@@ -281,6 +292,142 @@ func TestCreateDeployment_MissingID(t *testing.T) {
 	if !errors.Is(err, domain.ErrInvalidArgument) {
 		t.Fatalf("expected ErrInvalidArgument, got: %v", err)
 	}
+}
+
+func seedDeployment(t *testing.T, store domain.Store, dep domain.Deployment) {
+	t.Helper()
+	ctx := context.Background()
+	tx, err := store.Begin(ctx)
+	if err != nil {
+		t.Fatalf("Begin: %v", err)
+	}
+	defer tx.Rollback()
+	if err := tx.Deployments().Create(ctx, dep); err != nil {
+		t.Fatalf("Create deployment: %v", err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+}
+
+func testAuthContext() *application.AuthorizationContext {
+	return &application.AuthorizationContext{
+		Subject: &domain.SubjectClaims{ID: "user-1", Issuer: "https://issuer.example.com"},
+		Token:   "fresh-token",
+	}
+}
+
+func TestResumeDeployment_WrongState(t *testing.T) {
+	h := setup(t)
+	ctx := application.ContextWithAuth(context.Background(), testAuthContext())
+
+	seedDeployment(t, h.store, domain.Deployment{
+		ID:    "d1",
+		State: domain.DeploymentStateActive,
+	})
+
+	_, err := h.deployments.Resume(ctx, "d1")
+	if !errors.Is(err, domain.ErrInvalidArgument) {
+		t.Fatalf("expected ErrInvalidArgument, got: %v", err)
+	}
+}
+
+func TestResumeDeployment_NotFound(t *testing.T) {
+	h := setup(t)
+	ctx := application.ContextWithAuth(context.Background(), testAuthContext())
+
+	_, err := h.deployments.Resume(ctx, "nonexistent")
+	if !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("expected ErrNotFound, got: %v", err)
+	}
+}
+
+func TestResumeDeployment_NoAuth(t *testing.T) {
+	h := setup(t)
+
+	seedDeployment(t, h.store, domain.Deployment{
+		ID:    "d1",
+		State: domain.DeploymentStatePausedAuth,
+	})
+
+	_, err := h.deployments.Resume(context.Background(), "d1")
+	if !errors.Is(err, domain.ErrInvalidArgument) {
+		t.Fatalf("expected ErrInvalidArgument, got: %v", err)
+	}
+}
+
+// authFailThenSucceedAgent fails the first delivery with
+// DeliveryStateAuthFailed, then succeeds on all subsequent attempts.
+type authFailThenSucceedAgent struct {
+	mu      sync.Mutex
+	attempt int
+}
+
+func (a *authFailThenSucceedAgent) Deliver(_ context.Context, _ domain.TargetInfo, _ domain.DeliveryID, _ []domain.Manifest, _ domain.DeliveryAuth, signaler *domain.DeliverySignaler) (domain.DeliveryResult, error) {
+	a.mu.Lock()
+	a.attempt++
+	n := a.attempt
+	a.mu.Unlock()
+
+	if n == 1 {
+		result := domain.DeliveryResult{
+			State:   domain.DeliveryStateAuthFailed,
+			Message: "401 Unauthorized",
+		}
+		signaler.Done(context.Background(), result)
+		return result, nil
+	}
+	result := domain.DeliveryResult{State: domain.DeliveryStateDelivered}
+	signaler.Done(context.Background(), result)
+	return result, nil
+}
+
+func (a *authFailThenSucceedAgent) Remove(_ context.Context, _ domain.TargetInfo, _ domain.DeliveryID, _ *domain.DeliverySignaler) error {
+	return nil
+}
+
+func TestResumeDeployment_PausedAuth_EndToEnd(t *testing.T) {
+	store := newStore(t)
+	h := setupWithStoreAndAgent(t, store, &authFailThenSucceedAgent{})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	registerTargets(t, h, "t1")
+
+	authCtx := application.ContextWithAuth(ctx, &application.AuthorizationContext{
+		Subject: &domain.SubjectClaims{ID: "user-1", Issuer: "https://issuer.example.com"},
+		Token:   "expired-token",
+	})
+
+	_, err := h.deployments.Create(authCtx, domain.CreateDeploymentInput{
+		ID: "d1",
+		ManifestStrategy: domain.ManifestStrategySpec{
+			Type:      domain.ManifestStrategyInline,
+			Manifests: []domain.Manifest{{Raw: json.RawMessage(`{"kind":"ConfigMap"}`)}},
+		},
+		PlacementStrategy: domain.PlacementStrategySpec{
+			Type:    domain.PlacementStrategyStatic,
+			Targets: []domain.TargetID{"t1"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	awaitDeploymentState(ctx, t, h.store, "d1", domain.DeploymentStatePausedAuth)
+
+	resumeCtx := application.ContextWithAuth(ctx, &application.AuthorizationContext{
+		Subject: &domain.SubjectClaims{ID: "user-1", Issuer: "https://issuer.example.com"},
+		Token:   "fresh-token",
+	})
+	_, err = h.deployments.Resume(resumeCtx, "d1")
+	if err != nil {
+		t.Fatalf("Resume: %v", err)
+	}
+
+	dep := awaitDeploymentState(ctx, t, h.store, "d1", domain.DeploymentStateActive)
+	assertResolvedTargets(t, dep, "t1")
 }
 
 func must(t *testing.T, err error) {
