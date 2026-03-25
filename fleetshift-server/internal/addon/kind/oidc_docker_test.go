@@ -351,8 +351,8 @@ func TestKindAddon_TokenPassthrough(t *testing.T) {
 
 	select {
 	case doneResult := <-bobObs.done:
-		if doneResult.State != domain.DeliveryStateFailed {
-			t.Fatalf("bob delivery State = %q, want %q (message: %s)", doneResult.State, domain.DeliveryStateFailed, doneResult.Message)
+		if doneResult.State != domain.DeliveryStateAuthFailed {
+			t.Fatalf("bob delivery State = %q, want %q (message: %s)", doneResult.State, domain.DeliveryStateAuthFailed, doneResult.Message)
 		}
 	case <-ctx.Done():
 		t.Fatal("timed out waiting for bob delivery")
