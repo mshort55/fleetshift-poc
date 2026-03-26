@@ -121,14 +121,6 @@ func (p *deploymentRunProbe) End() {
 
 func classifyDeploymentEvent(event domain.DeploymentEvent) string {
 	switch {
-	case event.Delete:
-		return "delete"
-	case event.SpecChanged:
-		return "spec_changed"
-	case event.ManifestInvalidated:
-		return "manifest_invalidated"
-	case event.PoolChange != nil:
-		return "pool_change"
 	case event.DeliveryCompleted != nil:
 		return "delivery_completed"
 	default:

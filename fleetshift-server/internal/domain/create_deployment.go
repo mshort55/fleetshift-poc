@@ -58,6 +58,8 @@ func (s *CreateDeploymentWorkflowSpec) PersistDeployment() Activity[CreateDeploy
 			RolloutStrategy:   in.RolloutStrategy,
 			Auth:              in.Auth,
 			State:             DeploymentStateCreating,
+			Generation:        1,
+			Reconciling:       true,
 			CreatedAt:         now,
 			UpdatedAt:         now,
 			Etag:              uid,

@@ -74,8 +74,9 @@ func TestKindAddon_RealDocker(t *testing.T) {
 
 	targetSvc := &application.TargetService{Store: store}
 	deploySvc := &application.DeploymentService{
-		Store:    store,
-		CreateWF: createWf,
+		Store:         store,
+		CreateWF:      createWf,
+		Orchestration: orchWf,
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)

@@ -41,7 +41,31 @@ const (
 	RolloutStrategyImmediate RolloutStrategyType = "immediate"
 )
 
+// VersionConflictPolicy determines behavior when a new generation is
+// detected mid-rollout.
+type VersionConflictPolicy string
+
+const (
+	// VersionConflictRestart aborts the current rollout and lets the
+	// next reconciliation workflow start fresh. This is the default.
+	VersionConflictRestart VersionConflictPolicy = "restart"
+
+	// VersionConflictCompleteAll finishes the entire rollout before
+	// yielding to the next generation.
+	VersionConflictCompleteAll VersionConflictPolicy = "complete_all"
+)
+
 // RolloutStrategySpec is the user-provided specification for rollout pacing.
 type RolloutStrategySpec struct {
-	Type RolloutStrategyType
+	Type                  RolloutStrategyType
+	VersionConflictPolicy VersionConflictPolicy `json:",omitempty"` // defaults to VersionConflictRestart
+}
+
+// EffectiveVersionConflictPolicy returns the configured policy, defaulting
+// to [VersionConflictRestart] when unset.
+func (s *RolloutStrategySpec) EffectiveVersionConflictPolicy() VersionConflictPolicy {
+	if s == nil || s.VersionConflictPolicy == "" {
+		return VersionConflictRestart
+	}
+	return s.VersionConflictPolicy
 }

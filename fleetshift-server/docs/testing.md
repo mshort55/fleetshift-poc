@@ -6,6 +6,10 @@ Tests are done deterministically and [hermetically](https://testing.googleblog.c
 
 Prefer to write tests first, then passing code. This is especially true when there is a bug. If there is a bug, ALWAYS start by writing a failing test to capture the correct understanding of the bug and ensure the test is valid. A test we've never seen fail should not be trusted as actually catching the failure and thus the fix.
 
+## Scenarios
+
+Tests should not only exercise "happy paths." Edge cases, like odd sequences of requests (repeat failures, double requests, etc), should be tested.
+
 ## No I/O
 
 By default, there is NO external I/O in tests. This often includes syscalls (e.g. time, randomization). This means you often need to design main code to support testability:

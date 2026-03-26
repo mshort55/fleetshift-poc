@@ -40,7 +40,7 @@ func TestDeploymentRunProbe_FullLifecycle(t *testing.T) {
 	_, probe := obs.RunStarted(context.Background(), "dep-2")
 
 	probe.EventReceived(domain.DeploymentEvent{
-		PoolChange: &domain.PoolChange{},
+		DeliveryCompleted: &domain.DeliveryCompletionEvent{DeliveryID: "d1:t1"},
 	})
 	probe.StateChanged(domain.DeploymentStateActive)
 	probe.End()

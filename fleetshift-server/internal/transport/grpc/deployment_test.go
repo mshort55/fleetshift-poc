@@ -60,8 +60,9 @@ func setup(t *testing.T) pb.DeploymentServiceClient {
 	}
 
 	deploymentSvc := &application.DeploymentService{
-		Store:    store,
-		CreateWF: createWf,
+		Store:         store,
+		CreateWF:      createWf,
+		Orchestration: orchWf,
 	}
 
 	// Register a test target so placements resolve.

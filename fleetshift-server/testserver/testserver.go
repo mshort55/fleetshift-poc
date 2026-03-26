@@ -76,8 +76,9 @@ func Start(t *testing.T) string {
 	}
 
 	deploymentSvc := &application.DeploymentService{
-		Store:    store,
-		CreateWF: createWf,
+		Store:         store,
+		CreateWF:      createWf,
+		Orchestration: orchWf,
 	}
 
 	authMethodRepo := &sqlite.AuthMethodRepo{DB: db}

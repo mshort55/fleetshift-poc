@@ -192,9 +192,9 @@ func runServe(ctx context.Context, f *serveFlags) error {
 	// --- application services ---
 
 	deploymentSvc := &application.DeploymentService{
-		Store:    store,
-		CreateWF: createWf,
-		Registry: reg,
+		Store:         store,
+		CreateWF:      createWf,
+		Orchestration: orchWf,
 	}
 
 	// --- gRPC server ---

@@ -172,4 +172,58 @@ func Run(t *testing.T, factory Factory) {
 			t.Fatalf("Delete: got %v, want ErrNotFound", err)
 		}
 	})
+
+	t.Run("GenerationFields_RoundTrip", func(t *testing.T) {
+		repo := factory(t)
+		ctx := context.Background()
+		d := sampleDeployment()
+		d.Generation = 3
+		d.ObservedGeneration = 2
+		d.Reconciling = true
+
+		if err := repo.Create(ctx, d); err != nil {
+			t.Fatalf("Create: %v", err)
+		}
+		got, err := repo.Get(ctx, "d1")
+		if err != nil {
+			t.Fatalf("Get: %v", err)
+		}
+		if got.Generation != 3 {
+			t.Errorf("Generation = %d, want 3", got.Generation)
+		}
+		if got.ObservedGeneration != 2 {
+			t.Errorf("ObservedGeneration = %d, want 2", got.ObservedGeneration)
+		}
+		if !got.Reconciling {
+			t.Error("Reconciling = false, want true")
+		}
+	})
+
+	t.Run("Update_PersistsReconciliationFields", func(t *testing.T) {
+		repo := factory(t)
+		ctx := context.Background()
+		d := sampleDeployment()
+		d.Generation = 1
+		d.ObservedGeneration = 0
+		d.Reconciling = false
+		_ = repo.Create(ctx, d)
+
+		d.Generation = 5
+		d.ObservedGeneration = 3
+		d.Reconciling = true
+		if err := repo.Update(ctx, d); err != nil {
+			t.Fatalf("Update: %v", err)
+		}
+
+		got, _ := repo.Get(ctx, "d1")
+		if got.Generation != 5 {
+			t.Errorf("Generation = %d, want 5", got.Generation)
+		}
+		if got.ObservedGeneration != 3 {
+			t.Errorf("ObservedGeneration = %d, want 3", got.ObservedGeneration)
+		}
+		if !got.Reconciling {
+			t.Error("Reconciling = false, want true")
+		}
+	})
 }

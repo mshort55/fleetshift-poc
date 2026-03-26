@@ -43,6 +43,8 @@ func (r *Registry) RegisterOrchestration(spec *domain.OrchestrationWorkflowSpec)
 	registerActivity(invokers, spec.RemoveFromTarget())
 	registerActivity(invokers, spec.UpdateDeployment())
 	registerActivity(invokers, spec.ProcessDeliveryOutputs())
+	registerActivity(invokers, spec.CheckGeneration())
+	registerActivity(invokers, spec.CompleteReconciliation())
 
 	orchWfFunc := func(ctx dbos.DBOSContext, deploymentID domain.DeploymentID) (struct{}, error) {
 		record := &baseRecord{

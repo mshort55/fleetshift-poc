@@ -59,9 +59,9 @@ func setupWithStoreAndAgent(t *testing.T, store domain.Store, agent domain.Deliv
 	return testHarness{
 		targets: &application.TargetService{Store: store},
 		deployments: &application.DeploymentService{
-			Store:    store,
-			CreateWF: createWf,
-			Registry: reg,
+			Store:         store,
+			CreateWF:      createWf,
+			Orchestration: orchWf,
 		},
 		store: store,
 	}
@@ -250,7 +250,7 @@ func TestCreateDeployment_StaticPlacement_UnknownTarget(t *testing.T) {
 	}
 }
 
-func TestDeleteDeployment_RemovesRecords(t *testing.T) {
+func TestDeleteDeployment_TransitionsToDeleting(t *testing.T) {
 	h := setup(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -275,14 +275,43 @@ func TestDeleteDeployment_RemovesRecords(t *testing.T) {
 		t.Fatalf("Delete: %v", err)
 	}
 
-	records := queryDeliveries(ctx, t, h.store, "d1")
-	if len(records) != 0 {
-		t.Fatalf("expected 0 delivery records after delete, got %d", len(records))
-	}
+	awaitCondition(ctx, t, h.store, "d1", func(dep domain.Deployment) bool {
+		return dep.State == domain.DeploymentStateDeleting && !dep.Reconciling
+	})
 
-	_, err = h.deployments.Get(ctx, "d1")
-	if !errors.Is(err, domain.ErrNotFound) {
-		t.Fatalf("expected ErrNotFound after delete, got: %v", err)
+	dep, _ := queryDeployment(ctx, t, h.store, "d1")
+	if len(dep.ResolvedTargets) != 0 {
+		t.Errorf("expected 0 resolved targets after delete reconciliation, got %d", len(dep.ResolvedTargets))
+	}
+}
+
+func queryDeployment(ctx context.Context, t *testing.T, store domain.Store, id domain.DeploymentID) (domain.Deployment, error) {
+	t.Helper()
+	tx, err := store.Begin(ctx)
+	if err != nil {
+		t.Fatalf("Begin: %v", err)
+	}
+	defer tx.Rollback()
+	return tx.Deployments().Get(ctx, id)
+}
+
+func awaitCondition(ctx context.Context, t *testing.T, store domain.Store, id domain.DeploymentID, cond func(domain.Deployment) bool) domain.Deployment {
+	t.Helper()
+	for {
+		tx, err := store.Begin(ctx)
+		if err != nil {
+			t.Fatalf("Begin: %v", err)
+		}
+		dep, err := tx.Deployments().Get(ctx, id)
+		tx.Rollback()
+		if err == nil && cond(dep) {
+			return dep
+		}
+		select {
+		case <-ctx.Done():
+			t.Fatalf("timed out waiting for condition on deployment %s", id)
+		case <-time.After(5 * time.Millisecond):
+		}
 	}
 }
 
@@ -296,6 +325,21 @@ func TestCreateDeployment_MissingID(t *testing.T) {
 
 func seedDeployment(t *testing.T, store domain.Store, dep domain.Deployment) {
 	t.Helper()
+	if dep.UID == "" {
+		dep.UID = "test-uid"
+	}
+	if dep.Etag == "" {
+		dep.Etag = "test-etag"
+	}
+	if dep.CreatedAt.IsZero() {
+		dep.CreatedAt = time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	}
+	if dep.UpdatedAt.IsZero() {
+		dep.UpdatedAt = dep.CreatedAt
+	}
+	if dep.Generation == 0 {
+		dep.Generation = 1
+	}
 	ctx := context.Background()
 	tx, err := store.Begin(ctx)
 	if err != nil {

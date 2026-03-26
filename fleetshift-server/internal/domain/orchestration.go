@@ -10,8 +10,9 @@ import (
 )
 
 // errAuthPaused is a sentinel error returned by [awaitDeliveries] when
-// a delivery reports [DeliveryStateAuthFailed]. The orchestration loop
-// catches this to transition to [DeploymentStatePausedAuth].
+// a delivery reports [DeliveryStateAuthFailed]. The orchestration
+// catches this to transition to [DeploymentStatePausedAuth] and
+// complete the workflow.
 var errAuthPaused = errors.New("delivery auth failed: pausing for fresh credentials")
 
 // TargetDelta represents the difference between the previous and current
@@ -94,11 +95,19 @@ type DeploymentAndPool struct {
 	Pool       []TargetInfo
 }
 
+// CompleteReconciliationInput carries the deployment ID and the generation
+// that was reconciled so the activity can atomically decide whether a new
+// reconciliation is needed.
+type CompleteReconciliationInput struct {
+	DeploymentID DeploymentID
+	ReconciledGen Generation
+}
+
 // OrchestrationWorkflowSpec is the deployment pipeline expressed as a
-// deterministic workflow. All I/O and strategy invocations run inside
-// activities so that placement, manifest, and rollout strategies may
-// perform I/O or stateful behavior. Only pure computation (e.g.
-// [ComputeTargetDelta]) runs inline in the workflow body.
+// deterministic workflow. Each reconciliation loads the current state,
+// runs the full pipeline (or delete), and atomically completes. If
+// the deployment's [Generation] has advanced during execution the
+// workflow loops and re-runs the pipeline.
 //
 // Pass this spec to [Registry.RegisterOrchestration] to obtain an
 // [OrchestrationWorkflow] that can start instances.
@@ -248,15 +257,16 @@ func (s *OrchestrationWorkflowSpec) RemoveFromTarget() Activity[RemoveInput, str
 // UpdatedAt and regenerating the Etag.
 func (s *OrchestrationWorkflowSpec) UpdateDeployment() Activity[Deployment, struct{}] {
 	return NewActivity("update-deployment", func(ctx context.Context, d Deployment) (struct{}, error) {
+		d.UpdatedAt = s.now()
+		d.Etag = uuid.New().String()
+
 		tx, err := s.Store.Begin(ctx)
 		if err != nil {
 			return struct{}{}, fmt.Errorf("begin tx: %w", err)
 		}
 		defer tx.Rollback()
 
-		d.UpdatedAt = s.now()
-		d.Etag = uuid.New().String()
-		if err := tx.Deployments().Update(ctx, d); err != nil {
+		if err := tx.Deployments().UpdateContent(ctx, d); err != nil {
 			return struct{}{}, err
 		}
 		return struct{}{}, tx.Commit()
@@ -307,6 +317,48 @@ func (s *OrchestrationWorkflowSpec) ProcessDeliveryOutputs() Activity[DeliveryRe
 	})
 }
 
+// CheckGeneration reads the deployment's current generation from the
+// store. Used mid-rollout to detect whether a new mutation has arrived.
+func (s *OrchestrationWorkflowSpec) CheckGeneration() Activity[DeploymentID, Generation] {
+	return NewActivity("check-generation", func(ctx context.Context, id DeploymentID) (Generation, error) {
+		tx, err := s.Store.Begin(ctx)
+		if err != nil {
+			return 0, fmt.Errorf("begin tx: %w", err)
+		}
+		defer tx.Rollback()
+
+		dep, err := tx.Deployments().Get(ctx, id)
+		if err != nil {
+			return 0, err
+		}
+		return dep.Generation, tx.Commit()
+	})
+}
+
+// CompleteReconciliation clears the reconciliation lock and advances
+// the observed generation. If the deployment's generation has advanced
+// past reconciledGen during the workflow run, the lock is re-acquired
+// and needsRestart is returned as true.
+func (s *OrchestrationWorkflowSpec) CompleteReconciliation() Activity[CompleteReconciliationInput, bool] {
+	return NewActivity("complete-reconciliation", func(ctx context.Context, in CompleteReconciliationInput) (bool, error) {
+		tx, err := s.Store.Begin(ctx)
+		if err != nil {
+			return false, fmt.Errorf("begin tx: %w", err)
+		}
+		defer tx.Rollback()
+
+		dep, err := tx.Deployments().Get(ctx, in.DeploymentID)
+		if err != nil {
+			return false, err
+		}
+		needsRestart := dep.CompleteReconciliation(in.ReconciledGen)
+		if err := tx.Deployments().Update(ctx, dep); err != nil {
+			return false, err
+		}
+		return needsRestart, tx.Commit()
+	})
+}
+
 func (s *OrchestrationWorkflowSpec) observer() DeploymentObserver {
 	if s.Observer != nil {
 		return s.Observer
@@ -314,100 +366,40 @@ func (s *OrchestrationWorkflowSpec) observer() DeploymentObserver {
 	return NoOpDeploymentObserver{}
 }
 
-// Run is the deterministic workflow body. It performs initial placement
-// (load deployment and pool, resolve placement, rollout) without awaiting
-// an event, then enters a loop that blocks on [AwaitSignal] and
-// re-evaluates on each event (pool change, manifest invalidation, spec
-// change, delete). The workflow exits when it receives a Delete event or
-// encounters a fatal error.
+// Run is the deterministic workflow body. It loads the deployment
+// state, runs the appropriate pipeline (reconcile or delete), and
+// atomically completes. If the generation advanced during execution
+// the workflow loops and re-runs the pipeline rather than spawning a
+// new workflow instance.
 func (s *OrchestrationWorkflowSpec) Run(record Record, deploymentID DeploymentID) (struct{}, error) {
 	ctx, probe := s.observer().RunStarted(record.Context(), deploymentID)
 	defer probe.End()
 	_ = ctx
 
-	var dep Deployment
-	var pool []TargetInfo
-
-	loaded, err := RunActivity(record, s.LoadDeploymentAndPool(), deploymentID)
-	if err != nil {
-		probe.Error(err)
-		return struct{}{}, fmt.Errorf("load deployment and pool: %w", err)
-	}
-	dep, pool = loaded.Deployment, loaded.Pool
-
-	resolvedIDs, err := s.executePlacementPipeline(record, dep, pool, pool, deploymentID, probe)
-	if errors.Is(err, errAuthPaused) {
-		dep, err = s.handleAuthPause(record, dep, pool, deploymentID, probe)
-		if err != nil {
-			return struct{}{}, err
-		}
-	} else if err != nil {
-		dep.State = DeploymentStateFailed
-		probe.StateChanged(dep.State)
-		if _, updateErr := RunActivity(record, s.UpdateDeployment(), dep); updateErr != nil {
-			probe.Error(updateErr)
-		}
-		probe.Error(err)
-		return struct{}{}, err
-	} else {
-		dep.ResolvedTargets = resolvedIDs
-	}
-
-	dep.State = DeploymentStateActive
-	probe.StateChanged(dep.State)
-	if _, err := RunActivity(record, s.UpdateDeployment(), dep); err != nil {
-		probe.Error(err)
-		return struct{}{}, fmt.Errorf("update deployment: %w", err)
-	}
-
 	for {
-		event, err := AwaitSignal(record, DeploymentEventSignal)
+		loaded, err := RunActivity(record, s.LoadDeploymentAndPool(), deploymentID)
 		if err != nil {
 			probe.Error(err)
-			return struct{}{}, fmt.Errorf("await deployment event: %w", err)
+			return struct{}{}, fmt.Errorf("load deployment and pool: %w", err)
 		}
-		probe.EventReceived(event)
+		dep, pool := loaded.Deployment, loaded.Pool
+		startGen := dep.Generation
 
-		if event.Delete {
+		switch dep.State {
+		case DeploymentStateDeleting:
 			if err := s.executeDelete(record, dep, pool, deploymentID); err != nil {
 				probe.Error(err)
 				return struct{}{}, err
 			}
-			return struct{}{}, nil
-		}
 
-		if event.SpecChanged {
-			loaded, err := RunActivity(record, s.LoadDeploymentAndPool(), deploymentID)
-			if err != nil {
-				probe.Error(err)
-				return struct{}{}, fmt.Errorf("reload deployment and pool: %w", err)
-			}
-			dep, pool = loaded.Deployment, loaded.Pool
-		}
-
-		previousPool := pool
-		if event.PoolChange != nil {
-			pool = ApplyPoolChange(pool, *event.PoolChange)
-		}
-
-		if event.ManifestInvalidated {
-			if err := s.executeManifestInvalidation(record, dep, pool, deploymentID, probe); err != nil {
-				if errors.Is(err, errAuthPaused) {
-					dep, err = s.handleAuthPause(record, dep, pool, deploymentID, probe)
-					if err != nil {
-						return struct{}{}, err
-					}
-				} else {
-					probe.Error(err)
-					return struct{}{}, err
-				}
-			}
-		} else {
-			resolvedIDs, err := s.executePlacementPipeline(record, dep, pool, previousPool, deploymentID, probe)
+		default:
+			resolvedIDs, err := s.executePlacementPipeline(record, dep, pool, deploymentID, startGen, probe)
 			if errors.Is(err, errAuthPaused) {
-				dep, err = s.handleAuthPause(record, dep, pool, deploymentID, probe)
-				if err != nil {
-					return struct{}{}, err
+				dep.State = DeploymentStatePausedAuth
+				probe.StateChanged(dep.State)
+				if _, err := RunActivity(record, s.UpdateDeployment(), dep); err != nil {
+					probe.Error(err)
+					return struct{}{}, fmt.Errorf("update deployment (paused_auth): %w", err)
 				}
 			} else if err != nil {
 				dep.State = DeploymentStateFailed
@@ -419,28 +411,37 @@ func (s *OrchestrationWorkflowSpec) Run(record Record, deploymentID DeploymentID
 				return struct{}{}, err
 			} else {
 				dep.ResolvedTargets = resolvedIDs
+				dep.State = DeploymentStateActive
+				probe.StateChanged(dep.State)
+				if _, err := RunActivity(record, s.UpdateDeployment(), dep); err != nil {
+					probe.Error(err)
+					return struct{}{}, fmt.Errorf("update deployment: %w", err)
+				}
 			}
 		}
 
-		dep.State = DeploymentStateActive
-		probe.StateChanged(dep.State)
-		if _, err := RunActivity(record, s.UpdateDeployment(), dep); err != nil {
+		needsRestart, err := RunActivity(record, s.CompleteReconciliation(), CompleteReconciliationInput{
+			DeploymentID:  deploymentID,
+			ReconciledGen: startGen,
+		})
+		if err != nil {
 			probe.Error(err)
-			return struct{}{}, fmt.Errorf("update deployment: %w", err)
+			return struct{}{}, fmt.Errorf("complete reconciliation: %w", err)
+		}
+		if !needsRestart {
+			return struct{}{}, nil
 		}
 	}
 }
 
 // executePlacementPipeline runs the full resolve → delta → plan → execute
-// pipeline and returns the new resolved target IDs. previousPool is the
-// pool before any pool change was applied; it provides full [TargetInfo]
-// for targets that were previously resolved but have since left the pool.
+// pipeline and returns the new resolved target IDs.
 func (s *OrchestrationWorkflowSpec) executePlacementPipeline(
 	record Record,
 	dep Deployment,
 	pool []TargetInfo,
-	previousPool []TargetInfo,
 	deploymentID DeploymentID,
+	startGen Generation,
 	probe DeploymentRunProbe,
 ) ([]TargetID, error) {
 	resolved, err := RunActivity(record, s.ResolvePlacement(), ResolvePlacementInput{
@@ -456,8 +457,7 @@ func (s *OrchestrationWorkflowSpec) executePlacementPipeline(
 	}
 
 	resolvedTargets := ResolvedTargetInfos(resolved, pool)
-	deltaPool := mergePools(previousPool, pool)
-	delta := ComputeTargetDelta(dep.ResolvedTargets, resolvedTargets, deltaPool)
+	delta := ComputeTargetDelta(dep.ResolvedTargets, resolvedTargets, pool)
 
 	plan, err := RunActivity(record, s.PlanRollout(), PlanRolloutInput{
 		Spec:  dep.RolloutStrategy,
@@ -467,7 +467,7 @@ func (s *OrchestrationWorkflowSpec) executePlacementPipeline(
 		return nil, fmt.Errorf("plan rollout: %w", err)
 	}
 
-	if err := s.executeRolloutPlan(record, dep, plan, deploymentID, probe); err != nil {
+	if err := s.executeRolloutPlan(record, dep, plan, deploymentID, startGen, probe); err != nil {
 		return nil, err
 	}
 
@@ -478,28 +478,6 @@ func (s *OrchestrationWorkflowSpec) executePlacementPipeline(
 	return ids, nil
 }
 
-// executeManifestInvalidation re-generates and delivers manifests for
-// the currently resolved targets without re-resolving placement.
-func (s *OrchestrationWorkflowSpec) executeManifestInvalidation(
-	record Record,
-	dep Deployment,
-	pool []TargetInfo,
-	deploymentID DeploymentID,
-	probe DeploymentRunProbe,
-) error {
-	targets := TargetInfosByID(dep.ResolvedTargets, pool)
-	delta := TargetDelta{Unchanged: targets}
-
-	plan, err := RunActivity(record, s.PlanRollout(), PlanRolloutInput{
-		Spec:  dep.RolloutStrategy,
-		Delta: delta,
-	})
-	if err != nil {
-		return fmt.Errorf("plan rollout (manifest invalidation): %w", err)
-	}
-	return s.executeRolloutPlan(record, dep, plan, deploymentID, probe)
-}
-
 // executeDelete removes the deployment from all currently resolved
 // targets and updates the deployment state.
 func (s *OrchestrationWorkflowSpec) executeDelete(
@@ -508,7 +486,7 @@ func (s *OrchestrationWorkflowSpec) executeDelete(
 	pool []TargetInfo,
 	deploymentID DeploymentID,
 ) error {
-	targets := TargetInfosByID(dep.ResolvedTargets, pool)
+	targets := targetInfosByID(dep.ResolvedTargets, pool)
 	for _, target := range targets {
 		if _, err := RunActivity(record, s.RemoveFromTarget(), RemoveInput{
 			Target:       target,
@@ -527,96 +505,23 @@ func (s *OrchestrationWorkflowSpec) executeDelete(
 	return nil
 }
 
-// handleAuthPause transitions the deployment to [DeploymentStatePausedAuth],
-// persists the state, and waits for either an [AuthResumedEvent] (which
-// provides fresh credentials) or a Delete. On resume it updates dep.Auth,
-// persists the deployment, and re-runs the full placement pipeline.
-//
-// If the re-delivery also fails with auth (e.g. the caller's token
-// still lacks the required permissions), the loop re-pauses and waits
-// for another resume signal rather than terminating the workflow.
-func (s *OrchestrationWorkflowSpec) handleAuthPause(
-	record Record,
-	dep Deployment,
-	pool []TargetInfo,
-	deploymentID DeploymentID,
-	probe DeploymentRunProbe,
-) (Deployment, error) {
-	for {
-		dep.State = DeploymentStatePausedAuth
-		probe.StateChanged(dep.State)
-		if _, err := RunActivity(record, s.UpdateDeployment(), dep); err != nil {
-			probe.Error(err)
-			return dep, fmt.Errorf("update deployment (paused_auth): %w", err)
-		}
-
-		freshAuth, err := s.awaitAuthResume(record, dep, pool, deploymentID, probe)
-		if err != nil {
-			return dep, err
-		}
-
-		dep.Auth = freshAuth
-		if _, err := RunActivity(record, s.UpdateDeployment(), dep); err != nil {
-			probe.Error(err)
-			return dep, fmt.Errorf("update deployment (auth resumed): %w", err)
-		}
-
-		resolvedIDs, err := s.executePlacementPipeline(record, dep, pool, pool, deploymentID, probe)
-		if errors.Is(err, errAuthPaused) {
-			continue
-		}
-		if err != nil {
-			return dep, err
-		}
-		dep.ResolvedTargets = resolvedIDs
-		return dep, nil
-	}
-}
-
-// awaitAuthResume blocks until an [AuthResumedEvent] arrives with fresh
-// credentials, or a Delete terminates the workflow. Other events are
-// silently discarded while paused.
-func (s *OrchestrationWorkflowSpec) awaitAuthResume(
-	record Record,
-	dep Deployment,
-	pool []TargetInfo,
-	deploymentID DeploymentID,
-	probe DeploymentRunProbe,
-) (DeliveryAuth, error) {
-	for {
-		event, err := AwaitSignal(record, DeploymentEventSignal)
-		if err != nil {
-			probe.Error(err)
-			return DeliveryAuth{}, fmt.Errorf("await auth resume: %w", err)
-		}
-		probe.EventReceived(event)
-
-		if event.Delete {
-			if err := s.executeDelete(record, dep, pool, deploymentID); err != nil {
-				probe.Error(err)
-				return DeliveryAuth{}, err
-			}
-			return DeliveryAuth{}, fmt.Errorf("deployment deleted while paused for auth")
-		}
-
-		if event.AuthResumed != nil {
-			return event.AuthResumed.Auth, nil
-		}
-		// TODO: accumulate deferred events for processing after resume
-	}
-}
-
 // executeRolloutPlan runs each step in a [RolloutPlan]. For deliver
 // steps it dispatches all deliveries, then waits for every delivery in
 // the step to reach a terminal state before proceeding to the next step.
+// Between steps, it checks whether the deployment's generation has
+// advanced; if so and the [VersionConflictPolicy] is restart, it aborts
+// so the next reconciliation can start fresh.
 func (s *OrchestrationWorkflowSpec) executeRolloutPlan(
 	record Record,
 	dep Deployment,
 	plan RolloutPlan,
 	deploymentID DeploymentID,
+	startGen Generation,
 	probe DeploymentRunProbe,
 ) error {
-	for _, step := range plan.Steps {
+	policy := dep.RolloutStrategy.EffectiveVersionConflictPolicy()
+
+	for i, step := range plan.Steps {
 		if step.Remove != nil {
 			for _, target := range step.Remove.Targets {
 				// TODO: need to call the manifest generator on remove hook
@@ -628,7 +533,6 @@ func (s *OrchestrationWorkflowSpec) executeRolloutPlan(
 					return fmt.Errorf("remove delivery for target %s: %w", target.ID, err)
 				}
 			}
-			continue
 		}
 		if step.Deliver != nil {
 			var pending []DeliveryID
@@ -661,7 +565,7 @@ func (s *OrchestrationWorkflowSpec) executeRolloutPlan(
 				}
 				pending = append(pending, did)
 			}
-			_, results, err := s.awaitDeliveries(record, pending)
+			results, err := s.awaitDeliveries(record, pending)
 			if err != nil {
 				return err
 			}
@@ -673,21 +577,27 @@ func (s *OrchestrationWorkflowSpec) executeRolloutPlan(
 					probe.DeliveryOutputsProcessed(result.ProvisionedTargets, len(result.ProducedSecrets))
 				}
 			}
-			continue
+		}
+
+		if i < len(plan.Steps)-1 && policy == VersionConflictRestart {
+			currentGen, err := RunActivity(record, s.CheckGeneration(), deploymentID)
+			if err != nil {
+				return fmt.Errorf("check generation: %w", err)
+			}
+			if currentGen > startGen {
+				return nil
+			}
 		}
 	}
 	return nil
 }
 
-// awaitDeliveries blocks until every delivery in pending has completed.
-// Non-delivery events that arrive while waiting are collected and
-// returned for the caller to process later. Completed delivery results
-// are also returned so the caller can process outputs. A Delete event
-// aborts immediately with an error.
+// awaitDeliveries blocks until every delivery in pending has completed
+// and returns the completed results.
 func (s *OrchestrationWorkflowSpec) awaitDeliveries(
 	record Record,
 	pending []DeliveryID,
-) (deferred []DeploymentEvent, results []DeliveryResult, err error) {
+) (results []DeliveryResult, err error) {
 	remaining := make(map[DeliveryID]struct{}, len(pending))
 	for _, id := range pending {
 		remaining[id] = struct{}{}
@@ -696,30 +606,26 @@ func (s *OrchestrationWorkflowSpec) awaitDeliveries(
 	for len(remaining) > 0 {
 		event, err := AwaitSignal(record, DeploymentEventSignal)
 		if err != nil {
-			return nil, nil, fmt.Errorf("await delivery completion: %w", err)
+			return nil, fmt.Errorf("await delivery completion: %w", err)
 		}
-		if event.Delete {
-			return nil, nil, fmt.Errorf("deployment deleted while awaiting deliveries")
-		}
-		if event.DeliveryCompleted != nil {
-			delete(remaining, event.DeliveryCompleted.DeliveryID)
-			switch event.DeliveryCompleted.Result.State {
-			case DeliveryStateFailed:
-				return nil, nil, fmt.Errorf("delivery %s failed: %s",
-					event.DeliveryCompleted.DeliveryID,
-					event.DeliveryCompleted.Result.Message)
-			case DeliveryStateAuthFailed:
-				return nil, nil, fmt.Errorf("%w: delivery %s: %s",
-					errAuthPaused,
-					event.DeliveryCompleted.DeliveryID,
-					event.DeliveryCompleted.Result.Message)
-			}
-			results = append(results, event.DeliveryCompleted.Result)
+		if event.DeliveryCompleted == nil {
 			continue
 		}
-		deferred = append(deferred, event)
+		delete(remaining, event.DeliveryCompleted.DeliveryID)
+		switch event.DeliveryCompleted.Result.State {
+		case DeliveryStateFailed:
+			return nil, fmt.Errorf("delivery %s failed: %s",
+				event.DeliveryCompleted.DeliveryID,
+				event.DeliveryCompleted.Result.Message)
+		case DeliveryStateAuthFailed:
+			return nil, fmt.Errorf("%w: delivery %s: %s",
+				errAuthPaused,
+				event.DeliveryCompleted.DeliveryID,
+				event.DeliveryCompleted.Result.Message)
+		}
+		results = append(results, event.DeliveryCompleted.Result)
 	}
-	return deferred, results, nil
+	return results, nil
 }
 
 // deliveryIDFor produces a deterministic [DeliveryID] for a
@@ -730,19 +636,18 @@ func deliveryIDFor(depID DeploymentID, tgtID TargetID) DeliveryID {
 	return DeliveryID(string(depID) + ":" + string(tgtID))
 }
 
-// mergePools returns the union of two pools. Entries in current take
-// precedence over entries in previous for the same TargetID.
-func mergePools(previous, current []TargetInfo) []TargetInfo {
-	index := make(map[TargetID]TargetInfo, len(previous)+len(current))
-	for _, t := range previous {
+// targetInfosByID looks up each id in pool and returns the matching
+// [TargetInfo] values. Unknown IDs are silently skipped.
+func targetInfosByID(ids []TargetID, pool []TargetInfo) []TargetInfo {
+	index := make(map[TargetID]TargetInfo, len(pool))
+	for _, t := range pool {
 		index[t.ID] = t
 	}
-	for _, t := range current {
-		index[t.ID] = t
-	}
-	out := make([]TargetInfo, 0, len(index))
-	for _, t := range index {
-		out = append(out, t)
+	out := make([]TargetInfo, 0, len(ids))
+	for _, id := range ids {
+		if t, ok := index[id]; ok {
+			out = append(out, t)
+		}
 	}
 	return out
 }
