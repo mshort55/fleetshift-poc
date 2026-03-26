@@ -253,25 +253,24 @@ func (s *OrchestrationWorkflowSpec) RemoveFromTarget() Activity[RemoveInput, str
 	})
 }
 
-// UpdateDeployment persists a deployment's updated content fields
-// (state, resolved targets, auth) using a fresh read-modify-write
-// cycle. The activity reads the latest aggregate so that concurrent
-// generation bumps by the service layer are preserved.
-func (s *OrchestrationWorkflowSpec) UpdateDeployment() Activity[Deployment, struct{}] {
-	return NewActivity("update-deployment", func(ctx context.Context, d Deployment) (struct{}, error) {
+// PersistReconciliationResult persists a [ReconciliationResult] using
+// a fresh read-modify-write cycle. The activity reads the latest
+// aggregate so that concurrent generation bumps by the service layer
+// are preserved.
+func (s *OrchestrationWorkflowSpec) PersistReconciliationResult() Activity[ReconciliationResult, struct{}] {
+	return NewActivity("persist-reconciliation-result", func(ctx context.Context, r ReconciliationResult) (struct{}, error) {
 		tx, err := s.Store.Begin(ctx)
 		if err != nil {
 			return struct{}{}, fmt.Errorf("begin tx: %w", err)
 		}
 		defer tx.Rollback()
 
-		fresh, err := tx.Deployments().Get(ctx, d.ID)
+		fresh, err := tx.Deployments().Get(ctx, r.DeploymentID)
 		if err != nil {
 			return struct{}{}, fmt.Errorf("get deployment: %w", err)
 		}
 
-		// TODO: we should probably use a separate type to capture this result rather than modifying a deployment object in place
-		fresh.ApplyReconciliationResult(d)
+		fresh.ApplyReconciliationResult(r)
 		fresh.UpdatedAt = s.now()
 		fresh.Etag = uuid.New().String()
 
@@ -403,27 +402,28 @@ func (s *OrchestrationWorkflowSpec) Run(record Record, deploymentID DeploymentID
 
 		default:
 			resolvedIDs, err := s.executePlacementPipeline(record, dep, pool, deploymentID, startGen, probe)
+			var result ReconciliationResult
 			if errors.Is(err, errAuthPaused) {
-				dep.MarkPausedAuth()
-				probe.StateChanged(dep.State)
-				if _, err := RunActivity(record, s.UpdateDeployment(), dep); err != nil {
+				result = NewPausedAuthResult(deploymentID, dep.Auth)
+				probe.StateChanged(result.State)
+				if _, err := RunActivity(record, s.PersistReconciliationResult(), result); err != nil {
 					probe.Error(err)
-					return struct{}{}, fmt.Errorf("update deployment (paused_auth): %w", err)
+					return struct{}{}, fmt.Errorf("persist reconciliation result (paused_auth): %w", err)
 				}
 			} else if err != nil {
-				dep.MarkFailed()
-				probe.StateChanged(dep.State)
-				if _, updateErr := RunActivity(record, s.UpdateDeployment(), dep); updateErr != nil {
+				result = NewFailedResult(deploymentID, dep.Auth)
+				probe.StateChanged(result.State)
+				if _, updateErr := RunActivity(record, s.PersistReconciliationResult(), result); updateErr != nil {
 					probe.Error(updateErr)
 				}
 				probe.Error(err)
 				return struct{}{}, err
 			} else {
-				dep.MarkActive(resolvedIDs)
-				probe.StateChanged(dep.State)
-				if _, err := RunActivity(record, s.UpdateDeployment(), dep); err != nil {
+				result = NewActiveResult(deploymentID, resolvedIDs, dep.Auth)
+				probe.StateChanged(result.State)
+				if _, err := RunActivity(record, s.PersistReconciliationResult(), result); err != nil {
 					probe.Error(err)
-					return struct{}{}, fmt.Errorf("update deployment: %w", err)
+					return struct{}{}, fmt.Errorf("persist reconciliation result: %w", err)
 				}
 			}
 		}
@@ -505,9 +505,9 @@ func (s *OrchestrationWorkflowSpec) executeDelete(
 		}
 	}
 
-	dep.MarkDeleted()
-	if _, err := RunActivity(record, s.UpdateDeployment(), dep); err != nil {
-		return fmt.Errorf("update deployment: %w", err)
+	result := NewDeletedResult(deploymentID)
+	if _, err := RunActivity(record, s.PersistReconciliationResult(), result); err != nil {
+		return fmt.Errorf("persist reconciliation result: %w", err)
 	}
 	return nil
 }

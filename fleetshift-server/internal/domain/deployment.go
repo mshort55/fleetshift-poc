@@ -51,40 +51,63 @@ func (d *Deployment) TryAcquireReconciliation() bool {
 	return true
 }
 
-// MarkActive records a successful reconciliation: the deployment is
-// now active with the given resolved targets.
-func (d *Deployment) MarkActive(resolvedTargets []TargetID) {
-	d.State = DeploymentStateActive
-	d.ResolvedTargets = resolvedTargets
+// ReconciliationResult captures the observable state produced by a
+// single reconciliation workflow run. It is the typed output that the
+// workflow hands to the [PersistReconciliationResult] activity, making the
+// contract between workflow and persistence explicit.
+type ReconciliationResult struct {
+	DeploymentID    DeploymentID
+	State           DeploymentState
+	ResolvedTargets []TargetID
+	Auth            DeliveryAuth
 }
 
-// MarkFailed records that the reconciliation pipeline failed.
-func (d *Deployment) MarkFailed() {
-	d.State = DeploymentStateFailed
+// NewActiveResult builds a result for a successful reconciliation.
+func NewActiveResult(id DeploymentID, resolvedTargets []TargetID, auth DeliveryAuth) ReconciliationResult {
+	return ReconciliationResult{
+		DeploymentID:    id,
+		State:           DeploymentStateActive,
+		ResolvedTargets: resolvedTargets,
+		Auth:            auth,
+	}
 }
 
-// MarkPausedAuth records that a delivery reported an authentication
-// failure and the deployment is paused until resumed.
-func (d *Deployment) MarkPausedAuth() {
-	d.State = DeploymentStatePausedAuth
+// NewFailedResult builds a result for a failed reconciliation pipeline.
+func NewFailedResult(id DeploymentID, auth DeliveryAuth) ReconciliationResult {
+	return ReconciliationResult{
+		DeploymentID: id,
+		State:        DeploymentStateFailed,
+		Auth:         auth,
+	}
 }
 
-// MarkDeleted clears the resolved targets after all deliveries have
-// been removed. The state remains [DeploymentStateDeleting] so the
-// service layer can perform final cleanup (e.g. row deletion).
-func (d *Deployment) MarkDeleted() {
-	d.ResolvedTargets = nil
-	d.State = DeploymentStateDeleting
+// NewPausedAuthResult builds a result when a delivery reports an
+// authentication failure and the deployment should pause.
+func NewPausedAuthResult(id DeploymentID, auth DeliveryAuth) ReconciliationResult {
+	return ReconciliationResult{
+		DeploymentID: id,
+		State:        DeploymentStatePausedAuth,
+		Auth:         auth,
+	}
+}
+
+// NewDeletedResult builds a result after all deliveries have been
+// removed during a delete pipeline.
+func NewDeletedResult(id DeploymentID) ReconciliationResult {
+	return ReconciliationResult{
+		DeploymentID: id,
+		State:        DeploymentStateDeleting,
+	}
 }
 
 // ApplyReconciliationResult merges the observable state produced by a
 // reconciliation workflow onto this deployment. Bookkeeping fields
 // (Generation, ObservedGeneration, Reconciling) are left untouched
 // so that concurrent service-layer mutations are preserved.
-func (d *Deployment) ApplyReconciliationResult(source Deployment) {
-	d.State = source.State
-	d.ResolvedTargets = source.ResolvedTargets
-	d.Auth = source.Auth
+func (d *Deployment) ApplyReconciliationResult(r ReconciliationResult) {
+	d.State = r.State
+	d.ResolvedTargets = r.ResolvedTargets
+	d.Auth = r.Auth
 }
 
 // CompleteReconciliation releases the reconciliation lock and advances
