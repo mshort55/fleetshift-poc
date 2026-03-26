@@ -2,6 +2,10 @@
 
 Tests are done deterministically and [hermetically](https://testing.googleblog.com/2018/11/testing-on-toilet-exercise-service-call.html).
 
+## Test-driven development
+
+Prefer to write tests first, then passing code. This is especially true when there is a bug. If there is a bug, ALWAYS start by writing a failing test to capture the correct understanding of the bug and ensure the test is valid. A test we've never seen fail should not be trusted as actually catching the failure and thus the fix.
+
 ## No I/O
 
 By default, there is NO external I/O in tests. This often includes syscalls (e.g. time, randomization). This means you often need to design main code to support testability:
@@ -27,7 +31,7 @@ Coordinating threads / goroutines is sometimes necessary in tests. To do this de
 
 For an example of how to do this, see [this](https://github.com/alechenninger/falcon/blob/ae638df2a195b903a76e414db00d3aa32078a09a/internal/domain/observer.go#L252).
 
-## No Mocks (and RARELY stubs!)
+## Reusable test doubles – No Mocks (and RARELY stubs!)
 
 No "method verifying" mocks, ever.
 
@@ -35,7 +39,9 @@ Prefer simply using a real instance. If an object is not coupled to external I/O
 
 If it is, prefer using a Fake. In memory fakes are a useful feature of an application ("Kessel in a box"), so the investment pays for itself quickly. When implementing fakes (or any second implementation of an interface), first define a set of "contract tests" at the interface layer.
 
-Stubs or dummies can be used judiciously when the interaction is completely trivial, but this is rare. There is usually no point if the in memory version is just as fast.
+When there is a fake, reuse it liberally, even if the full functionality is not needed. It is fine to add methods to existing fakes as well. The idea is that a fake is a complete and holistic feature of the application, built for  aiding testing. When a new test double is needed that is not a complete fake, also design it to be reusable, and prefer to expand on it, rather than adding many one-off stubs.
+
+Stubs or dummies can be used judiciously when the interaction is completely trivial, or there is little reuse to be had. This is rare. There is usually no point if there is a fake and the in memory version is just as fast.
 
 ## Hermetic
 
