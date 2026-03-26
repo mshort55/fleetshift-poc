@@ -68,7 +68,7 @@ When you can't trust the platform, where do you look?
 
 - **User-level.** A user with a signing key (an IdP-authenticated principal on a device) directly signs operations. Every delivery carries provenance traceable to a specific person and device. This is the strongest level because compromise requires both the user's IdP identity and their signing key.
 - **Tenant-level.** The tenant's IdP provides identity and authorization claims. Operations carry tenant-level identity (e.g., a user's ID token), but without a user signature the platform is trusted to faithfully represent the user's intent. This is the baseline for credential presentation.
-- **Addon-level.** Addons — scoring services, external placement authorities, capacity controllers — sign decisions with their own keys. The delivery agent trusts the addon's signing authority directly, not via the platform. This requires sufficient controls: key management, scope limits, and auditable enrollment of addon signing keys. See [Placement enforcement dimension 3](#placement-enforcement-and-removal-protection) for how this works in practice.
+- **Addon-level.** Addons — scoring services, external placement authorities, capacity controllers, manifest generators — sign decisions and outputs with their own keys. The delivery agent trusts the addon's signing authority directly, not via the platform. This requires sufficient controls: key management, scope limits, and auditable enrollment of addon signing keys. See [Placement enforcement dimension 3](#placement-enforcement-and-removal-protection) for placement decisions and [Addon-generated manifests and the opaque derivation problem](#addon-generated-manifests-and-the-opaque-derivation-problem) for manifest signing.
 
 ### Why these anchors work
 
@@ -324,6 +324,50 @@ Start with hardcoded rules in the delivery agent for well-known fields (TBD, but
 
 If configurable rules are needed later (dynamic resource types, addons), updates to those rules must be secured by a trust anchor external to the platform — e.g., a token from the platform administrator's IdP, validated the same way any trust configuration change is validated. The platform must not be able to unilaterally loosen the mapping rules on a target. The same principle as IdP trust configuration applies: the platform is a courier for rule updates, not the authority.
 
+#### Addon-generated manifests and the opaque derivation problem
+
+Field mapping rules work for built-in strategies (`inline`, `template`) where the relationship between intent and output is transparent. For addon-driven manifest strategies, the derivation is opaque: the user signs "I want observability," and the addon produces Prometheus agents, Thanos components, ConfigMaps, and Secrets. The delivery agent has no structural basis for check 3 (derivation consistency) because the intent is structurally divorced from the output.
+
+The solution is **addon signing**: manifest-generating addons sign their outputs, and the delivery agent verifies the addon's signature as a replacement for structural derivation consistency. This composes with the existing user signing model — the delivery agent verifies both the user's intent signature and the addon's manifest signature.
+
+**Co-signing model.** The user's signed intent names the addon authorized to generate manifests (and optionally its trust domain or key fingerprint). The delivery agent checks:
+
+1. The user authorized this addon for this deployment (user signature, unchanged).
+2. This addon produced these specific manifests (addon signature, new — replaces derivation consistency for addon strategies).
+3. The addon identity matches what the user authorized (trust domain, key fingerprint, or registration reference).
+
+Without the intent naming the addon, a rogue addon could sign manifests and attach them to any deployment. The user's intent is what ties authorization to the addon's output.
+
+**Structural schema as defense-in-depth.** Addon registrations can include expected structural properties of the output: allowed GVKs, namespace patterns, label requirements. The delivery agent checks these as a second gate on top of the addon signature. This catches compromised addons (key theft) producing valid signatures on malicious manifests. The schema need not be exhaustive — just enough to catch obviously wrong output (e.g., "observability manifests should not contain ClusterRoleBindings granting `cluster-admin`"). Structural schemas are optional; some addons with highly variable output may omit them.
+
+For built-in strategies, checks 1 and the existing field mapping rules still apply. For addon strategies, checks 1–3 above replace field mapping. Both paths can layer structural constraints as defense-in-depth.
+
+##### Addon key lifecycle
+
+The addon needs a signing key pair. Three models, depending on the addon's deployment environment:
+
+**SPIFFE/SPIRE (preferred when available).** The addon gets an X.509 SVID from its local SPIRE agent. It signs manifests directly with the SVID's private key. The delivery agent verifies the signature against the SPIFFE trust bundle for the addon's trust domain. The X.509 certificate IS the identity-to-key binding — no separate key binding ceremony needed. SPIRE handles rotation automatically (short-lived SVIDs, auto-renewed). Trust bundle rotation is a first-class SPIRE concern. The admin-signed addon registration includes the SPIFFE trust domain and trust bundle endpoint. Each addon gets its own SPIFFE ID (e.g., `spiffe://fleet-addons/mco-observability`), and the delivery agent enforces that only the expected identity signed the manifests.
+
+**Cloud workload identity or K8s projected service account tokens.** The addon obtains a JWT from its runtime identity provider (GKE Workload Identity, EKS Pod Identity, AKS Workload Identity Federation, or raw K8s projected SA tokens — which underlie the cloud-specific mechanisms and work on any K8s cluster). The addon generates a signing key pair and creates a key binding bundle using the JWT — the same pattern as user key binding bundles: `{public_key, identity_claims, timestamp}` signed by the new private key (proof of possession), bundled with the identity JWT. The delivery agent verifies: JWT valid against the issuer's JWKS → subject matches the expected addon identity → proof of possession → manifests signed by the bound key.
+
+**Admin-provisioned key (fallback).** When the addon runs in an environment without workload identity (bare metal, air-gapped), the admin registers the addon's public key as part of a signed administrative action — the same trust model as IdP trust configuration. Rotation is manual (the admin re-signs with updated keys). To reduce this burden, the admin-signed registration can authorize an identity source (an OIDC issuer, a SPIFFE trust domain), effectively upgrading to one of the above models. The initial registration bootstraps trust; subsequent rotations are automatic.
+
+##### Addon key distribution to the delivery agent
+
+The delivery agent needs to verify the addon's signing key. Two approaches:
+
+**By reference (issuer URL or trust domain).** The addon registration includes an OIDC issuer URL or SPIFFE trust domain. The delivery agent resolves the current keys at verification time by fetching the JWKS or trust bundle from the issuer. This works when the issuer endpoint is reachable — either because it's a public URL (cloud-managed OIDC issuers) or because the delivery agent and the addon's cluster are on the same side of the network curtain (see provider_consumer_model.md). Rotation is automatic: the delivery agent always has current keys.
+
+**By value (cached JWKS).** The addon registration includes the JWKS directly. The delivery agent caches it. This is necessary when the issuer endpoint is unreachable from the delivery agent (cross-curtain delivery to consumer clusters). Rotation requires updating the cached JWKS.
+
+For by-value distribution, rotation is handled through **rotation attestation during the key overlap window**: K8s API servers maintain both old and new signing keys in the JWKS simultaneously during rotation. During this window, the addon's fleetlet detects the JWKS change and creates a rotation attestation — "the new JWKS is X" — signed using the addon's identity under the old key (which the delivery agent still trusts). The platform couriers the attestation but cannot forge it (the old key is behind the curtain). The delivery agent verifies the attestation against the old JWKS, accepts the update, and now trusts both keys. If the overlap window is missed (fleetlet down for the entire duration), deployments enter PausedAuth until an admin re-establishes trust — the standard fail-safe degradation.
+
+##### Network topology reinforcement
+
+When addons run behind the provider/consumer network curtain (on factory clusters with restricted fleetlet profiles), the network topology reinforces the cryptographic model. The platform cannot reach the addon's cluster — the fleetlet connection is outbound-only, the protocol channel is structurally absent. The platform cannot request tokens on the addon's behalf, cannot access the addon's signing key, and cannot interact with the local SPIRE agent or K8s token infrastructure. The signing key stays in the addon's security domain by network enforcement. The only thing that crosses the curtain is the addon's signed output, carried through the fleetlet delivery channel.
+
+This means a compromised platform can invoke the addon (it can send messages through the delivery channel) but cannot impersonate it. The curtain makes the channel unidirectional for trust: signed artifacts flow out, but identity material cannot be injected in.
+
 ### Open questions
 
 - RAR (RFC 9396) adoption is still early. The architecture should degrade gracefully when the IdP only supports scopes or audiences. What's the minimum binding level we're willing to accept before falling back to PausedAuth / re-approval?
@@ -332,7 +376,10 @@ If configurable rules are needed later (dynamic resource types, addons), updates
 - Claims freshness with user signing: the signed intent embeds claims from signing time. If the user's permissions change after signing, the claims are stale. How should the system handle this — re-check via SCIM/CAEP, key binding TTL as a natural bound, or require re-signing on permission changes?
 - Anti-replay mechanism details: monotonic sequence numbers vs. nonces — which is simpler to implement correctly for the delivery agent?
 - Secure bootstrap of cluster-side label/identity state for placement enforcement. How does a cluster initially receive its labels through a non-platform authority?
-- Trust model for scoring addons and external scoring services. How does a delivery agent know to trust a particular scoring addon's signatures?
+- Trust model for scoring addons and external scoring services. How does a delivery agent know to trust a particular scoring addon's signatures? (Partially addressed by the addon key lifecycle section above — the same signing and registration model applies to scoring addons, placement addons, and manifest-generating addons.)
+- Addon signing: should the intent schema enforce that addon-strategy deployments always name the addon, or can legacy/low-security deployments omit it and skip addon signature verification?
+- Addon signing: for addons with highly dynamic output (e.g., per-target customization that varies with target state), what is the right granularity for structural schemas? Per-addon-version? Per-deployment? Or purely optional?
+- Rotation attestation: what is the acceptable overlap window for K8s signing key rotation? Should the platform enforce a minimum overlap duration as a prerequisite for addon registration with by-value JWKS?
 - Whether placement constraints in signed intents are mandatory or opt-in.
 - Multi-signature policy: when to require vs. allow multiple signers, quorum rules for critical deployments.
 - Can different key registries be pluggable? The high-level API is the same (validate this signature for this user) but implementations differ (key binding bundles, git hosting platform endpoints, etc.).
