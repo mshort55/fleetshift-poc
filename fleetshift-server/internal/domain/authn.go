@@ -1,6 +1,9 @@
 package domain
 
-import "context"
+import (
+	"context"
+	"time"
+)
 
 // AuthMethodID uniquely identifies a configured authentication method.
 type AuthMethodID string
@@ -45,11 +48,12 @@ type EndpointURL string
 
 // OIDCConfig holds the configuration for an OIDC authentication method.
 type OIDCConfig struct {
-	IssuerURL             IssuerURL
-	Audience              Audience
-	JWKSURI               EndpointURL // resolved from discovery
-	AuthorizationEndpoint EndpointURL // resolved from discovery
-	TokenEndpoint         EndpointURL // resolved from discovery
+	IssuerURL              IssuerURL
+	Audience               Audience
+	JWKSURI                EndpointURL // resolved from discovery
+	AuthorizationEndpoint  EndpointURL // resolved from discovery
+	TokenEndpoint          EndpointURL // resolved from discovery
+	KeyEnrollmentAudience  Audience    // audience for signing key enrollment ID tokens
 }
 
 // OIDCMetadata is the resolved OIDC discovery document.
@@ -100,4 +104,31 @@ type OIDCTokenVerifier interface {
 // the discovery document and populate [OIDCConfig] with endpoints.
 type OIDCDiscoveryClient interface {
 	FetchMetadata(ctx context.Context, issuerURL IssuerURL) (OIDCMetadata, error)
+}
+
+// SigningKeyBindingID uniquely identifies a signing key binding.
+type SigningKeyBindingID string
+
+// SigningKeyBinding ties a user's ECDSA signing public key to their
+// IdP identity via a self-certifying key binding bundle. The bundle
+// is verified at enrollment time and stored for later use by the
+// delivery agent during attestation validation.
+type SigningKeyBinding struct {
+	ID                  SigningKeyBindingID
+	SubjectID           SubjectID
+	Issuer              IssuerURL
+	PublicKeyJWK        []byte
+	Algorithm           string // e.g. "ES256"
+	KeyBindingDoc       []byte // canonical JSON signed by the user
+	KeyBindingSignature []byte // ECDSA signature over KeyBindingDoc
+	IdentityToken       RawToken
+	CreatedAt           time.Time
+	ExpiresAt           time.Time
+}
+
+// SigningKeyBindingRepository persists signing key bindings.
+type SigningKeyBindingRepository interface {
+	Create(ctx context.Context, binding SigningKeyBinding) error
+	Get(ctx context.Context, id SigningKeyBindingID) (SigningKeyBinding, error)
+	ListBySubject(ctx context.Context, subjectID SubjectID, issuer IssuerURL) ([]SigningKeyBinding, error)
 }

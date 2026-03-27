@@ -9,11 +9,12 @@ import (
 
 // Config holds local OIDC client configuration saved by `fleetctl auth setup`.
 type Config struct {
-	IssuerURL             string   `json:"issuer_url"`
-	ClientID              string   `json:"client_id"`
-	Scopes                []string `json:"scopes"`
-	AuthorizationEndpoint string   `json:"authorization_endpoint"`
-	TokenEndpoint         string   `json:"token_endpoint"`
+	IssuerURL              string   `json:"issuer_url"`
+	ClientID               string   `json:"client_id"`
+	Scopes                 []string `json:"scopes"`
+	AuthorizationEndpoint  string   `json:"authorization_endpoint"`
+	TokenEndpoint          string   `json:"token_endpoint"`
+	KeyEnrollmentClientID  string   `json:"key_enrollment_client_id,omitempty"`
 }
 
 func configDir() (string, error) {

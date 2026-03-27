@@ -34,6 +34,7 @@ type Tx interface {
 	Deployments() DeploymentRepository
 	Deliveries() DeliveryRepository
 	Inventory() InventoryRepository
+	SigningKeyBindings() SigningKeyBindingRepository
 	Commit() error
 	Rollback() error
 }

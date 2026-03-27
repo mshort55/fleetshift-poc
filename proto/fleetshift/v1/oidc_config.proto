@@ -22,4 +22,10 @@ message OIDCConfig {
 
   // Server-resolved from OIDC discovery (output only).
   string jwks_uri = 5 [(google.api.field_behavior) = OUTPUT_ONLY];
+
+  // Expected audience for signing key enrollment ID tokens. When set,
+  // the server verifies that key binding bundles carry an ID token
+  // with this audience, isolating enrollment tokens from platform
+  // access tokens and managed cluster tokens.
+  string key_enrollment_audience = 6;
 }

@@ -15,10 +15,11 @@ const keyringService = "fleetctl"
 // Keyring entry keys. Each token field gets its own entry to stay within
 // per-entry size limits imposed by the OS keychain (~3 KB on macOS).
 const (
-	keyAccess  = "access_token"
-	keyRefresh = "refresh_token"
-	keyID      = "id_token"
-	keyMeta    = "meta"
+	keyAccess     = "access_token"
+	keyRefresh    = "refresh_token"
+	keyID         = "id_token"
+	keyMeta       = "meta"
+	keySigningKey = "signing_key"
 )
 
 // tokenMeta holds the small, non-JWT fields that are stored together.
@@ -105,4 +106,21 @@ func (KeyringTokenStore) Clear(_ context.Context) error {
 		return fmt.Errorf("clear keyring: %w", err)
 	}
 	return nil
+}
+
+// SaveSigningKey stores a PEM-encoded ECDSA private key in the keyring.
+func SaveSigningKey(pemData string) error {
+	if err := keyring.Set(keyringService, keySigningKey, pemData); err != nil {
+		return fmt.Errorf("save signing key to keyring: %w", err)
+	}
+	return nil
+}
+
+// LoadSigningKey loads the PEM-encoded ECDSA private key from the keyring.
+func LoadSigningKey() (string, error) {
+	pem, err := keyring.Get(keyringService, keySigningKey)
+	if err != nil {
+		return "", fmt.Errorf("load signing key from keyring: %w", err)
+	}
+	return pem, nil
 }

@@ -13,6 +13,7 @@ func newAuthCmd(ctx *cmdContext) *cobra.Command {
 		newAuthLoginCmd(ctx),
 		newAuthLogoutCmd(ctx),
 		newAuthInspectTokenCmd(ctx),
+		newAuthEnrollSigningCmd(ctx),
 	)
 
 	return cmd

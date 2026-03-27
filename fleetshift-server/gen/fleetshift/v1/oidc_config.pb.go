@@ -34,9 +34,14 @@ type OIDCConfig struct {
 	// Server-resolved from OIDC discovery (output only).
 	TokenEndpoint string `protobuf:"bytes,4,opt,name=token_endpoint,json=tokenEndpoint,proto3" json:"token_endpoint,omitempty"`
 	// Server-resolved from OIDC discovery (output only).
-	JwksUri       string `protobuf:"bytes,5,opt,name=jwks_uri,json=jwksUri,proto3" json:"jwks_uri,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	JwksUri string `protobuf:"bytes,5,opt,name=jwks_uri,json=jwksUri,proto3" json:"jwks_uri,omitempty"`
+	// Expected audience for signing key enrollment ID tokens. When set,
+	// the server verifies that key binding bundles carry an ID token
+	// with this audience, isolating enrollment tokens from platform
+	// access tokens and managed cluster tokens.
+	KeyEnrollmentAudience string `protobuf:"bytes,6,opt,name=key_enrollment_audience,json=keyEnrollmentAudience,proto3" json:"key_enrollment_audience,omitempty"`
+	unknownFields         protoimpl.UnknownFields
+	sizeCache             protoimpl.SizeCache
 }
 
 func (x *OIDCConfig) Reset() {
@@ -104,11 +109,18 @@ func (x *OIDCConfig) GetJwksUri() string {
 	return ""
 }
 
+func (x *OIDCConfig) GetKeyEnrollmentAudience() string {
+	if x != nil {
+		return x.KeyEnrollmentAudience
+	}
+	return ""
+}
+
 var File_fleetshift_v1_oidc_config_proto protoreflect.FileDescriptor
 
 const file_fleetshift_v1_oidc_config_proto_rawDesc = "" +
 	"\n" +
-	"\x1ffleetshift/v1/oidc_config.proto\x12\rfleetshift.v1\x1a\x1fgoogle/api/field_behavior.proto\"\xcf\x01\n" +
+	"\x1ffleetshift/v1/oidc_config.proto\x12\rfleetshift.v1\x1a\x1fgoogle/api/field_behavior.proto\"\x87\x02\n" +
 	"\n" +
 	"OIDCConfig\x12\x1d\n" +
 	"\n" +
@@ -116,7 +128,8 @@ const file_fleetshift_v1_oidc_config_proto_rawDesc = "" +
 	"\baudience\x18\x02 \x01(\tR\baudience\x12:\n" +
 	"\x16authorization_endpoint\x18\x03 \x01(\tB\x03\xe0A\x03R\x15authorizationEndpoint\x12*\n" +
 	"\x0etoken_endpoint\x18\x04 \x01(\tB\x03\xe0A\x03R\rtokenEndpoint\x12\x1e\n" +
-	"\bjwks_uri\x18\x05 \x01(\tB\x03\xe0A\x03R\ajwksUriBWZUgithub.com/fleetshift/fleetshift-poc/fleetshift-server/gen/fleetshift/v1;fleetshiftv1b\x06proto3"
+	"\bjwks_uri\x18\x05 \x01(\tB\x03\xe0A\x03R\ajwksUri\x126\n" +
+	"\x17key_enrollment_audience\x18\x06 \x01(\tR\x15keyEnrollmentAudienceBWZUgithub.com/fleetshift/fleetshift-poc/fleetshift-server/gen/fleetshift/v1;fleetshiftv1b\x06proto3"
 
 var (
 	file_fleetshift_v1_oidc_config_proto_rawDescOnce sync.Once

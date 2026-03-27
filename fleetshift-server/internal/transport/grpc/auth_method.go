@@ -83,8 +83,9 @@ func authMethodFromProto(p *pb.AuthMethod) (domain.AuthMethod, error) {
 			return m, fmt.Errorf("oidc_config is required when type is TYPE_OIDC")
 		}
 		m.OIDC = &domain.OIDCConfig{
-			IssuerURL: domain.IssuerURL(oc.GetIssuerUrl()),
-			Audience:  domain.Audience(oc.GetAudience()),
+			IssuerURL:             domain.IssuerURL(oc.GetIssuerUrl()),
+			Audience:              domain.Audience(oc.GetAudience()),
+			KeyEnrollmentAudience: domain.Audience(oc.GetKeyEnrollmentAudience()),
 		}
 	default:
 		return m, fmt.Errorf("unsupported auth method type: %v", p.GetType())
@@ -106,6 +107,7 @@ func authMethodToProto(m domain.AuthMethod) *pb.AuthMethod {
 				AuthorizationEndpoint: string(m.OIDC.AuthorizationEndpoint),
 				TokenEndpoint:         string(m.OIDC.TokenEndpoint),
 				JwksUri:               string(m.OIDC.JWKSURI),
+				KeyEnrollmentAudience: string(m.OIDC.KeyEnrollmentAudience),
 			}
 		}
 	}

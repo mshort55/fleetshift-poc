@@ -197,6 +197,12 @@ func runServe(ctx context.Context, f *serveFlags) error {
 		Orchestration: orchWf,
 	}
 
+	signingKeySvc := &application.SigningKeyService{
+		Store:       store,
+		Verifier:    tokenVerifier,
+		AuthMethods: authMethodRepo,
+	}
+
 	// --- gRPC server ---
 
 	grpcServer := grpc.NewServer(
@@ -209,6 +215,9 @@ func runServe(ctx context.Context, f *serveFlags) error {
 	pb.RegisterAuthMethodServiceServer(grpcServer, &transportgrpc.AuthMethodServer{
 		AuthMethods: authMethodSvc,
 		Authn:       authnInterceptor,
+	})
+	pb.RegisterSigningKeyBindingServiceServer(grpcServer, &transportgrpc.SigningKeyBindingServer{
+		SigningKeys: signingKeySvc,
 	})
 	reflection.Register(grpcServer)
 
@@ -226,6 +235,9 @@ func runServe(ctx context.Context, f *serveFlags) error {
 	}
 	if err := pb.RegisterAuthMethodServiceHandlerFromEndpoint(ctx, gwMux, f.grpcAddr, gwOpts); err != nil {
 		return fmt.Errorf("register auth method gateway: %w", err)
+	}
+	if err := pb.RegisterSigningKeyBindingServiceHandlerFromEndpoint(ctx, gwMux, f.grpcAddr, gwOpts); err != nil {
+		return fmt.Errorf("register signing key binding gateway: %w", err)
 	}
 
 	httpServer := &http.Server{

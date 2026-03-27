@@ -1,0 +1,52 @@
+syntax = "proto3";
+
+package fleetshift.v1;
+
+option go_package = "github.com/fleetshift/fleetshift-poc/fleetshift-server/gen/fleetshift/v1;fleetshiftv1";
+
+import "google/api/field_behavior.proto";
+import "google/api/resource.proto";
+import "google/protobuf/timestamp.proto";
+
+// SigningKeyBinding ties a user's signing public key to their IdP
+// identity via a self-certifying key binding bundle. The bundle's
+// identity token is verified against the tenant IdP JWKS, and the
+// proof-of-possession signature proves the user controls the
+// corresponding private key.
+message SigningKeyBinding {
+  option (google.api.resource) = {
+    type: "fleetshift.io/SigningKeyBinding"
+    pattern: "signingKeyBindings/{signing_key_binding}"
+  };
+
+  // Resource name. Format: signingKeyBindings/{signing_key_binding}
+  string name = 1 [(google.api.field_behavior) = IDENTIFIER];
+
+  // Subject identifier from the identity token (jwt.sub).
+  string subject = 2 [(google.api.field_behavior) = OUTPUT_ONLY];
+
+  // OIDC issuer URL from the identity token (jwt.iss).
+  string issuer = 3 [(google.api.field_behavior) = OUTPUT_ONLY];
+
+  // JWK-encoded public key.
+  bytes public_key_jwk = 4 [(google.api.field_behavior) = OUTPUT_ONLY];
+
+  // Signing algorithm (e.g. "ES256").
+  string algorithm = 5 [(google.api.field_behavior) = OUTPUT_ONLY];
+
+  // Canonical JSON key binding document that was signed.
+  bytes key_binding_doc = 6 [(google.api.field_behavior) = OUTPUT_ONLY];
+
+  // ECDSA signature over key_binding_doc (proof of possession).
+  bytes key_binding_signature = 7 [(google.api.field_behavior) = OUTPUT_ONLY];
+
+  // Purpose-scoped ID token from the tenant IdP, included in the
+  // bundle for delivery agent verification.
+  string identity_token = 8 [(google.api.field_behavior) = OUTPUT_ONLY];
+
+  // When the key binding was created.
+  google.protobuf.Timestamp create_time = 9 [(google.api.field_behavior) = OUTPUT_ONLY];
+
+  // When the key binding expires.
+  google.protobuf.Timestamp expire_time = 10 [(google.api.field_behavior) = OUTPUT_ONLY];
+}

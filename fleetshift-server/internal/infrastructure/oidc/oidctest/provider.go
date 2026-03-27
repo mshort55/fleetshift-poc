@@ -52,11 +52,12 @@ type Provider struct {
 // TokenClaims configures the claims embedded in a token issued by
 // [Provider.IssueToken].
 type TokenClaims struct {
-	Subject string
-	Groups  []string
-	Email   string
-	Expiry  time.Duration // from now; defaults to 1h
-	Extra   map[string]any
+	Subject  string
+	Groups   []string
+	Email    string
+	Expiry   time.Duration // from now; defaults to 1h
+	Audience string        // overrides default audience if non-empty
+	Extra    map[string]any
 }
 
 // Option configures a [Provider].
@@ -271,10 +272,15 @@ func (p *Provider) IssueToken(t *testing.T, claims TokenClaims) string {
 		expiry = time.Hour
 	}
 
+	aud := p.audience
+	if claims.Audience != "" {
+		aud = claims.Audience
+	}
+
 	builder := jwt.NewBuilder().
 		Subject(sub).
 		Issuer(p.issuerURL).
-		Audience([]string{p.audience}).
+		Audience([]string{aud}).
 		IssuedAt(time.Now()).
 		Expiration(time.Now().Add(expiry))
 

@@ -11,11 +11,12 @@ import (
 )
 
 type authSetupFlags struct {
-	issuerURL string
-	clientID  string
-	scopes    string
-	methodID  string
-	audience  string
+	issuerURL             string
+	clientID              string
+	scopes                string
+	methodID              string
+	audience              string
+	keyEnrollmentClientID string
 }
 
 func newAuthSetupCmd(ctx *cmdContext) *cobra.Command {
@@ -32,6 +33,7 @@ func newAuthSetupCmd(ctx *cmdContext) *cobra.Command {
 	cmd.Flags().StringVar(&f.scopes, "scopes", "openid,profile,email", "Comma-separated OAuth2 scopes")
 	cmd.Flags().StringVar(&f.methodID, "method-id", "default", "Auth method ID on the server")
 	cmd.Flags().StringVar(&f.audience, "audience", "", "Expected audience claim")
+	cmd.Flags().StringVar(&f.keyEnrollmentClientID, "key-enrollment-client-id", "", "OAuth2 client ID for signing key enrollment (dedicated OIDC client)")
 	_ = cmd.MarkFlagRequired("issuer-url")
 	_ = cmd.MarkFlagRequired("client-id")
 	return cmd
@@ -45,8 +47,9 @@ func runAuthSetup(cmd *cobra.Command, ctx *cmdContext, f *authSetupFlags) error 
 		AuthMethod: &pb.AuthMethod{
 			Type: pb.AuthMethod_TYPE_OIDC,
 			OidcConfig: &pb.OIDCConfig{
-				IssuerUrl: f.issuerURL,
-				Audience:  f.audience,
+				IssuerUrl:             f.issuerURL,
+				Audience:              f.audience,
+				KeyEnrollmentAudience: f.keyEnrollmentClientID,
 			},
 		},
 	})
@@ -56,11 +59,12 @@ func runAuthSetup(cmd *cobra.Command, ctx *cmdContext, f *authSetupFlags) error 
 
 	scopes := strings.Split(f.scopes, ",")
 	cfg := auth.Config{
-		IssuerURL:             f.issuerURL,
-		ClientID:              f.clientID,
-		Scopes:                scopes,
-		AuthorizationEndpoint: resp.GetOidcConfig().GetAuthorizationEndpoint(),
-		TokenEndpoint:         resp.GetOidcConfig().GetTokenEndpoint(),
+		IssuerURL:              f.issuerURL,
+		ClientID:               f.clientID,
+		Scopes:                 scopes,
+		AuthorizationEndpoint:  resp.GetOidcConfig().GetAuthorizationEndpoint(),
+		TokenEndpoint:          resp.GetOidcConfig().GetTokenEndpoint(),
+		KeyEnrollmentClientID:  f.keyEnrollmentClientID,
 	}
 
 	if err := auth.SaveConfig(cfg); err != nil {
