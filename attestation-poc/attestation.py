@@ -1,21 +1,28 @@
 """
-Attestation chain prototype.
+Attestation model.
 
-Proves out the generalized attestation model where every verification
-scenario (user intent signing, addon co-signing, CEL-based update
-derivations, structural constraints) is handled by one algorithm
-walking a uniform chain of steps.
+An attestation is always input + output -- one shape.
 
-Two step types:
-  - Signature: a principal signed content. Verified cryptographically.
-  - Derivation: content was deterministically produced from a prior
-    step's content. Verified by re-execution.
+  - Input describes the intent and constrains the output.
+  - Output is the produced content (manifests, placement, etc.).
 
-Signature steps can carry constraints (predicates over the terminal
-applied content). Constraints are CEL-like expressions evaluated in
-phase 3 of verification.
+Two kinds of input:
 
-Run: python attestation.py
+  - SignedInput: a principal signs a spec with output constraints.
+  - DerivedInput: computed from a prior input and an update
+    attestation's output.  The result is a new spec -- a new input
+    -- whose constraints are derived from that computed content.
+
+Constraints live on inputs, never on outputs.  An output only has
+constraints when it is itself an input to something else (i.e.
+when it is part of an attestation used as an update).
+
+Recursion comes from DerivedInput.update being a full Attestation:
+updates are deployments too, with their own inputs and outputs.
+
+Trust anchors (TrustStore) are the only out-of-band input.
+
+Run: pytest test_attestation.py -v
 """
 
 from __future__ import annotations
@@ -24,7 +31,6 @@ import hashlib
 import json
 import time
 from dataclasses import dataclass, field
-from enum import Enum
 from typing import Any, Callable
 
 from cryptography.exceptions import InvalidSignature
@@ -47,18 +53,26 @@ from cryptography.hazmat.primitives.serialization import (
 # Crypto helpers
 # ---------------------------------------------------------------------------
 
-def generate_keypair() -> tuple[EllipticCurvePrivateKey, bytes]:
-    """Returns (private_key, der_encoded_public_key)."""
+@dataclass
+class KeyPair:
+    private_key: EllipticCurvePrivateKey
+    public_key_bytes: bytes
+
+
+def generate_keypair() -> KeyPair:
+    """Returns a KeyPair with DER-encoded public key."""
     private = generate_private_key(SECP256R1())
-    pub_der = private.public_key().public_bytes(Encoding.DER, PublicFormat.SubjectPublicKeyInfo)
-    return private, pub_der
+    pub_der = private.public_key().public_bytes(
+        Encoding.DER, PublicFormat.SubjectPublicKeyInfo,
+    )
+    return KeyPair(private, pub_der)
 
 
 def sign(private_key: EllipticCurvePrivateKey, data: bytes) -> bytes:
     return private_key.sign(data, ECDSA(SHA256()))
 
 
-def verify_sig(public_key_der: bytes, signature: bytes, data: bytes) -> bool:
+def verify_sig(public_key_der: bytes, data: bytes, signature: bytes) -> bool:
     pubkey = load_der_public_key(public_key_der)
     if not isinstance(pubkey, EllipticCurvePublicKey):
         return False
@@ -69,267 +83,412 @@ def verify_sig(public_key_der: bytes, signature: bytes, data: bytes) -> bool:
         return False
 
 
-def content_hash(data: bytes) -> str:
-    return hashlib.sha256(data).hexdigest()
-
-
-def canonical_json(obj: Any) -> bytes:
-    return json.dumps(obj, sort_keys=True, separators=(",", ":")).encode()
-
-
-# ---------------------------------------------------------------------------
-# Identity types
-# ---------------------------------------------------------------------------
-
-@dataclass(frozen=True)
-class UserIdentity:
-    subject: str
-    issuer: str
-    public_key: bytes  # raw EC public key bytes
-
-
-@dataclass(frozen=True)
-class AddonIdentity:
-    addon_id: str  # e.g. "spiffe://fleet-addons/capi-provisioner"
-    public_key: bytes
-
-
-Identity = UserIdentity | AddonIdentity
+def content_hash(obj: Any) -> bytes:
+    """Deterministic SHA-256 hash of arbitrary content via canonical JSON."""
+    canonical = json.dumps(obj, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode()).digest()
 
 
 # ---------------------------------------------------------------------------
-# Constraint: a predicate over (signed_content, applied_content)
-# ---------------------------------------------------------------------------
-
-@dataclass(frozen=True)
-class Constraint:
-    description: str
-    # (signed_content_dict, applied_manifests_list) -> bool
-    predicate: Callable[[dict, list[dict]], bool]
-
-
-# ---------------------------------------------------------------------------
-# Chain step types
-# ---------------------------------------------------------------------------
-
-class StepType(Enum):
-    SIGNATURE = "signature"
-    DERIVATION = "derivation"
-
-
-@dataclass
-class SignatureStep:
-    """A principal signed some content."""
-    type: StepType = field(default=StepType.SIGNATURE, init=False)
-    content: dict                        # the structured content that was signed
-    content_hash: str = ""               # sha256 hex of canonical JSON
-    signature: bytes = b""               # ECDSA signature over the hash
-    signer: Identity | None = None
-    valid_until: float = 0.0             # unix timestamp
-    authorized_next_signers: list[str] = field(default_factory=list)
-    constraints: list[Constraint] = field(default_factory=list)
-
-    def __post_init__(self):
-        if not self.content_hash:
-            self.content_hash = content_hash(canonical_json(self.content))
-
-
-@dataclass
-class DerivationStep:
-    """Content deterministically derived from a prior step."""
-    type: StepType = field(default=StepType.DERIVATION, init=False)
-    content: dict                         # the derived output
-    content_hash: str = ""
-    # f(input_dict) -> output_dict; the deterministic derivation rule
-    derivation_fn: Callable[[dict], dict] | None = None
-    derivation_description: str = ""      # human-readable (e.g. the CEL expression)
-    input_content: dict = field(default_factory=dict)
-    input_hash: str = ""
-
-    def __post_init__(self):
-        if not self.content_hash:
-            self.content_hash = content_hash(canonical_json(self.content))
-        if self.input_content and not self.input_hash:
-            self.input_hash = content_hash(canonical_json(self.input_content))
-
-
-Step = SignatureStep | DerivationStep
-
-
-# ---------------------------------------------------------------------------
-# Attestation chain
-# ---------------------------------------------------------------------------
-
-@dataclass
-class AttestationChain:
-    steps: list[Step]
-    deployment_id: str = ""
-
-
-# ---------------------------------------------------------------------------
-# Chain construction helpers
-# ---------------------------------------------------------------------------
-
-def _signable_envelope(content: dict, valid_until: float) -> bytes:
-    """The canonical bytes that get signed: content + temporal bound."""
-    envelope = {"content": content, "valid_until": valid_until}
-    return canonical_json(envelope)
-
-
-def sign_step(
-    private_key: EllipticCurvePrivateKey,
-    identity: Identity,
-    content: dict,
-    valid_duration_sec: float = 86400,
-    authorized_next_signers: list[str] | None = None,
-    constraints: list[Constraint] | None = None,
-) -> SignatureStep:
-    """Build a signed step: compute canonical hash and sign it."""
-    valid_until = time.time() + valid_duration_sec
-    envelope_bytes = _signable_envelope(content, valid_until)
-    c_hash = content_hash(canonical_json(content))
-    sig = sign(private_key, envelope_bytes)
-    return SignatureStep(
-        content=content,
-        content_hash=c_hash,
-        signature=sig,
-        signer=identity,
-        valid_until=valid_until,
-        authorized_next_signers=authorized_next_signers or [],
-        constraints=constraints or [],
-    )
-
-
-def derive_step(
-    derivation_fn: Callable[[dict], dict],
-    input_content: dict,
-    description: str = "",
-) -> DerivationStep:
-    """Build a derivation step: apply the function and record input/output."""
-    output = derivation_fn(input_content)
-    return DerivationStep(
-        content=output,
-        derivation_fn=derivation_fn,
-        derivation_description=description,
-        input_content=input_content,
-    )
-
-
-# ---------------------------------------------------------------------------
-# Verification
+# Errors
 # ---------------------------------------------------------------------------
 
 class VerificationError(Exception):
     pass
 
 
-def _signer_id(identity: Identity) -> str:
-    if isinstance(identity, UserIdentity):
-        return f"user:{identity.subject}@{identity.issuer}"
-    return f"addon:{identity.addon_id}"
+# ---------------------------------------------------------------------------
+# Trust anchors
+# ---------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class TrustAnchor:
+    anchor_id: str
+    known_keys: dict[str, bytes]  # signer_id -> DER-encoded public key
 
 
-def _next_signer_step(chain: list[Step], after: int) -> SignatureStep | None:
-    for s in chain[after + 1 :]:
-        if isinstance(s, SignatureStep):
-            return s
-    return None
+class TrustStore:
+    def __init__(self) -> None:
+        self._anchors: dict[str, TrustAnchor] = {}
+
+    def add(self, anchor: TrustAnchor) -> None:
+        self._anchors[anchor.anchor_id] = anchor
+
+    def get(self, anchor_id: str) -> TrustAnchor | None:
+        return self._anchors.get(anchor_id)
 
 
-def _has_constraints(steps: list[Step]) -> bool:
-    return any(
-        isinstance(s, SignatureStep) and s.constraints for s in steps
+# ---------------------------------------------------------------------------
+# Key binding
+# ---------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class KeyBinding:
+    """Ties a signing key to an identity via a trust anchor.
+
+    binding_proof is a proof-of-possession: the private key signs
+    the canonical hash of {signer_id, public_key, trust_anchor_id}.
+    """
+
+    signer_id: str
+    public_key: bytes
+    trust_anchor_id: str
+    binding_proof: bytes
+
+
+# ---------------------------------------------------------------------------
+# Verification result types
+# ---------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class VerifiedOutput:
+    """Public result of attestation verification.
+
+    This is what the delivery agent sees: content to apply, plus
+    the output signer if the output was signed.  No constraints --
+    those are consumed internally during verification.
+    """
+
+    content: Any
+    content_hash: bytes
+    signer_id: str | None = None
+
+
+@dataclass(frozen=True)
+class OutputConstraint:
+    """A predicate the authority places on the output.
+
+    check receives (input_content, verified_output).
+    """
+
+    description: str
+    check: Callable[[Any, VerifiedOutput], bool]
+
+
+@dataclass(frozen=True)
+class _VerifiedInput:
+    """Internal result of input verification.  Carries constraints."""
+
+    content: Any
+    content_hash: bytes
+    output_constraints: list[OutputConstraint]
+    signer_id: str | None = None
+
+
+# ---------------------------------------------------------------------------
+# Output
+# ---------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class Output:
+    """Produced content, optionally signed.
+
+    Whether a signature is required is determined by the input's
+    constraints, not by the Output itself.
+    """
+
+    content: Any
+    signer_id: str | None = None
+    public_key: bytes | None = None
+    signature: bytes | None = None
+    key_binding: KeyBinding | None = None
+
+
+# ---------------------------------------------------------------------------
+# SignedInput
+# ---------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class SignedInput:
+    """A principal's signed content with explicit output constraints.
+
+    The fundamental authority unit.  Constraints are part of the
+    signed envelope: they are the authority's assertion about what
+    the output must look like.
+    """
+
+    content: Any
+    signer_id: str
+    public_key: bytes
+    signature: bytes
+    valid_until: float
+    key_binding: KeyBinding
+    output_constraints: list[OutputConstraint] = field(default_factory=list)
+
+    def verify(
+        self,
+        trust_store: TrustStore,
+        _visited: frozenset[int] = frozenset(),
+    ) -> _VerifiedInput:
+        _check_cycle(self, _visited)
+
+        envelope = _signed_envelope(
+            self.content, self.valid_until, self.output_constraints,
+        )
+        envelope_hash = content_hash(envelope)
+        if not verify_sig(self.public_key, envelope_hash, self.signature):
+            raise VerificationError(
+                f"signature verification failed for {self.signer_id}"
+            )
+
+        if time.time() > self.valid_until:
+            raise VerificationError(f"expired: {self.signer_id}")
+
+        _verify_key_binding(
+            self.key_binding, self.signer_id, self.public_key, trust_store,
+        )
+
+        return _VerifiedInput(
+            content=self.content,
+            content_hash=content_hash(self.content),
+            output_constraints=self.output_constraints,
+            signer_id=self.signer_id,
+        )
+
+
+# ---------------------------------------------------------------------------
+# DerivedInput
+# ---------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class DerivedInput:
+    """Input computed from a prior input and an update attestation.
+
+    prior is SignedInput | DerivedInput (never a full Attestation --
+    the prior's output is structurally irrelevant).
+
+    update is a full Attestation -- we verify it and consume its
+    output.  Updates are deployments targeting other deployments;
+    this is where recursion enters.
+
+    apply takes (prior_content, update_output) and returns
+    (new_content, output_constraints).  The result is a new spec
+    whose constraints are derived from that content.
+
+    TODO: The apply callable should ideally come from the update
+    attestation's content rather than being a separate function.
+    """
+
+    prior: SignedInput | DerivedInput
+    update: Attestation
+    apply: Callable[[Any, Any], tuple[Any, list[OutputConstraint]]]
+
+    def verify(
+        self,
+        trust_store: TrustStore,
+        _visited: frozenset[int] = frozenset(),
+    ) -> _VerifiedInput:
+        _check_cycle(self, _visited)
+        visited = _visited | {id(self)}
+
+        prior_result = self.prior.verify(trust_store, visited)
+        update_result = self.update.verify(trust_store, visited)
+
+        try:
+            derived_content, output_constraints = self.apply(
+                prior_result.content, update_result.content,
+            )
+        except VerificationError:
+            raise
+        except Exception as exc:
+            raise VerificationError(f"derivation failed: {exc}") from exc
+
+        return _VerifiedInput(
+            content=derived_content,
+            content_hash=content_hash(derived_content),
+            output_constraints=output_constraints,
+        )
+
+
+# ---------------------------------------------------------------------------
+# Attestation
+# ---------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class Attestation:
+    """An attested deployment: input + output.
+
+    The input (SignedInput or DerivedInput) describes the intent and
+    carries constraints.  The output is verified against those
+    constraints.  This is the only attestation shape.
+
+    verify() returns the verified output -- what the delivery agent
+    applies.  Constraint enforcement is internal.
+    """
+
+    input: SignedInput | DerivedInput
+    output: Output
+
+    def verify(
+        self,
+        trust_store: TrustStore,
+        _visited: frozenset[int] = frozenset(),
+    ) -> VerifiedOutput:
+        _check_cycle(self, _visited)
+        visited = _visited | {id(self)}
+
+        input_result = self.input.verify(trust_store, visited)
+        output_result = _verify_output(self.output, trust_store)
+
+        for c in input_result.output_constraints:
+            if not c.check(input_result.content, output_result):
+                raise VerificationError(
+                    f"output constraint failed: {c.description}"
+                )
+
+        return output_result
+
+
+# ---------------------------------------------------------------------------
+# Internal helpers
+# ---------------------------------------------------------------------------
+
+def _check_cycle(obj: object, visited: frozenset[int]) -> None:
+    if id(obj) in visited:
+        raise VerificationError("cycle detected in attestation graph")
+
+
+def _signed_envelope(
+    content: Any,
+    valid_until: float,
+    constraints: list[OutputConstraint],
+) -> dict:
+    """Canonical dict that gets hashed and signed."""
+    return {
+        "content": content,
+        "output_constraints": sorted(c.description for c in constraints),
+        "valid_until": valid_until,
+    }
+
+
+def _verify_key_binding(
+    kb: KeyBinding,
+    expected_signer: str,
+    expected_key: bytes,
+    trust_store: TrustStore,
+) -> None:
+    if kb.signer_id != expected_signer:
+        raise VerificationError(
+            f"key binding signer {kb.signer_id} != expected {expected_signer}"
+        )
+    if kb.public_key != expected_key:
+        raise VerificationError("signature key does not match key binding")
+
+    anchor = trust_store.get(kb.trust_anchor_id)
+    if anchor is None:
+        raise VerificationError(
+            f"trust anchor not found: {kb.trust_anchor_id}"
+        )
+
+    known = anchor.known_keys.get(kb.signer_id)
+    if known is None or known != kb.public_key:
+        raise VerificationError(
+            f"key not recognised by anchor {kb.trust_anchor_id}"
+        )
+
+    binding_doc = {
+        "public_key": kb.public_key.hex(),
+        "signer_id": kb.signer_id,
+        "trust_anchor_id": kb.trust_anchor_id,
+    }
+    if not verify_sig(
+        kb.public_key,
+        content_hash(binding_doc),
+        kb.binding_proof,
+    ):
+        raise VerificationError("key binding proof-of-possession failed")
+
+
+def _verify_output(output: Output, trust_store: TrustStore) -> VerifiedOutput:
+    """Verify an output's optional signature and trust anchor."""
+    if output.signature is not None:
+        output_hash = content_hash(output.content)
+        if not verify_sig(output.public_key, output_hash, output.signature):
+            raise VerificationError(
+                f"output signature verification failed for {output.signer_id}"
+            )
+        if output.key_binding is not None:
+            _verify_key_binding(
+                output.key_binding, output.signer_id,
+                output.public_key, trust_store,
+            )
+
+    return VerifiedOutput(
+        content=output.content,
+        content_hash=content_hash(output.content),
+        signer_id=output.signer_id,
     )
 
 
-def verify_chain(chain: AttestationChain, applied_manifests: list[dict]) -> None:
-    """
-    Verify an attestation chain against applied manifests.
-    Raises VerificationError on failure.
+# ---------------------------------------------------------------------------
+# Construction helpers
+# ---------------------------------------------------------------------------
 
-    Two phases:
-      1. Walk chain, verify each step (signatures and derivations).
-      2. Binding check: the chain must be bound to the applied content
-         via either terminal hash match or constraints (or both).
+def make_key_binding(
+    keys: KeyPair,
+    signer_id: str,
+    trust_anchor_id: str,
+) -> KeyBinding:
+    """Create a [KeyBinding] with proof-of-possession."""
+    binding_doc = {
+        "public_key": keys.public_key_bytes.hex(),
+        "signer_id": signer_id,
+        "trust_anchor_id": trust_anchor_id,
+    }
+    binding_proof = sign(
+        keys.private_key, content_hash(binding_doc),
+    )
+    return KeyBinding(
+        signer_id=signer_id,
+        public_key=keys.public_key_bytes,
+        trust_anchor_id=trust_anchor_id,
+        binding_proof=binding_proof,
+    )
 
-    Binding modes:
-      - Terminating: the last step's content hash matches the applied
-        content hash. This is the strongest binding — the chain proves
-        exactly what should be applied. Constraints are defense-in-depth.
-      - Constraining: the chain does not terminate at the applied content,
-        but signature steps carry constraints that validate it. This is
-        the binding for intent signing where the intent is structurally
-        different from the manifests.
-      - Unbound: neither terminal match nor constraints. Rejected — the
-        chain floats in space with no connection to what's being applied.
-    """
-    steps = chain.steps
-    if not steps:
-        raise VerificationError("empty chain")
 
-    applied_hash = content_hash(canonical_json(applied_manifests))
+def make_signed_input(
+    keys: KeyPair,
+    key_binding: KeyBinding,
+    content: Any,
+    output_constraints: list[OutputConstraint] | None = None,
+    valid_duration_sec: float = 86400,
+) -> SignedInput:
+    """Create a [SignedInput]."""
+    constraints = output_constraints or []
+    valid_until = time.time() + valid_duration_sec
 
-    # Phase 1: verify each step
-    for i, step in enumerate(steps):
-        if isinstance(step, SignatureStep):
-            envelope_bytes = _signable_envelope(step.content, step.valid_until)
-            if not verify_sig(step.signer.public_key, step.signature, envelope_bytes):
-                raise VerificationError(
-                    f"step {i}: signature verification failed for {_signer_id(step.signer)}"
-                )
+    envelope = _signed_envelope(content, valid_until, constraints)
+    envelope_hash = content_hash(envelope)
+    sig = sign(keys.private_key, envelope_hash)
 
-            c_bytes = canonical_json(step.content)
-            if content_hash(c_bytes) != step.content_hash:
-                raise VerificationError(f"step {i}: content hash mismatch")
+    return SignedInput(
+        content=content,
+        signer_id=key_binding.signer_id,
+        public_key=keys.public_key_bytes,
+        signature=sig,
+        valid_until=valid_until,
+        key_binding=key_binding,
+        output_constraints=constraints,
+    )
 
-            if time.time() > step.valid_until:
-                raise VerificationError(f"step {i}: expired")
 
-            if step.authorized_next_signers:
-                nxt = _next_signer_step(steps, i)
-                if nxt is None:
-                    raise VerificationError(
-                        f"step {i}: authorizes next signers but no subsequent signature step"
-                    )
-                nxt_id = _signer_id(nxt.signer)
-                if nxt_id not in step.authorized_next_signers:
-                    raise VerificationError(
-                        f"step {i}: next signer {nxt_id} not in authorized list"
-                    )
+def make_output(content: Any) -> Output:
+    """Create an unsigned [Output]."""
+    return Output(content=content)
 
-        elif isinstance(step, DerivationStep):
-            if step.derivation_fn is None:
-                raise VerificationError(f"step {i}: no derivation function")
-            computed = step.derivation_fn(step.input_content)
-            computed_hash = content_hash(canonical_json(computed))
-            if computed_hash != step.content_hash:
-                raise VerificationError(
-                    f"step {i}: derivation re-execution produced different output"
-                )
 
-            if step.input_hash:
-                actual_input_hash = content_hash(canonical_json(step.input_content))
-                if actual_input_hash != step.input_hash:
-                    raise VerificationError(f"step {i}: input hash mismatch")
-
-    # Phase 2: binding check
-    last = steps[-1]
-    terminates = last.content_hash == applied_hash
-    has_constraints = _has_constraints(steps)
-
-    if not terminates and not has_constraints:
-        raise VerificationError(
-            "unbound chain: does not terminate at applied content "
-            "and carries no constraints"
-        )
-
-    # Evaluate all constraints against applied content.
-    # For terminating chains this is defense-in-depth.
-    # For constraining chains this is the sole binding.
-    for i, step in enumerate(steps):
-        if isinstance(step, SignatureStep):
-            for c in step.constraints:
-                if not c.predicate(step.content, applied_manifests):
-                    raise VerificationError(
-                        f"step {i}: constraint failed: {c.description}"
-                    )
+def sign_output(
+    keys: KeyPair,
+    key_binding: KeyBinding,
+    content: Any,
+) -> Output:
+    """Create a signed [Output]."""
+    output_hash = content_hash(content)
+    sig = sign(keys.private_key, output_hash)
+    return Output(
+        content=content,
+        signer_id=key_binding.signer_id,
+        public_key=keys.public_key_bytes,
+        signature=sig,
+        key_binding=key_binding,
+    )
