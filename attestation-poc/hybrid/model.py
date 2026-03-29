@@ -43,32 +43,11 @@ class KeyBinding:
 
 
 @dataclass(frozen=True)
-class AddonSignedConstraint:
-    addon_id: str
-    trust_anchor_id: str = "fleet-addons"
+class OutputConstraint:
+    """A signed CEL predicate over the verified {input, output} pair."""
 
-
-@dataclass(frozen=True)
-class NamespaceConstraint:
-    namespace: str
-
-
-@dataclass(frozen=True)
-class AllowedGVKsConstraint:
-    allowed_gvks: tuple[str, ...]
-
-
-@dataclass(frozen=True)
-class NoClusterAdminConstraint:
-    pass
-
-
-OutputConstraint = (
-    AddonSignedConstraint
-    | NamespaceConstraint
-    | AllowedGVKsConstraint
-    | NoClusterAdminConstraint
-)
+    name: str
+    expression: str
 
 
 @dataclass(frozen=True)
@@ -88,7 +67,7 @@ class Output:
 
 @dataclass(frozen=True)
 class SignedInput:
-    """A signer's direct authorization of input content and constraints."""
+    """A signer's direct authorization of input content and CEL constraints."""
 
     content: Any
     signature: Signature
@@ -99,7 +78,11 @@ class SignedInput:
 
 @dataclass(frozen=True)
 class DerivedInput:
-    """Input derived from a prior attestation and a verified update."""
+    """Input derived from a prior attestation and a verified update.
+
+    The referenced update attestation's signed output contains the CEL
+    expression used to derive the next input.
+    """
 
     prior_attestation_id: str
     update_attestation_id: str

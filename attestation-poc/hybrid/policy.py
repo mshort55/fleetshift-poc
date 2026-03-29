@@ -5,34 +5,14 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from .model import (
-    AddonSignedConstraint,
-    AllowedGVKsConstraint,
-    NamespaceConstraint,
-    NoClusterAdminConstraint,
-    OutputConstraint,
-)
+from .model import OutputConstraint
 
 
 def constraint_to_document(constraint: OutputConstraint) -> dict[str, Any]:
-    match constraint:
-        case AddonSignedConstraint(addon_id=addon_id, trust_anchor_id=trust_anchor_id):
-            return {
-                "type": "addon_signed",
-                "addon_id": addon_id,
-                "trust_anchor_id": trust_anchor_id,
-            }
-        case NamespaceConstraint(namespace=namespace):
-            return {"type": "namespace", "namespace": namespace}
-        case AllowedGVKsConstraint(allowed_gvks=allowed_gvks):
-            return {
-                "type": "allowed_gvks",
-                "allowed_gvks": sorted(allowed_gvks),
-            }
-        case NoClusterAdminConstraint():
-            return {"type": "no_cluster_admin"}
-        case _:
-            raise ValueError(f"unsupported constraint: {constraint!r}")
+    return {
+        "expression": constraint.expression,
+        "name": constraint.name,
+    }
 
 
 def constraints_to_documents(
@@ -46,21 +26,15 @@ def constraints_to_documents(
 
 
 def constraint_from_document(doc: dict[str, Any]) -> OutputConstraint:
-    doc_type = doc.get("type")
-    if doc_type == "addon_signed":
-        return AddonSignedConstraint(
-            addon_id=doc["addon_id"],
-            trust_anchor_id=doc.get("trust_anchor_id", "fleet-addons"),
+    name = doc.get("name")
+    expression = doc.get("expression")
+    if not isinstance(name, str) or not name:
+        raise ValueError(f"constraint name must be a non-empty string: {doc!r}")
+    if not isinstance(expression, str) or not expression:
+        raise ValueError(
+            f"constraint expression must be a non-empty string: {doc!r}"
         )
-    if doc_type == "namespace":
-        return NamespaceConstraint(namespace=doc["namespace"])
-    if doc_type == "allowed_gvks":
-        return AllowedGVKsConstraint(
-            allowed_gvks=tuple(sorted(doc["allowed_gvks"])),
-        )
-    if doc_type == "no_cluster_admin":
-        return NoClusterAdminConstraint()
-    raise ValueError(f"unsupported constraint document: {doc!r}")
+    return OutputConstraint(name=name, expression=expression)
 
 
 def constraints_from_documents(documents: list[dict[str, Any]]) -> tuple[OutputConstraint, ...]:
@@ -99,18 +73,17 @@ def derive_output_constraints(content: Any) -> tuple[OutputConstraint, ...]:
         or strategy.get("trust_anchor")
         or "fleet-addons"
     )
-    return (AddonSignedConstraint(addon_id=addon_id, trust_anchor_id=trust_anchor_id),)
+    return (
+        OutputConstraint(
+            name=f"output must be signed by {addon_id} via {trust_anchor_id}",
+            expression=(
+                f'output.has_signature && '
+                f'output.signature.trust_anchor_id == "{trust_anchor_id}" && '
+                f'output.signer_id == "{addon_id}"'
+            ),
+        ),
+    )
 
 
 def describe_constraint(constraint: OutputConstraint) -> str:
-    match constraint:
-        case AddonSignedConstraint(addon_id=addon_id, trust_anchor_id=trust_anchor_id):
-            return f"output must be signed by {addon_id} via {trust_anchor_id}"
-        case NamespaceConstraint(namespace=namespace):
-            return f"all manifests must be in namespace {namespace}"
-        case AllowedGVKsConstraint(allowed_gvks=allowed_gvks):
-            return f"only GVKs in {sorted(allowed_gvks)}"
-        case NoClusterAdminConstraint():
-            return "no ClusterRoleBinding may grant cluster-admin"
-        case _:
-            return repr(constraint)
+    return constraint.name

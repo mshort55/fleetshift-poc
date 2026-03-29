@@ -3,21 +3,20 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import json
 import unittest
 
 from .build import make_key_binding, make_output, make_signed_input, sign_output
 from .crypto import KeyPair, generate_keypair
 from .model import (
-    AddonSignedConstraint,
-    AllowedGVKsConstraint,
     Attestation,
     DerivedInput,
     KeyBinding,
-    NamespaceConstraint,
-    NoClusterAdminConstraint,
+    OutputConstraint,
     SignedInput,
     TrustAnchor,
 )
+from .policy import constraint_to_document
 from .verify import (
     AttestationStore,
     TrustStore,
@@ -43,6 +42,48 @@ def make_identity(signer_id: str, trust_anchor_id: str) -> Identity:
         trust_anchor_id=trust_anchor_id,
         keys=keys,
         key_binding=make_key_binding(keys, signer_id, trust_anchor_id),
+    )
+
+
+def addon_must_sign(
+    addon_id: str,
+    trust_anchor_id: str = "fleet-addons",
+) -> OutputConstraint:
+    return OutputConstraint(
+        name=f"output must be signed by {addon_id} via {trust_anchor_id}",
+        expression=(
+            f'output.has_signature && '
+            f'output.signature.trust_anchor_id == "{trust_anchor_id}" && '
+            f'output.signer_id == "{addon_id}"'
+        ),
+    )
+
+
+def namespace_constraint(namespace: str) -> OutputConstraint:
+    return OutputConstraint(
+        name=f"all manifests must be in namespace {namespace}",
+        expression=f'output.content.all(m, m.metadata.namespace == "{namespace}")',
+    )
+
+
+def allowed_gvks(*allowed_gvks: str) -> OutputConstraint:
+    allowed_literal = json.dumps(list(allowed_gvks))
+    return OutputConstraint(
+        name=f"only GVKs in {list(allowed_gvks)}",
+        expression=(
+            f'output.content.all(m, ((m.apiVersion + "/" + m.kind) in {allowed_literal}))'
+        ),
+    )
+
+
+def no_cluster_admin() -> OutputConstraint:
+    return OutputConstraint(
+        name="no ClusterRoleBinding may grant cluster-admin",
+        expression=(
+            'output.content.all('
+            'm, !(m.kind == "ClusterRoleBinding" && m.roleRef.name == "cluster-admin")'
+            ')'
+        ),
     )
 
 
@@ -76,7 +117,7 @@ class HybridAttestationTests(unittest.TestCase):
             )
         )
 
-    def test_direct_attestation_with_signed_constraints_verifies(self) -> None:
+    def test_direct_attestation_with_signed_cel_constraints_verifies(self) -> None:
         manifests = [
             {
                 "apiVersion": "apps/v1",
@@ -90,20 +131,24 @@ class HybridAttestationTests(unittest.TestCase):
                 self.alice,
                 {"intent": "deploy-web"},
                 output_constraints=(
-                    NamespaceConstraint("prod"),
-                    AllowedGVKsConstraint(("apps/v1/Deployment",)),
+                    namespace_constraint("prod"),
+                    allowed_gvks("apps/v1/Deployment"),
                 ),
             ),
             output=make_output(manifests),
         )
         self.attestation_store.add(attestation)
 
-        verified = verify_attestation(attestation, self.attestation_store, self.trust_store)
+        verified = verify_attestation(
+            attestation,
+            self.attestation_store,
+            self.trust_store,
+        )
 
         self.assertEqual(verified.content, manifests)
         self.assertIsNone(verified.signer_id)
 
-    def test_addon_signed_output_with_explicit_policy_verifies(self) -> None:
+    def test_addon_signed_output_with_explicit_cel_policy_verifies(self) -> None:
         spec = {
             "manifest_strategy": {
                 "type": "addon",
@@ -124,19 +169,23 @@ class HybridAttestationTests(unittest.TestCase):
                 self.alice,
                 spec,
                 output_constraints=(
-                    AddonSignedConstraint("capi-provisioner", "fleet-addons"),
-                    NoClusterAdminConstraint(),
+                    addon_must_sign("capi-provisioner"),
+                    no_cluster_admin(),
                 ),
             ),
             output=self._signed_output(self.capi_addon, manifests),
         )
         self.attestation_store.add(attestation)
 
-        verified = verify_attestation(attestation, self.attestation_store, self.trust_store)
+        verified = verify_attestation(
+            attestation,
+            self.attestation_store,
+            self.trust_store,
+        )
 
         self.assertEqual(verified.signer_id, "capi-provisioner")
 
-    def test_derived_input_uses_signed_update_output_for_mutation_and_constraints(self) -> None:
+    def test_derived_input_uses_signed_cel_update_and_constraints(self) -> None:
         prior_spec = {
             "deployment_id": "cluster-01",
             "manifest_strategy": {
@@ -159,9 +208,7 @@ class HybridAttestationTests(unittest.TestCase):
             input=self._input(
                 self.alice,
                 prior_spec,
-                output_constraints=(
-                    AddonSignedConstraint("capi-provisioner", "fleet-addons"),
-                ),
+                output_constraints=(addon_must_sign("capi-provisioner"),),
             ),
             output=self._signed_output(self.capi_addon, prior_output),
         )
@@ -169,19 +216,12 @@ class HybridAttestationTests(unittest.TestCase):
         update_request = {"type": "request", "capability": "upgrade-planner"}
         update_directive = {
             "type": "spec_update",
-            "mutation": {
-                "manifest_strategy.config.version": "1.30.2",
-            },
+            "derive_input_expression": (
+                'set_path(prior, "manifest_strategy.config.version", "1.30.2")'
+            ),
             "output_constraints": [
-                {
-                    "type": "addon_signed",
-                    "addon_id": "capi-provisioner",
-                    "trust_anchor_id": "fleet-addons",
-                },
-                {
-                    "type": "namespace",
-                    "namespace": "capi-system",
-                },
+                constraint_to_document(addon_must_sign("capi-provisioner")),
+                constraint_to_document(namespace_constraint("capi-system")),
             ],
         }
         update_attestation = Attestation(
@@ -189,9 +229,7 @@ class HybridAttestationTests(unittest.TestCase):
             input=self._input(
                 self.bob,
                 update_request,
-                output_constraints=(
-                    AddonSignedConstraint("upgrade-planner", "fleet-addons"),
-                ),
+                output_constraints=(addon_must_sign("upgrade-planner"),),
             ),
             output=self._signed_output(self.planner_addon, update_directive),
         )
@@ -259,9 +297,9 @@ class HybridAttestationTests(unittest.TestCase):
                 self.planner_addon,
                 {
                     "type": "spec_update",
-                    "mutation": {
-                        "manifest_strategy.config.version": "1.30.2",
-                    },
+                    "derive_input_expression": (
+                        'set_path(prior, "manifest_strategy.config.version", "1.30.2")'
+                    ),
                 },
             ),
         )
@@ -277,9 +315,58 @@ class HybridAttestationTests(unittest.TestCase):
         for attestation in (prior_attestation, update_attestation, final_attestation):
             self.attestation_store.add(attestation)
 
-        verified = verify_attestation(final_attestation, self.attestation_store, self.trust_store)
+        verified = verify_attestation(
+            final_attestation,
+            self.attestation_store,
+            self.trust_store,
+        )
 
         self.assertEqual(verified.signer_id, "capi-provisioner")
+
+    def test_bad_update_expression_fails_derivation(self) -> None:
+        prior_spec = {
+            "manifest_strategy": {
+                "type": "addon",
+                "addon_id": "capi-provisioner",
+                "trust_anchor": "fleet-addons",
+            }
+        }
+        prior_attestation = Attestation(
+            attestation_id="prior-bad-update",
+            input=self._input(self.alice, prior_spec),
+            output=self._signed_output(self.capi_addon, [{"kind": "Cluster"}]),
+        )
+        update_attestation = Attestation(
+            attestation_id="update-bad-expression",
+            input=self._input(self.bob, {"type": "request"}),
+            output=self._signed_output(
+                self.planner_addon,
+                {
+                    "type": "spec_update",
+                    "derive_input_expression": "1 + 2",
+                },
+            ),
+        )
+        final_attestation = Attestation(
+            attestation_id="final-bad-expression",
+            input=DerivedInput(
+                prior_attestation_id="prior-bad-update",
+                update_attestation_id="update-bad-expression",
+            ),
+            output=self._signed_output(self.capi_addon, [{"kind": "Cluster"}]),
+        )
+
+        for attestation in (prior_attestation, update_attestation, final_attestation):
+            self.attestation_store.add(attestation)
+
+        with self.assertRaises(VerificationError) as context:
+            verify_attestation(
+                final_attestation,
+                self.attestation_store,
+                self.trust_store,
+            )
+
+        self.assertIn("derive_input_expression must return an object", str(context.exception))
 
     def test_wrong_output_signer_fails_against_derived_constraint(self) -> None:
         prior_spec = {
@@ -302,9 +389,9 @@ class HybridAttestationTests(unittest.TestCase):
                 self.planner_addon,
                 {
                     "type": "spec_update",
-                    "mutation": {
-                        "manifest_strategy.config.version": "1.30.2",
-                    },
+                    "derive_input_expression": (
+                        'set_path(prior, "manifest_strategy.config.version", "1.30.2")'
+                    ),
                 },
             ),
         )
@@ -321,9 +408,13 @@ class HybridAttestationTests(unittest.TestCase):
             self.attestation_store.add(attestation)
 
         with self.assertRaises(VerificationError) as context:
-            verify_attestation(final_attestation, self.attestation_store, self.trust_store)
+            verify_attestation(
+                final_attestation,
+                self.attestation_store,
+                self.trust_store,
+            )
 
-        self.assertIn("expected capi-provisioner", str(context.exception))
+        self.assertIn("output must be signed by capi-provisioner", str(context.exception))
 
     def test_expired_signed_input_fails(self) -> None:
         attestation = Attestation(
@@ -338,7 +429,11 @@ class HybridAttestationTests(unittest.TestCase):
         self.attestation_store.add(attestation)
 
         with self.assertRaises(VerificationError) as context:
-            verify_attestation(attestation, self.attestation_store, self.trust_store)
+            verify_attestation(
+                attestation,
+                self.attestation_store,
+                self.trust_store,
+            )
 
         self.assertIn("expired", str(context.exception))
 
@@ -346,7 +441,7 @@ class HybridAttestationTests(unittest.TestCase):
         signed_input = self._input(
             self.alice,
             {"intent": "tamper-check"},
-            output_constraints=(NamespaceConstraint("prod"),),
+            output_constraints=(namespace_constraint("prod"),),
         )
         tampered_input = SignedInput(
             content=signed_input.content,
@@ -363,16 +458,49 @@ class HybridAttestationTests(unittest.TestCase):
         self.attestation_store.add(attestation)
 
         with self.assertRaises(VerificationError) as context:
-            verify_attestation(attestation, self.attestation_store, self.trust_store)
+            verify_attestation(
+                attestation,
+                self.attestation_store,
+                self.trust_store,
+            )
 
         self.assertIn("signed input hash mismatch", str(context.exception))
+
+    def test_failed_cel_constraint_surfaces_constraint_name(self) -> None:
+        manifests = [
+            {
+                "apiVersion": "rbac.authorization.k8s.io/v1",
+                "kind": "ClusterRoleBinding",
+                "metadata": {"name": "evil", "namespace": "prod"},
+                "roleRef": {"name": "cluster-admin"},
+            }
+        ]
+        attestation = Attestation(
+            attestation_id="bad-rbac",
+            input=self._input(
+                self.alice,
+                {"intent": "deploy-rbac"},
+                output_constraints=(no_cluster_admin(),),
+            ),
+            output=make_output(manifests),
+        )
+        self.attestation_store.add(attestation)
+
+        with self.assertRaises(VerificationError) as context:
+            verify_attestation(
+                attestation,
+                self.attestation_store,
+                self.trust_store,
+            )
+
+        self.assertIn("no ClusterRoleBinding may grant cluster-admin", str(context.exception))
 
     def _input(
         self,
         identity: Identity,
         content: object,
         *,
-        output_constraints: tuple[object, ...] = (),
+        output_constraints: tuple[OutputConstraint, ...] = (),
         valid_duration_sec: float = 86400,
     ) -> SignedInput:
         return make_signed_input(

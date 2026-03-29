@@ -6,18 +6,15 @@ import time
 from dataclasses import dataclass, field
 from typing import Any
 
+from .cel_runtime import CelEvaluationError, evaluate_bool
 from .crypto import content_hash, verify
 from .mutation import apply_update, derive_constraints
 from .model import (
-    AddonSignedConstraint,
-    AllowedGVKsConstraint,
     Attestation,
     DerivedInput,
     KeyBinding,
-    NamespaceConstraint,
-    NoClusterAdminConstraint,
     Output,
-    OutputSignature,
+    OutputConstraint,
     SignedInput,
     TrustAnchor,
     VerifiedOutput,
@@ -84,13 +81,7 @@ class VerificationResult:
 class _VerifiedInput:
     content: Any
     content_hash: bytes
-    output_constraints: tuple[
-        AddonSignedConstraint
-        | NamespaceConstraint
-        | AllowedGVKsConstraint
-        | NoClusterAdminConstraint,
-        ...,
-    ]
+    output_constraints: tuple[OutputConstraint, ...]
     signer_id: str | None = None
 
 
@@ -131,7 +122,11 @@ def _verify_attestation(
     visited: frozenset[str],
 ) -> tuple[VerificationResult, _VerifiedInput | None, VerifiedOutput | None]:
     if attestation.attestation_id in visited:
-        return _fail(attestation.attestation_id, "cycle detected in attestation graph"), None, None
+        return (
+            _fail(attestation.attestation_id, "cycle detected in attestation graph"),
+            None,
+            None,
+        )
 
     next_visited = visited | {attestation.attestation_id}
     input_result, verified_input = _verify_input(
@@ -141,7 +136,11 @@ def _verify_attestation(
         next_visited,
     )
     if not input_result.valid or verified_input is None:
-        return _fail(attestation.attestation_id, "input verification failed", [input_result]), None, None
+        return (
+            _fail(attestation.attestation_id, "input verification failed", [input_result]),
+            None,
+            None,
+        )
 
     output_result, verified_output = _verify_output(
         attestation.attestation_id,
@@ -151,7 +150,11 @@ def _verify_attestation(
     )
     if not output_result.valid or verified_output is None:
         return (
-            _fail(attestation.attestation_id, "output verification failed", [input_result, output_result]),
+            _fail(
+                attestation.attestation_id,
+                "output verification failed",
+                [input_result, output_result],
+            ),
             verified_input,
             None,
         )
@@ -251,7 +254,7 @@ def _verify_signed_input(
 
     detail = (
         f"signed by {signature.signer_id}, verified against {key_binding.trust_anchor_id}, "
-        f"{len(signed_input.output_constraints)} constraints"
+        f"{len(signed_input.output_constraints)} CEL constraints"
     )
     return (
         VerificationResult(valid=True, label=label, detail=detail),
@@ -276,11 +279,17 @@ def _verify_derived_input(
 
     prior_attestation = attestation_store.get(derived_input.prior_attestation_id)
     if prior_attestation is None:
-        return _fail(label, f"prior attestation not found: {derived_input.prior_attestation_id}"), None
+        return _fail(
+            label,
+            f"prior attestation not found: {derived_input.prior_attestation_id}",
+        ), None
 
     update_attestation = attestation_store.get(derived_input.update_attestation_id)
     if update_attestation is None:
-        return _fail(label, f"update attestation not found: {derived_input.update_attestation_id}"), None
+        return _fail(
+            label,
+            f"update attestation not found: {derived_input.update_attestation_id}",
+        ), None
 
     prior_result, verified_prior = _verify_attestation_input_only(
         prior_attestation,
@@ -303,8 +312,14 @@ def _verify_derived_input(
         return _fail(label, "update attestation verification failed", children), None
 
     try:
-        derived_content = apply_update(verified_prior.content, verified_update_output.content)
-        output_constraints = derive_constraints(verified_update_output.content, derived_content)
+        derived_content = apply_update(
+            verified_prior.content,
+            verified_update_output.content,
+        )
+        output_constraints = derive_constraints(
+            verified_update_output.content,
+            derived_content,
+        )
     except Exception as exc:
         return _fail(label, f"derivation failed: {exc}", children), None
 
@@ -335,7 +350,11 @@ def _verify_output(
     label = f"{attestation_id} output"
     children: list[VerificationResult] = []
 
-    signature_result, verified_output = _verify_output_signature(attestation_id, output, trust_store)
+    signature_result, verified_output = _verify_output_signature(
+        attestation_id,
+        output,
+        trust_store,
+    )
     children.append(signature_result)
     if not signature_result.valid or verified_output is None:
         return _fail(label, "output signature invalid", children), None
@@ -348,20 +367,44 @@ def _verify_output(
                 detail="no output constraints",
             )
         )
-        return VerificationResult(valid=True, label=label, detail="satisfies all constraints", children=children), verified_output
+        return (
+            VerificationResult(
+                valid=True,
+                label=label,
+                detail="satisfies all constraints",
+                children=children,
+            ),
+            verified_output,
+        )
 
     for constraint in verified_input.output_constraints:
         constraint_result = _verify_constraint(
             attestation_id,
             constraint,
+            verified_input,
             output,
             verified_output,
         )
         children.append(constraint_result)
         if not constraint_result.valid:
-            return _fail(label, f"constraint failed: {describe_constraint(constraint)}", children), None
+            return (
+                _fail(
+                    label,
+                    f"constraint failed: {describe_constraint(constraint)}",
+                    children,
+                ),
+                None,
+            )
 
-    return VerificationResult(valid=True, label=label, detail="satisfies all constraints", children=children), verified_output
+    return (
+        VerificationResult(
+            valid=True,
+            label=label,
+            detail="satisfies all constraints",
+            children=children,
+        ),
+        verified_output,
+    )
 
 
 def _verify_output_signature(
@@ -384,11 +427,17 @@ def _verify_output_signature(
     if signature.content_hash != output_hash:
         return _fail(label, "output hash mismatch"), None
     if not verify(signature.public_key, output_hash, signature.signature_bytes):
-        return _fail(label, f"output signature verification failed for {signature.signer_id}"), None
+        return _fail(
+            label,
+            f"output signature verification failed for {signature.signer_id}",
+        ), None
 
     anchor = trust_store.get(signed_output.trust_anchor_id)
     if anchor is None:
-        return _fail(label, f"trust anchor not found: {signed_output.trust_anchor_id}"), None
+        return _fail(
+            label,
+            f"trust anchor not found: {signed_output.trust_anchor_id}",
+        ), None
 
     known_key = anchor.known_keys.get(signature.signer_id)
     if known_key is None or known_key != signature.public_key:
@@ -398,7 +447,10 @@ def _verify_output_signature(
         VerificationResult(
             valid=True,
             label=label,
-            detail=f"signed by {signature.signer_id}, verified against {signed_output.trust_anchor_id}",
+            detail=(
+                f"signed by {signature.signer_id}, "
+                f"verified against {signed_output.trust_anchor_id}"
+            ),
         ),
         VerifiedOutput(
             content=output.content,
@@ -418,91 +470,57 @@ def _verify_key_binding(key_binding: KeyBinding) -> VerificationResult:
     binding_hash = content_hash(binding_doc)
     if not verify(key_binding.public_key, binding_hash, key_binding.binding_proof):
         return _fail(label, "proof-of-possession failed")
-    return VerificationResult(valid=True, label=label, detail="proof-of-possession verified")
+    return VerificationResult(
+        valid=True,
+        label=label,
+        detail="proof-of-possession verified",
+    )
 
 
 def _verify_constraint(
     attestation_id: str,
-    constraint: AddonSignedConstraint | NamespaceConstraint | AllowedGVKsConstraint | NoClusterAdminConstraint,
+    constraint: OutputConstraint,
+    verified_input: _VerifiedInput,
     output: Output,
     verified_output: VerifiedOutput,
 ) -> VerificationResult:
     label = f"{attestation_id} constraint"
+    try:
+        valid = evaluate_bool(
+            constraint.expression,
+            {
+                "input": verified_input.content,
+                "output": _output_context(output, verified_output),
+            },
+        )
+    except CelEvaluationError as exc:
+        return _fail(label, f"constraint evaluation failed: {exc}")
 
-    match constraint:
-        case AddonSignedConstraint(addon_id=addon_id, trust_anchor_id=trust_anchor_id):
-            if output.signature is None:
-                return _fail(label, f"unsigned output, expected {addon_id}")
-            if output.signature.trust_anchor_id != trust_anchor_id:
-                return _fail(
-                    label,
-                    f"signed via {output.signature.trust_anchor_id}, expected {trust_anchor_id}",
-                )
-            if verified_output.signer_id != addon_id:
-                return _fail(label, f"signed by {verified_output.signer_id}, expected {addon_id}")
-            return VerificationResult(
-                valid=True,
-                label=label,
-                detail=f"addon signature matches {addon_id}",
-            )
+    if not valid:
+        return _fail(label, f"predicate returned false: {constraint.name}")
 
-        case NamespaceConstraint(namespace=namespace):
-            manifests = _extract_manifests(verified_output.content)
-            if manifests is None:
-                return _fail(label, "output is not a manifest collection")
-            for manifest in manifests:
-                if manifest.get("metadata", {}).get("namespace") != namespace:
-                    return _fail(label, f"manifest outside namespace {namespace}")
-            return VerificationResult(
-                valid=True,
-                label=label,
-                detail=f"all manifests are in namespace {namespace}",
-            )
-
-        case AllowedGVKsConstraint(allowed_gvks=allowed_gvks):
-            manifests = _extract_manifests(verified_output.content)
-            if manifests is None:
-                return _fail(label, "output is not a manifest collection")
-            allowed = set(allowed_gvks)
-            for manifest in manifests:
-                gvk = f"{manifest.get('apiVersion', '')}/{manifest.get('kind', '')}"
-                if gvk not in allowed:
-                    return _fail(label, f"disallowed GVK {gvk}")
-            return VerificationResult(
-                valid=True,
-                label=label,
-                detail=f"GVKs limited to {sorted(allowed)}",
-            )
-
-        case NoClusterAdminConstraint():
-            manifests = _extract_manifests(verified_output.content)
-            if manifests is None:
-                return _fail(label, "output is not a manifest collection")
-            for manifest in manifests:
-                if (
-                    manifest.get("kind") == "ClusterRoleBinding"
-                    and manifest.get("roleRef", {}).get("name") == "cluster-admin"
-                ):
-                    return _fail(label, "cluster-admin grant detected")
-            return VerificationResult(
-                valid=True,
-                label=label,
-                detail="no cluster-admin grant detected",
-            )
-
-    return _fail(label, f"unsupported constraint type: {type(constraint).__name__}")
+    return VerificationResult(
+        valid=True,
+        label=label,
+        detail=f"constraint matched: {constraint.name}",
+    )
 
 
-def _extract_manifests(content: Any) -> list[dict[str, Any]] | None:
-    if isinstance(content, list) and all(isinstance(item, dict) for item in content):
-        return content
+def _output_context(output: Output, verified_output: VerifiedOutput) -> dict[str, Any]:
+    signature_context: dict[str, Any] | None = None
+    if output.signature is not None:
+        signature_context = {
+            "signer_id": output.signature.signature.signer_id,
+            "trust_anchor_id": output.signature.trust_anchor_id,
+        }
 
-    if isinstance(content, dict):
-        manifests = content.get("manifests")
-        if isinstance(manifests, list) and all(isinstance(item, dict) for item in manifests):
-            return manifests
-
-    return None
+    return {
+        "content": verified_output.content,
+        "content_hash": verified_output.content_hash.hex(),
+        "has_signature": output.signature is not None,
+        "signature": signature_context,
+        "signer_id": verified_output.signer_id,
+    }
 
 
 def _fail(

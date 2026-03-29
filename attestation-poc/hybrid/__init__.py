@@ -3,22 +3,19 @@ Hybrid attestation prototype.
 
 Combines:
   - a single Attestation(input, output) model
-  - explicit, signed output constraints on inputs
+  - explicit, signed CEL output constraints on inputs
   - ID-based provenance graph traversal
-  - data-driven derivation from signed update outputs
+  - data-driven derivation from signed CEL update outputs
   - explainable verification results
 """
 
 from .build import make_key_binding, make_output, make_signed_input, sign_output
+from .cel_runtime import CelEvaluationError
 from .crypto import KeyPair, generate_keypair
 from .model import (
-    AddonSignedConstraint,
-    AllowedGVKsConstraint,
     Attestation,
     DerivedInput,
     KeyBinding,
-    NamespaceConstraint,
-    NoClusterAdminConstraint,
     Output,
     OutputConstraint,
     OutputSignature,
@@ -38,15 +35,12 @@ from .verify import (
 )
 
 __all__ = [
-    "AddonSignedConstraint",
-    "AllowedGVKsConstraint",
     "Attestation",
     "AttestationStore",
+    "CelEvaluationError",
     "DerivedInput",
     "KeyBinding",
     "KeyPair",
-    "NamespaceConstraint",
-    "NoClusterAdminConstraint",
     "Output",
     "OutputConstraint",
     "OutputSignature",
