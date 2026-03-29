@@ -400,7 +400,14 @@ def _verify_key_binding(
 
 
 def _verify_output(output: Output, trust_store: TrustStore) -> VerifiedOutput:
-    """Verify an output's optional signature and trust anchor."""
+    """Verify an output's optional signature and trust anchor.
+
+    signer_id is only propagated to VerifiedOutput when backed by
+    a verified signature AND a verified key binding.  Without both,
+    the identity is unproven and treated as unsigned.
+    """
+    verified_signer: str | None = None
+
     if output.signature is not None:
         output_hash = content_hash(output.content)
         if not verify_sig(output.public_key, output_hash, output.signature):
@@ -412,11 +419,12 @@ def _verify_output(output: Output, trust_store: TrustStore) -> VerifiedOutput:
                 output.key_binding, output.signer_id,
                 output.public_key, trust_store,
             )
+            verified_signer = output.signer_id
 
     return VerifiedOutput(
         content=output.content,
         content_hash=content_hash(output.content),
-        signer_id=output.signer_id,
+        signer_id=verified_signer,
     )
 
 
