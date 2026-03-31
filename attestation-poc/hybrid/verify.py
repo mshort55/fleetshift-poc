@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass, field
+from typing import Any
 
-from .model import Attestation, TrustAnchor, VerifiedOutput
+from .model import Attestation, Input, TrustAnchor, VerifiedOutput
 
 
 class VerificationError(Exception):
@@ -16,21 +17,8 @@ class VerificationError(Exception):
         self.result = result
 
 
-class AttestationStore:
-    """Registry of attestations for graph traversal."""
-
-    def __init__(self) -> None:
-        self._store: dict[str, Attestation] = {}
-
-    def add(self, attestation: Attestation) -> None:
-        self._store[attestation.attestation_id] = attestation
-
-    def get(self, attestation_id: str) -> Attestation | None:
-        return self._store.get(attestation_id)
-
-
 class TrustStore:
-    """Registry of trust anchors."""
+    """Registry of trust anchors (out-of-band trust roots)."""
 
     def __init__(self) -> None:
         self._store: dict[str, TrustAnchor] = {}
@@ -40,6 +28,29 @@ class TrustStore:
 
     def get(self, anchor_id: str) -> TrustAnchor | None:
         return self._store.get(anchor_id)
+
+
+@dataclass(frozen=True)
+class VerificationBundle:
+    """Self-contained material for verifying an attestation graph.
+
+    Carried on the verification request, not fetched from a service.
+    All referenced inputs and attestations are here; only trust
+    anchors come from the out-of-band [TrustStore].
+
+    Two typed maps enforce the structural distinction:
+      - inputs: prior state references (SignedInput | DerivedInput)
+      - attestations: full attestations whose output is consumed
+    """
+
+    inputs: dict[str, Input] = field(default_factory=dict)
+    attestations: dict[str, Attestation] = field(default_factory=dict)
+
+    def get_input(self, input_id: str) -> Input | None:
+        return self.inputs.get(input_id)
+
+    def get_attestation(self, attestation_id: str) -> Attestation | None:
+        return self.attestations.get(attestation_id)
 
 
 @dataclass
@@ -65,7 +76,7 @@ class VerificationResult:
 
 @dataclass(frozen=True)
 class VerificationContext:
-    attestation_store: AttestationStore
+    bundle: VerificationBundle
     trust_store: TrustStore
 
     def ok(
@@ -100,13 +111,10 @@ class VerificationContext:
 
 def verify_attestation(
     attestation: Attestation,
-    attestation_store: AttestationStore,
+    bundle: VerificationBundle,
     trust_store: TrustStore,
 ) -> VerifiedOutput:
-    context = VerificationContext(
-        attestation_store=attestation_store,
-        trust_store=trust_store,
-    )
+    context = VerificationContext(bundle=bundle, trust_store=trust_store)
     result, _, verified_output = attestation.verify(context, frozenset())
     if not result.valid or verified_output is None:
         raise VerificationError(result.pretty(), result)
@@ -115,12 +123,9 @@ def verify_attestation(
 
 def explain_verification(
     attestation: Attestation,
-    attestation_store: AttestationStore,
+    bundle: VerificationBundle,
     trust_store: TrustStore,
 ) -> VerificationResult:
-    context = VerificationContext(
-        attestation_store=attestation_store,
-        trust_store=trust_store,
-    )
+    context = VerificationContext(bundle=bundle, trust_store=trust_store)
     result, _, _ = attestation.verify(context, frozenset())
     return result

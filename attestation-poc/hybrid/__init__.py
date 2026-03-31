@@ -4,7 +4,7 @@ Hybrid attestation prototype.
 Combines:
   - a single Attestation(input, output) model
   - explicit, signed CEL output constraints on inputs
-  - ID-based provenance graph traversal
+  - self-contained verification bundles (no external store)
   - data-driven derivation from signed CEL update outputs
   - explainable verification results
 """
@@ -27,8 +27,8 @@ from .model import (
 )
 from .policy import derive_output_constraints
 from .verify import (
-    AttestationStore,
     TrustStore,
+    VerificationBundle,
     VerificationError,
     VerificationResult,
     explain_verification,
@@ -37,7 +37,6 @@ from .verify import (
 
 __all__ = [
     "Attestation",
-    "AttestationStore",
     "CelEvaluationError",
     "DerivedInput",
     "KeyBinding",
@@ -50,6 +49,7 @@ __all__ = [
     "TrustAnchor",
     "TrustAnchorConstraint",
     "TrustStore",
+    "VerificationBundle",
     "VerificationError",
     "VerificationResult",
     "VerifiedOutput",

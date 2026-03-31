@@ -430,13 +430,18 @@ class SignedInput(Input):
 
 @dataclass(frozen=True)
 class DerivedInput(Input):
-    """Input derived from a prior attestation and a verified update.
+    """Input derived from a prior input and a verified update attestation.
 
-    The referenced update attestation's signed output contains the CEL
-    expression used to derive the next input.
+    prior_input_id references an Input (SignedInput | DerivedInput) in the
+    verification bundle -- only the input side of the prior state is needed,
+    since updates operate on the spec, not the prior's output.
+
+    update_attestation_id references a full Attestation in the bundle --
+    the update is a deployment whose verified output carries the CEL
+    expression and constraints for derivation.
     """
 
-    prior_attestation_id: str
+    prior_input_id: str
     update_attestation_id: str
 
     def verify(
@@ -450,23 +455,29 @@ class DerivedInput(Input):
         label = f"{attestation_id} input"
         children: list[VerificationResult] = []
 
-        prior_attestation = context.attestation_store.get(self.prior_attestation_id)
-        if prior_attestation is None:
+        prior_input = context.bundle.get_input(self.prior_input_id)
+        if prior_input is None:
             return context.fail(
                 label,
-                f"prior attestation not found: {self.prior_attestation_id}",
+                f"prior input not found: {self.prior_input_id}",
             ), None
 
-        update_attestation = context.attestation_store.get(self.update_attestation_id)
+        update_attestation = context.bundle.get_attestation(self.update_attestation_id)
         if update_attestation is None:
             return context.fail(
                 label,
                 f"update attestation not found: {self.update_attestation_id}",
             ), None
 
-        prior_result, verified_prior = prior_attestation.verify_input_only(
+        if self.prior_input_id in visited:
+            return context.fail(label, "cycle detected in input graph"), None
+
+        next_visited = visited | {self.prior_input_id}
+
+        prior_result, verified_prior = prior_input.verify(
+            self.prior_input_id,
             context,
-            visited,
+            next_visited,
         )
         children.append(prior_result)
         if not prior_result.valid or verified_prior is None:
@@ -474,7 +485,7 @@ class DerivedInput(Input):
 
         update_result, _, verified_update_output = update_attestation.verify(
             context,
-            visited,
+            next_visited,
         )
         children.append(update_result)
         if not update_result.valid or verified_update_output is None:
@@ -500,7 +511,7 @@ class DerivedInput(Input):
             context.ok(
                 label,
                 (
-                    f"derived from prior={self.prior_attestation_id} "
+                    f"derived from prior={self.prior_input_id} "
                     f"+ update={self.update_attestation_id}"
                 ),
                 children,
@@ -575,16 +586,3 @@ class Attestation:
             verified_output,
         )
 
-    def verify_input_only(
-        self,
-        context: VerificationContext,
-        visited: frozenset[str],
-    ) -> tuple[VerificationResult, VerifiedInput | None]:
-        if self.attestation_id in visited:
-            return context.fail(
-                f"{self.attestation_id} input",
-                "cycle detected in attestation graph",
-            ), None
-
-        next_visited = visited | {self.attestation_id}
-        return self.input.verify(self.attestation_id, context, next_visited)
