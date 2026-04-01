@@ -509,6 +509,36 @@ class HybridAttestationTests(unittest.TestCase):
 
         self.assertIn("input tenant must match anchor tenant", str(context.exception))
 
+    def test_trust_anchor_constraint_cannot_use_attestation_identifier(self) -> None:
+        tenant_alice = make_identity("alice-tenant-a", "tenant-a-idp")
+        trust_store = TrustStore()
+        trust_store.add(
+            TrustAnchor(
+                anchor_id="tenant-a-idp",
+                known_keys={"alice-tenant-a": tenant_alice.keys.public_key_bytes},
+                constraints=(
+                    TrustAnchorConstraint(
+                        name="attestation identifiers are not part of the authenticated subject",
+                        expression='subject.attestation_id.startsWith("tenant-a/")',
+                    ),
+                ),
+            )
+        )
+
+        attestation = Attestation(
+            attestation_id="tenant-b/spoofed-reference",
+            input=self._input(
+                tenant_alice,
+                {"tenant": "tenant-a", "intent": "deploy-web"},
+            ),
+            output=make_output([{"kind": "ConfigMap"}]),
+        )
+
+        with self.assertRaises(VerificationError) as context:
+            verify_attestation(attestation, self.empty_bundle, trust_store)
+
+        self.assertIn("trust anchor constraint evaluation failed", str(context.exception))
+
     # ------------------------------------------------------------------
     # Constraint violations (non-derived)
     # ------------------------------------------------------------------
@@ -967,6 +997,42 @@ class HybridAttestationTests(unittest.TestCase):
         )
 
         verified = verify_attestation(att, bundle, self.trust_store)
+        self.assertEqual(verified.signer_id, "capi-provisioner")
+
+    def test_input_and_attestation_ids_may_overlap_without_false_cycle(self) -> None:
+        prior_input = self._input(self.alice, {
+            "manifest_strategy": {
+                "type": "addon",
+                "addon_id": "capi-provisioner",
+                "trust_anchor": "fleet-addons",
+                "config": {"version": "1.29"},
+            },
+        })
+        shared_update = Attestation(
+            attestation_id="shared",
+            input=self._input(self.bob, {"type": "request"}),
+            output=self._signed_output(self.planner_addon, {
+                "type": "spec_update",
+                "derive_input_expression": (
+                    'set_path(prior, "manifest_strategy.config.version", "1.30")'
+                ),
+            }),
+        )
+        att = Attestation(
+            attestation_id="final-overlap",
+            input=DerivedInput(
+                prior_input_id="shared",
+                update_attestation_id="shared",
+            ),
+            output=self._signed_output(self.capi_addon, [{"kind": "Cluster"}]),
+        )
+        bundle = VerificationBundle(
+            inputs={"shared": prior_input},
+            attestations={"shared": shared_update},
+        )
+
+        verified = verify_attestation(att, bundle, self.trust_store)
+
         self.assertEqual(verified.signer_id, "capi-provisioner")
 
     def test_missing_prior_input_in_bundle(self) -> None:

@@ -10,7 +10,7 @@ from .cel_runtime import CelEvaluationError, evaluate_bool
 from .crypto import content_hash, verify
 
 if TYPE_CHECKING:
-    from .verify import VerificationContext, VerificationResult
+    from .verify import VerificationContext, VerificationRef, VerificationResult
 
 
 @dataclass(frozen=True)
@@ -27,7 +27,7 @@ class TrustAnchor:
         *,
         signer_id: str,
         public_key: bytes,
-        subject: dict[str, Any],
+        subject: TrustAnchorSubject,
         label: str,
         context: VerificationContext,
     ) -> VerificationResult:
@@ -83,7 +83,7 @@ class TrustAnchorConstraint:
                 self.expression,
                 {
                     "anchor": anchor.to_context(),
-                    "subject": subject,
+                    "subject": subject.to_context(),
                 },
             )
         except CelEvaluationError as exc:
@@ -93,6 +93,26 @@ class TrustAnchorConstraint:
             return context.fail(label, f"predicate returned false: {self.name}")
 
         return context.ok(label, f"trust anchor constraint matched: {self.name}")
+
+
+@dataclass(frozen=True)
+class TrustAnchorSubject:
+    """Authenticated subject fields a trust anchor may authorize against."""
+
+    kind: str
+    signer_id: str | None
+    content: Any
+    valid_until: float | None = None
+
+    def to_context(self) -> dict[str, Any]:
+        context = {
+            "content": self.content,
+            "kind": self.kind,
+            "signer_id": self.signer_id,
+        }
+        if self.valid_until is not None:
+            context["valid_until"] = self.valid_until
+        return context
 
 
 @dataclass(frozen=True)
@@ -270,7 +290,7 @@ class Output:
         anchor_result = anchor.verify_signer(
             signer_id=signature.signer_id,
             public_key=signature.public_key,
-            subject=self.to_trust_anchor_subject(attestation_id, signature.signer_id),
+            subject=self.to_trust_anchor_subject(signature.signer_id),
             label=f"{attestation_id} output anchor",
             context=context,
         )
@@ -311,15 +331,13 @@ class Output:
 
     def to_trust_anchor_subject(
         self,
-        attestation_id: str,
         signer_id: str | None,
-    ) -> dict[str, Any]:
-        return {
-            "attestation_id": attestation_id,
-            "content": self.content,
-            "kind": "output",
-            "signer_id": signer_id,
-        }
+    ) -> TrustAnchorSubject:
+        return TrustAnchorSubject(
+            kind="output",
+            signer_id=signer_id,
+            content=self.content,
+        )
 
 
 class Input(ABC):
@@ -330,7 +348,7 @@ class Input(ABC):
         self,
         attestation_id: str,
         context: VerificationContext,
-        visited: frozenset[str],
+        visited: frozenset[VerificationRef],
     ) -> tuple[VerificationResult, VerifiedInput | None]:
         raise NotImplementedError
 
@@ -349,7 +367,7 @@ class SignedInput(Input):
         self,
         attestation_id: str,
         context: VerificationContext,
-        visited: frozenset[str],
+        visited: frozenset[VerificationRef],
     ) -> tuple[VerificationResult, VerifiedInput | None]:
         del visited
         from .policy import signed_input_envelope
@@ -369,7 +387,7 @@ class SignedInput(Input):
         anchor_result = anchor.verify_signer(
             signer_id=self.key_binding.signer_id,
             public_key=self.key_binding.public_key,
-            subject=self.to_trust_anchor_subject(attestation_id),
+            subject=self.to_trust_anchor_subject(),
             label=f"{attestation_id} input anchor",
             context=context,
         )
@@ -418,14 +436,13 @@ class SignedInput(Input):
             ),
         )
 
-    def to_trust_anchor_subject(self, attestation_id: str) -> dict[str, Any]:
-        return {
-            "attestation_id": attestation_id,
-            "content": self.content,
-            "kind": "input",
-            "signer_id": self.signature.signer_id,
-            "valid_until": self.valid_until,
-        }
+    def to_trust_anchor_subject(self) -> TrustAnchorSubject:
+        return TrustAnchorSubject(
+            kind="input",
+            signer_id=self.signature.signer_id,
+            content=self.content,
+            valid_until=self.valid_until,
+        )
 
 
 @dataclass(frozen=True)
@@ -448,7 +465,7 @@ class DerivedInput(Input):
         self,
         attestation_id: str,
         context: VerificationContext,
-        visited: frozenset[str],
+        visited: frozenset[VerificationRef],
     ) -> tuple[VerificationResult, VerifiedInput | None]:
         from .mutation import apply_update, derive_constraints
 
@@ -469,10 +486,11 @@ class DerivedInput(Input):
                 f"update attestation not found: {self.update_attestation_id}",
             ), None
 
-        if self.prior_input_id in visited:
+        prior_ref = context.input_ref(self.prior_input_id)
+        if prior_ref in visited:
             return context.fail(label, "cycle detected in input graph"), None
 
-        next_visited = visited | {self.prior_input_id}
+        next_visited = visited | {prior_ref}
 
         prior_result, verified_prior = prior_input.verify(
             self.prior_input_id,
@@ -535,15 +553,16 @@ class Attestation:
     def verify(
         self,
         context: VerificationContext,
-        visited: frozenset[str],
+        visited: frozenset[VerificationRef],
     ) -> tuple[VerificationResult, VerifiedInput | None, VerifiedOutput | None]:
-        if self.attestation_id in visited:
+        attestation_ref = context.attestation_ref(self.attestation_id)
+        if attestation_ref in visited:
             return context.fail(
                 self.attestation_id,
                 "cycle detected in attestation graph",
             ), None, None
 
-        next_visited = visited | {self.attestation_id}
+        next_visited = visited | {attestation_ref}
         input_result, verified_input = self.input.verify(
             self.attestation_id,
             context,

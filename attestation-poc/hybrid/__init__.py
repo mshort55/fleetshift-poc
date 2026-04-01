@@ -23,6 +23,7 @@ from .model import (
     Signature,
     TrustAnchor,
     TrustAnchorConstraint,
+    TrustAnchorSubject,
     VerifiedOutput,
 )
 from .policy import derive_output_constraints
@@ -48,6 +49,7 @@ __all__ = [
     "SignedInput",
     "TrustAnchor",
     "TrustAnchorConstraint",
+    "TrustAnchorSubject",
     "TrustStore",
     "VerificationBundle",
     "VerificationError",

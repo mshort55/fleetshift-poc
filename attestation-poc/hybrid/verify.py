@@ -30,6 +30,9 @@ class TrustStore:
         return self._store.get(anchor_id)
 
 
+VerificationRef = tuple[str, str]
+
+
 @dataclass(frozen=True)
 class VerificationBundle:
     """Self-contained material for verifying an attestation graph.
@@ -78,6 +81,12 @@ class VerificationResult:
 class VerificationContext:
     bundle: VerificationBundle
     trust_store: TrustStore
+
+    def input_ref(self, input_id: str) -> VerificationRef:
+        return ("input", input_id)
+
+    def attestation_ref(self, attestation_id: str) -> VerificationRef:
+        return ("attestation", attestation_id)
 
     def ok(
         self,
