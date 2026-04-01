@@ -9,16 +9,33 @@ Combines:
   - explainable verification results
 """
 
-from .build import make_key_binding, make_output, make_signed_input, sign_output
+from .build import (
+    make_key_binding,
+    make_output,
+    make_placement_evidence,
+    make_put_manifests,
+    make_remove_by_delivery_id,
+    make_signed_input,
+    sign_output,
+    sign_put_manifests,
+)
 from .cel_runtime import CelEvaluationError
 from .crypto import KeyPair, generate_keypair
 from .model import (
+    AddonManifestStrategy,
+    AddonPlacementStrategy,
     Attestation,
+    DeliveryOutput,
     DerivedInput,
+    InlineManifestStrategy,
     KeyBinding,
     Output,
     OutputConstraint,
     OutputSignature,
+    PlacementEvidence,
+    PredicatePlacementStrategy,
+    PutManifests,
+    RemoveByDeliveryId,
     SignedInput,
     Signature,
     TrustAnchor,
@@ -26,7 +43,7 @@ from .model import (
     TrustAnchorSubject,
     VerifiedOutput,
 )
-from .policy import derive_output_constraints
+from .policy import derive_output_constraints, derive_strategy_constraints
 from .verify import (
     TrustStore,
     VerificationBundle,
@@ -37,14 +54,22 @@ from .verify import (
 )
 
 __all__ = [
+    "AddonManifestStrategy",
+    "AddonPlacementStrategy",
     "Attestation",
     "CelEvaluationError",
+    "DeliveryOutput",
     "DerivedInput",
+    "InlineManifestStrategy",
     "KeyBinding",
     "KeyPair",
     "Output",
     "OutputConstraint",
     "OutputSignature",
+    "PlacementEvidence",
+    "PredicatePlacementStrategy",
+    "PutManifests",
+    "RemoveByDeliveryId",
     "Signature",
     "SignedInput",
     "TrustAnchor",
@@ -56,11 +81,16 @@ __all__ = [
     "VerificationResult",
     "VerifiedOutput",
     "derive_output_constraints",
+    "derive_strategy_constraints",
     "explain_verification",
     "generate_keypair",
     "make_key_binding",
     "make_output",
+    "make_placement_evidence",
+    "make_put_manifests",
+    "make_remove_by_delivery_id",
     "make_signed_input",
     "sign_output",
+    "sign_put_manifests",
     "verify_attestation",
 ]

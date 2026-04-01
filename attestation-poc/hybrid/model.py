@@ -187,6 +187,24 @@ class OutputConstraint:
 
         return context.ok(label, f"constraint matched: {self.name}")
 
+    def evaluate(
+        self,
+        attestation_id: str,
+        cel_context: dict[str, Any],
+        context: VerificationContext,
+    ) -> VerificationResult:
+        """Evaluate this constraint against an arbitrary CEL context."""
+        label = f"{attestation_id} constraint"
+        try:
+            valid = evaluate_bool(self.expression, cel_context)
+        except CelEvaluationError as exc:
+            return context.fail(label, f"constraint evaluation failed: {exc}")
+
+        if not valid:
+            return context.fail(label, f"predicate returned false: {self.name}")
+
+        return context.ok(label, f"constraint matched: {self.name}")
+
 
 @dataclass(frozen=True)
 class VerifiedInput:
@@ -338,6 +356,301 @@ class Output:
             signer_id=signer_id,
             content=self.content,
         )
+
+
+# ---------------------------------------------------------------------------
+# Strategy types -- structured representations of the strategy fields within
+# signed input content.  Used by strategy-implied constraint derivation.
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class InlineManifestStrategy:
+    """Inline manifests: output must exactly match."""
+
+    manifests: Any
+
+
+@dataclass(frozen=True)
+class AddonManifestStrategy:
+    """Addon produces and signs manifests."""
+
+    addon_id: str
+    trust_anchor_id: str
+
+
+@dataclass(frozen=True)
+class PredicatePlacementStrategy:
+    """CEL predicate over target identity for self-assessment."""
+
+    expression: str
+
+
+@dataclass(frozen=True)
+class AddonPlacementStrategy:
+    """Addon produces and signs placement decisions."""
+
+    addon_id: str
+    trust_anchor_id: str
+
+
+# ---------------------------------------------------------------------------
+# Delivery output types -- algebraic output variants for typed deliveries.
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class PlacementEvidence:
+    """Signed placement decision from a placement addon.
+
+    The decision is a concrete list of target IDs -- placement answers
+    "which targets," nothing more.  Unsigned placement decisions are
+    meaningless (cannot be trusted), so the signature is required.
+    """
+
+    targets: tuple[str, ...]
+    signature: OutputSignature
+
+
+@dataclass(frozen=True)
+class PutManifests:
+    """Deliver manifests to a target."""
+
+    manifests: Any
+    signature: OutputSignature | None = None
+    placement: PlacementEvidence | None = None
+
+    def verify(
+        self,
+        attestation_id: str,
+        verified_input: VerifiedInput,
+        context: VerificationContext,
+    ) -> tuple[VerificationResult, VerifiedOutput | None]:
+        from .policy import derive_strategy_constraints
+
+        label = f"{attestation_id} output"
+        children: list[VerificationResult] = []
+
+        manifest_signer_id: str | None = None
+        if self.signature is not None:
+            sig_result, manifest_signer_id = _verify_output_sig(
+                self.manifests, self.signature,
+                f"{attestation_id} manifest signature", context,
+            )
+            children.append(sig_result)
+            if not sig_result.valid:
+                return context.fail(label, "manifest signature invalid", children), None
+        else:
+            children.append(
+                context.ok(f"{attestation_id} manifest signature", "unsigned"),
+            )
+
+        placement_signer_id: str | None = None
+        if self.placement is not None:
+            pe_result, placement_signer_id = _verify_output_sig(
+                list(self.placement.targets), self.placement.signature,
+                f"{attestation_id} placement evidence", context,
+            )
+            children.append(pe_result)
+            if not pe_result.valid:
+                return context.fail(label, "placement evidence invalid", children), None
+
+        implied = derive_strategy_constraints(verified_input.content)
+        all_constraints = implied + verified_input.output_constraints
+
+        cel_ctx = _delivery_cel_context(
+            verified_input, "put", self.manifests, self.signature,
+            manifest_signer_id, self.placement, placement_signer_id, context,
+        )
+
+        if not all_constraints:
+            children.append(
+                context.ok(f"{attestation_id} constraints", "no constraints"),
+            )
+        else:
+            for c in all_constraints:
+                r = c.evaluate(attestation_id, cel_ctx, context)
+                children.append(r)
+                if not r.valid:
+                    return (
+                        context.fail(label, f"constraint failed: {c.name}", children),
+                        None,
+                    )
+
+        manifest_hash = content_hash(self.manifests)
+        return (
+            context.ok(label, "satisfies all constraints", children),
+            VerifiedOutput(
+                content=self.manifests,
+                content_hash=manifest_hash,
+                signer_id=manifest_signer_id,
+            ),
+        )
+
+
+@dataclass(frozen=True)
+class RemoveByDeliveryId:
+    """Remove a delivery from a target by delivery ID."""
+
+    delivery_id: str
+    placement: PlacementEvidence | None = None
+
+    def verify(
+        self,
+        attestation_id: str,
+        verified_input: VerifiedInput,
+        context: VerificationContext,
+    ) -> tuple[VerificationResult, VerifiedOutput | None]:
+        from .policy import derive_strategy_constraints
+
+        label = f"{attestation_id} output"
+        children: list[VerificationResult] = []
+
+        placement_signer_id: str | None = None
+        if self.placement is not None:
+            pe_result, placement_signer_id = _verify_output_sig(
+                list(self.placement.targets), self.placement.signature,
+                f"{attestation_id} placement evidence", context,
+            )
+            children.append(pe_result)
+            if not pe_result.valid:
+                return context.fail(label, "placement evidence invalid", children), None
+
+        implied = derive_strategy_constraints(verified_input.content)
+        all_constraints = implied + verified_input.output_constraints
+
+        cel_ctx = _delivery_cel_context(
+            verified_input, "remove", None, None,
+            None, self.placement, placement_signer_id, context,
+        )
+        cel_ctx["output"] = {"delivery_id": self.delivery_id}
+
+        if not all_constraints:
+            children.append(
+                context.ok(f"{attestation_id} constraints", "no constraints"),
+            )
+        else:
+            for c in all_constraints:
+                r = c.evaluate(attestation_id, cel_ctx, context)
+                children.append(r)
+                if not r.valid:
+                    return (
+                        context.fail(label, f"constraint failed: {c.name}", children),
+                        None,
+                    )
+
+        remove_content: dict[str, Any] = {"delivery_id": self.delivery_id}
+        return (
+            context.ok(label, "satisfies all constraints", children),
+            VerifiedOutput(
+                content=remove_content,
+                content_hash=content_hash(remove_content),
+            ),
+        )
+
+
+DeliveryOutput = PutManifests | RemoveByDeliveryId
+
+
+def _verify_output_sig(
+    content: Any,
+    sig: OutputSignature,
+    label: str,
+    context: VerificationContext,
+) -> tuple[VerificationResult, str | None]:
+    """Verify a signed output artifact against its trust anchor."""
+    signature = sig.signature
+    h = content_hash(content)
+    if signature.content_hash != h:
+        return context.fail(label, "hash mismatch"), None
+    if not verify(signature.public_key, h, signature.signature_bytes):
+        return context.fail(
+            label, f"signature verification failed for {signature.signer_id}",
+        ), None
+
+    anchor = context.trust_store.get(sig.trust_anchor_id)
+    if anchor is None:
+        return context.fail(
+            label, f"trust anchor not found: {sig.trust_anchor_id}",
+        ), None
+
+    subject = TrustAnchorSubject(
+        kind="output", signer_id=signature.signer_id, content=content,
+    )
+    anchor_result = anchor.verify_signer(
+        signer_id=signature.signer_id,
+        public_key=signature.public_key,
+        subject=subject,
+        label=f"{label} anchor",
+        context=context,
+    )
+    if not anchor_result.valid:
+        return (
+            context.fail(label, "trust anchor rejected signer", [anchor_result]),
+            None,
+        )
+
+    return (
+        context.ok(
+            label,
+            f"signed by {signature.signer_id}, verified against {sig.trust_anchor_id}",
+            [anchor_result],
+        ),
+        signature.signer_id,
+    )
+
+
+def _delivery_cel_context(
+    verified_input: VerifiedInput,
+    action: str,
+    manifests: Any,
+    manifest_sig: OutputSignature | None,
+    manifest_signer_id: str | None,
+    placement: PlacementEvidence | None,
+    placement_signer_id: str | None,
+    context: VerificationContext,
+) -> dict[str, Any]:
+    """Build the CEL evaluation context for delivery constraint checks."""
+    output_ctx: dict[str, Any] = {}
+    if manifests is not None:
+        sig_ctx: dict[str, Any] | None = None
+        if manifest_sig is not None:
+            sig_ctx = {
+                "signer_id": manifest_sig.signature.signer_id,
+                "trust_anchor_id": manifest_sig.trust_anchor_id,
+            }
+        output_ctx = {
+            "manifests": manifests,
+            "has_signature": manifest_sig is not None,
+            "signer_id": manifest_signer_id,
+            "signature": sig_ctx,
+        }
+
+    placement_ctx: dict[str, Any]
+    if placement is not None:
+        placement_ctx = {
+            "targets": list(placement.targets),
+            "has_signature": True,
+            "signer_id": placement_signer_id,
+            "signature": {
+                "signer_id": placement.signature.signature.signer_id,
+                "trust_anchor_id": placement.signature.trust_anchor_id,
+            },
+        }
+    else:
+        placement_ctx = {
+            "targets": [],
+            "has_signature": False,
+            "signer_id": None,
+        }
+
+    return {
+        "input": verified_input.content,
+        "output": output_ctx,
+        "target": context.target_identity,
+        "action": action,
+        "placement": placement_ctx,
+    }
 
 
 class Input(ABC):
@@ -548,7 +861,7 @@ class Attestation:
 
     attestation_id: str
     input: Input
-    output: Output
+    output: Output | PutManifests | RemoveByDeliveryId
 
     def verify(
         self,

@@ -11,6 +11,9 @@ from .model import (
     Output,
     OutputConstraint,
     OutputSignature,
+    PlacementEvidence,
+    PutManifests,
+    RemoveByDeliveryId,
     Signature,
     SignedInput,
 )
@@ -81,6 +84,72 @@ def sign_output(
                 public_key=keys.public_key_bytes,
                 content_hash=output_hash,
                 signature_bytes=sign(keys.private_key, output_hash),
+            ),
+            trust_anchor_id=trust_anchor_id,
+        ),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Delivery output helpers
+# ---------------------------------------------------------------------------
+
+
+def make_put_manifests(
+    manifests: Any,
+    *,
+    placement: PlacementEvidence | None = None,
+) -> PutManifests:
+    return PutManifests(manifests=manifests, placement=placement)
+
+
+def sign_put_manifests(
+    keys: KeyPair,
+    signer_id: str,
+    trust_anchor_id: str,
+    manifests: Any,
+    *,
+    placement: PlacementEvidence | None = None,
+) -> PutManifests:
+    manifest_hash = content_hash(manifests)
+    return PutManifests(
+        manifests=manifests,
+        signature=OutputSignature(
+            signature=Signature(
+                signer_id=signer_id,
+                public_key=keys.public_key_bytes,
+                content_hash=manifest_hash,
+                signature_bytes=sign(keys.private_key, manifest_hash),
+            ),
+            trust_anchor_id=trust_anchor_id,
+        ),
+        placement=placement,
+    )
+
+
+def make_remove_by_delivery_id(
+    delivery_id: str,
+    *,
+    placement: PlacementEvidence | None = None,
+) -> RemoveByDeliveryId:
+    return RemoveByDeliveryId(delivery_id=delivery_id, placement=placement)
+
+
+def make_placement_evidence(
+    keys: KeyPair,
+    signer_id: str,
+    trust_anchor_id: str,
+    targets: tuple[str, ...],
+) -> PlacementEvidence:
+    targets_hash = content_hash(list(targets))
+    return PlacementEvidence(
+        targets=targets,
+        signature=OutputSignature(
+            signature=Signature(
+                signer_id=signer_id,
+                public_key=keys.public_key_bytes,
+                content_hash=targets_hash,
+                signature_bytes=sign(keys.private_key, targets_hash),
             ),
             trust_anchor_id=trust_anchor_id,
         ),

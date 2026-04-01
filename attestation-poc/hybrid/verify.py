@@ -81,6 +81,7 @@ class VerificationResult:
 class VerificationContext:
     bundle: VerificationBundle
     trust_store: TrustStore
+    target_identity: dict[str, Any] = field(default_factory=dict)
 
     def input_ref(self, input_id: str) -> VerificationRef:
         return ("input", input_id)
@@ -122,8 +123,14 @@ def verify_attestation(
     attestation: Attestation,
     bundle: VerificationBundle,
     trust_store: TrustStore,
+    *,
+    target_identity: dict[str, Any] | None = None,
 ) -> VerifiedOutput:
-    context = VerificationContext(bundle=bundle, trust_store=trust_store)
+    context = VerificationContext(
+        bundle=bundle,
+        trust_store=trust_store,
+        target_identity=target_identity or {},
+    )
     result, _, verified_output = attestation.verify(context, frozenset())
     if not result.valid or verified_output is None:
         raise VerificationError(result.pretty(), result)
@@ -134,7 +141,13 @@ def explain_verification(
     attestation: Attestation,
     bundle: VerificationBundle,
     trust_store: TrustStore,
+    *,
+    target_identity: dict[str, Any] | None = None,
 ) -> VerificationResult:
-    context = VerificationContext(bundle=bundle, trust_store=trust_store)
+    context = VerificationContext(
+        bundle=bundle,
+        trust_store=trust_store,
+        target_identity=target_identity or {},
+    )
     result, _, _ = attestation.verify(context, frozenset())
     return result
