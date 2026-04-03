@@ -8,6 +8,7 @@ import "google/api/annotations.proto";
 import "google/api/client.proto";
 import "fleetshift/v1/deployment.proto";
 import "fleetshift/v1/create_deployment_request.proto";
+import "fleetshift/v1/delete_deployment_request.proto";
 import "fleetshift/v1/get_deployment_request.proto";
 import "fleetshift/v1/list_deployments_request.proto";
 import "fleetshift/v1/list_deployments_response.proto";
@@ -47,6 +48,16 @@ service DeploymentService {
     option (google.api.http) = {
       post: "/v1/{name=deployments/*}:resume"
       body: "*"
+    };
+    option (google.api.method_signature) = "name";
+  }
+
+  // DeleteDeployment initiates deletion of a deployment.
+  // The deployment transitions to DELETING state and the delete
+  // pipeline removes resources from all targets.
+  rpc DeleteDeployment(DeleteDeploymentRequest) returns (Deployment) {
+    option (google.api.http) = {
+      delete: "/v1/{name=deployments/*}"
     };
     option (google.api.method_signature) = "name";
   }
