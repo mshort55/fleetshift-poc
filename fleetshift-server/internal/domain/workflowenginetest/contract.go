@@ -613,17 +613,6 @@ func queryDeployment(ctx context.Context, t *testing.T, infra Infra, id domain.D
 	return tx.Deployments().Get(ctx, id)
 }
 
-func deleteDeploymentAndDeliveries(ctx context.Context, t *testing.T, infra Infra, depID domain.DeploymentID) {
-	t.Helper()
-	tx, err := infra.Store.Begin(ctx)
-	if err != nil {
-		t.Fatalf("Begin: %v", err)
-	}
-	defer tx.Rollback()
-	must(t, tx.Deliveries().DeleteByDeployment(ctx, depID))
-	must(t, tx.Deployments().Delete(ctx, depID))
-	must(t, tx.Commit())
-}
 
 func seedDeployment(ctx context.Context, t *testing.T, infra Infra, dep domain.Deployment) {
 	t.Helper()

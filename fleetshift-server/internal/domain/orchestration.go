@@ -271,9 +271,11 @@ func (s *OrchestrationWorkflowSpec) RemoveFromTarget() Activity[RemoveInput, str
 
 		delivery, err := tx.Deliveries().GetByDeploymentTarget(ctx, in.DeploymentID, in.Target.ID)
 		tx.Rollback() // close before calling Remove
-		if err != nil {
-			// No delivery record — skip this target.
+		if errors.Is(err, ErrNotFound) {
 			return struct{}{}, nil
+		}
+		if err != nil {
+			return struct{}{}, fmt.Errorf("load delivery record for target %s: %w", in.Target.ID, err)
 		}
 
 		return struct{}{}, s.Delivery.Remove(ctx, in.Target, in.DeliveryID, delivery.Manifests, in.Auth, &DeliverySignaler{})
