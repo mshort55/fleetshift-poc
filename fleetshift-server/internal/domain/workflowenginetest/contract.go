@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/fleetshift/fleetshift-poc/fleetshift-server/internal/application"
 	"github.com/fleetshift/fleetshift-poc/fleetshift-server/internal/domain"
 )
 
@@ -202,41 +203,26 @@ func Run(t *testing.T, infraFactory InfraFactory, registryFactory RegistryFactor
 
 		awaitDeploymentState(ctx, t, infra, "d1", domain.DeploymentStateActive)
 
-		// Transition to Deleting state.
-		func() {
-			tx, err := infra.Store.Begin(ctx)
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer tx.Rollback()
-			dep, err := tx.Deployments().Get(ctx, "d1")
-			if err != nil {
-				t.Fatal(err)
-			}
-			dep.State = domain.DeploymentStateDeleting
-			dep.BumpGeneration()
-			must(t, tx.Deployments().Update(ctx, dep))
-			must(t, tx.Commit())
-		}()
+		// Delete via the application service, which transitions
+		// to Deleting, bumps generation, and triggers reconciliation.
+		depSvc := &application.DeploymentService{
+			Store:         infra.Store,
+			Orchestration: wfs.Orchestration,
+		}
+		if _, err := depSvc.Delete(ctx, "d1"); err != nil {
+			t.Fatalf("Delete: %v", err)
+		}
 
-		// Start orchestration for the delete pipeline. The previous
-		// workflow goroutine may not have cleaned up yet, so retry
-		// until Start succeeds.
+		// Poll until the deployment record is gone.
 		for {
-			exec, err := wfs.Orchestration.Start(ctx, "d1")
-			if err == nil {
-				if _, err := exec.AwaitResult(ctx); err != nil {
-					t.Fatalf("delete workflow: %v", err)
-				}
+			_, err := queryDeployment(ctx, t, infra, "d1")
+			if errors.Is(err, domain.ErrNotFound) {
 				break
-			}
-			if !errors.Is(err, domain.ErrAlreadyRunning) {
-				t.Fatalf("Start: %v", err)
 			}
 			select {
 			case <-ctx.Done():
-				t.Fatalf("timed out waiting to start delete workflow")
-			case <-time.After(10 * time.Millisecond):
+				t.Fatalf("timed out waiting for deployment to be deleted")
+			case <-time.After(50 * time.Millisecond):
 			}
 		}
 
