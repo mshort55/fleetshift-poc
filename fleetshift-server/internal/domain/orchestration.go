@@ -585,6 +585,15 @@ func (s *OrchestrationWorkflowSpec) executeDelete(
 	deploymentID DeploymentID,
 ) error {
 	// Phase 1: Resource cleanup.
+	var kb *SigningKeyBinding
+	if dep.Provenance != nil {
+		looked, err := lookupKeyBinding(record.Context(), s.Store, dep.Provenance)
+		if err != nil {
+			return fmt.Errorf("lookup key binding for attestation assembly: %w", err)
+		}
+		kb = &looked
+	}
+
 	targets := targetInfosByID(dep.ResolvedTargets, pool)
 	for _, target := range targets {
 		in := RemoveInput{
@@ -593,8 +602,8 @@ func (s *OrchestrationWorkflowSpec) executeDelete(
 			DeploymentID: deploymentID,
 			Auth:         dep.Auth,
 		}
-		if dep.Auth.Provenance != nil {
-			in.Attestation = assembleRemoveAttestation(dep)
+		if kb != nil {
+			in.Attestation = assembleRemoveAttestation(dep, *kb)
 		}
 		if _, err := RunActivity(record, s.RemoveFromTarget(), in); err != nil {
 			return fmt.Errorf("remove delivery for target %s: %w", target.ID, err)

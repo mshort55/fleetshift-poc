@@ -377,7 +377,7 @@ type failingRemoveDelivery struct {
 	err error
 }
 
-func (f *failingRemoveDelivery) Deliver(ctx context.Context, _ domain.TargetInfo, _ domain.DeliveryID, _ []domain.Manifest, _ domain.DeliveryAuth, signaler *domain.DeliverySignaler) (domain.DeliveryResult, error) {
+func (f *failingRemoveDelivery) Deliver(ctx context.Context, _ domain.TargetInfo, _ domain.DeliveryID, _ []domain.Manifest, _ domain.DeliveryAuth, _ *domain.Attestation, signaler *domain.DeliverySignaler) (domain.DeliveryResult, error) {
 	result := domain.DeliveryResult{State: domain.DeliveryStateDelivered}
 	signaler.Done(ctx, result)
 	return result, nil
