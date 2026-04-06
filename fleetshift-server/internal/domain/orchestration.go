@@ -2,6 +2,7 @@ package domain
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
@@ -105,6 +106,11 @@ type DeploymentAndPool struct {
 type CompleteReconciliationInput struct {
 	DeploymentID  DeploymentID
 	ReconciledGen Generation
+}
+
+// CleanupProvisionedTargetsInput is the input to the cleanup-provisioned-targets activity.
+type CleanupProvisionedTargetsInput struct {
+	DeploymentID DeploymentID
 }
 
 // OrchestrationWorkflowSpec is the deployment pipeline expressed as a
@@ -253,7 +259,76 @@ func (s *OrchestrationWorkflowSpec) DeliverToTarget() Activity[DeliverInput, Del
 // RemoveFromTarget removes a deployment's manifests from a target.
 func (s *OrchestrationWorkflowSpec) RemoveFromTarget() Activity[RemoveInput, struct{}] {
 	return NewActivity("remove-from-target", func(ctx context.Context, in RemoveInput) (struct{}, error) {
-		return struct{}{}, s.Delivery.Remove(ctx, in.Target, in.DeliveryID, in.Manifests, in.Auth, &DeliverySignaler{})
+		tx, err := s.Store.BeginReadOnly(ctx)
+		if err != nil {
+			return struct{}{}, fmt.Errorf("begin tx: %w", err)
+		}
+		defer tx.Rollback()
+
+		delivery, err := tx.Deliveries().GetByDeploymentTarget(ctx, in.DeploymentID, in.Target.ID)
+		if err != nil {
+			// No delivery record — skip this target.
+			return struct{}{}, nil
+		}
+
+		return struct{}{}, s.Delivery.Remove(ctx, in.Target, in.DeliveryID, delivery.Manifests, in.Auth, &DeliverySignaler{})
+	})
+}
+
+// DeleteDeploymentRecord hard-deletes delivery records and the deployment record.
+func (s *OrchestrationWorkflowSpec) DeleteDeploymentRecord() Activity[DeploymentID, struct{}] {
+	return NewActivity("delete-deployment-record", func(ctx context.Context, id DeploymentID) (struct{}, error) {
+		tx, err := s.Store.Begin(ctx)
+		if err != nil {
+			return struct{}{}, fmt.Errorf("begin tx: %w", err)
+		}
+		defer tx.Rollback()
+
+		if err := tx.Deliveries().DeleteByDeployment(ctx, id); err != nil {
+			return struct{}{}, fmt.Errorf("delete delivery records: %w", err)
+		}
+		if err := tx.Deployments().Delete(ctx, id); err != nil {
+			return struct{}{}, fmt.Errorf("delete deployment: %w", err)
+		}
+		return struct{}{}, tx.Commit()
+	})
+}
+
+// CleanupProvisionedTargets removes targets that were provisioned by
+// deliveries of this deployment (e.g. kind clusters).
+func (s *OrchestrationWorkflowSpec) CleanupProvisionedTargets() Activity[CleanupProvisionedTargetsInput, struct{}] {
+	return NewActivity("cleanup-provisioned-targets", func(ctx context.Context, in CleanupProvisionedTargetsInput) (struct{}, error) {
+		tx, err := s.Store.Begin(ctx)
+		if err != nil {
+			return struct{}{}, fmt.Errorf("begin tx: %w", err)
+		}
+		defer tx.Rollback()
+
+		deliveries, err := tx.Deliveries().ListByDeployment(ctx, in.DeploymentID)
+		if err != nil {
+			return struct{}{}, fmt.Errorf("list deliveries: %w", err)
+		}
+
+		for _, d := range deliveries {
+			target, err := tx.Targets().Get(ctx, d.TargetID)
+			if err != nil {
+				continue
+			}
+			if target.Type != "kind" {
+				continue
+			}
+			for _, m := range d.Manifests {
+				var spec struct{ Name string }
+				if err := json.Unmarshal(m.Raw, &spec); err != nil || spec.Name == "" {
+					continue
+				}
+				provID := TargetID("k8s-" + spec.Name)
+				if err := tx.Targets().Delete(ctx, provID); err != nil && !errors.Is(err, ErrNotFound) {
+					return struct{}{}, fmt.Errorf("delete provisioned target %s: %w", provID, err)
+				}
+			}
+		}
+		return struct{}{}, tx.Commit()
 	})
 }
 
@@ -403,6 +478,9 @@ func (s *OrchestrationWorkflowSpec) Run(record Record, deploymentID DeploymentID
 				probe.Error(err)
 				return struct{}{}, err
 			}
+			// Record is hard-deleted. No PersistReconciliationResult
+			// or CompleteReconciliation — just return.
+			return struct{}{}, nil
 
 		default:
 			resolvedIDs, err := s.executePlacementPipeline(record, dep, pool, deploymentID, startGen, probe)
@@ -492,28 +570,42 @@ func (s *OrchestrationWorkflowSpec) executePlacementPipeline(
 }
 
 // executeDelete removes the deployment from all currently resolved
-// targets and updates the deployment state.
+// targets, cleans up provisioned targets, and hard-deletes records.
 func (s *OrchestrationWorkflowSpec) executeDelete(
 	record Record,
 	dep Deployment,
 	pool []TargetInfo,
 	deploymentID DeploymentID,
 ) error {
+	// Phase 1: Resource cleanup.
 	targets := targetInfosByID(dep.ResolvedTargets, pool)
 	for _, target := range targets {
-		if _, err := RunActivity(record, s.RemoveFromTarget(), RemoveInput{
+		in := RemoveInput{
 			Target:       target,
 			DeliveryID:   deliveryIDFor(deploymentID, target.ID),
 			DeploymentID: deploymentID,
-		}); err != nil {
+			Auth:         dep.Auth,
+		}
+		if dep.Auth.Provenance != nil {
+			in.Attestation = assembleRemoveAttestation(dep)
+		}
+		if _, err := RunActivity(record, s.RemoveFromTarget(), in); err != nil {
 			return fmt.Errorf("remove delivery for target %s: %w", target.ID, err)
 		}
 	}
 
-	result := NewDeletedResult(deploymentID)
-	if _, err := RunActivity(record, s.PersistReconciliationResult(), result); err != nil {
-		return fmt.Errorf("persist reconciliation result: %w", err)
+	// Phase 2: Target cleanup (provisioned kind targets).
+	if _, err := RunActivity(record, s.CleanupProvisionedTargets(), CleanupProvisionedTargetsInput{
+		DeploymentID: deploymentID,
+	}); err != nil {
+		return fmt.Errorf("cleanup provisioned targets: %w", err)
 	}
+
+	// Phase 3: Record deletion.
+	if _, err := RunActivity(record, s.DeleteDeploymentRecord(), deploymentID); err != nil {
+		return fmt.Errorf("delete deployment record: %w", err)
+	}
+
 	return nil
 }
 
