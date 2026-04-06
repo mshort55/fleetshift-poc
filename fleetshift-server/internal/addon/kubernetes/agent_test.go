@@ -147,7 +147,7 @@ func TestAgent_Remove_MissingAPIServer(t *testing.T) {
 		Properties: map[string]string{},
 	}
 
-	err := agent.Remove(context.Background(), target, "d1", nil, domain.DeliveryAuth{Token: "some-token"}, &domain.DeliverySignaler{})
+	err := agent.Remove(context.Background(), target, "d1", nil, domain.DeliveryAuth{Token: "some-token"}, nil, &domain.DeliverySignaler{})
 	if err == nil {
 		t.Fatal("expected error for missing api_server")
 	}
@@ -166,7 +166,7 @@ func TestAgent_Remove_EmptyManifests(t *testing.T) {
 	}
 
 	// Remove with empty manifests should succeed (no-op)
-	if err := agent.Remove(context.Background(), target, "d1", nil, domain.DeliveryAuth{Token: "some-token"}, &domain.DeliverySignaler{}); err != nil {
+	if err := agent.Remove(context.Background(), target, "d1", nil, domain.DeliveryAuth{Token: "some-token"}, nil, &domain.DeliverySignaler{}); err != nil {
 		t.Fatalf("Remove with empty manifests: %v", err)
 	}
 }

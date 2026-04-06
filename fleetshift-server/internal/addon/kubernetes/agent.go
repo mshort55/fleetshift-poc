@@ -173,7 +173,7 @@ func deliveryStateForError(err error) domain.DeliveryState {
 
 // Remove deletes all manifested resources from the target cluster.
 // Resources that are already gone (404) are silently skipped.
-func (a *Agent) Remove(ctx context.Context, target domain.TargetInfo, _ domain.DeliveryID, manifests []domain.Manifest, auth domain.DeliveryAuth, _ *domain.DeliverySignaler) error {
+func (a *Agent) Remove(ctx context.Context, target domain.TargetInfo, _ domain.DeliveryID, manifests []domain.Manifest, auth domain.DeliveryAuth, _ *domain.Attestation, _ *domain.DeliverySignaler) error {
 	cfg, err := buildRESTConfig(target, auth.Token)
 	if err != nil {
 		return fmt.Errorf("build REST config: %w", err)
