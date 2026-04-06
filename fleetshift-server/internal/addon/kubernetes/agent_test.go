@@ -137,12 +137,37 @@ func TestAgent_Deliver_BadAPIServer(t *testing.T) {
 	}
 }
 
-func TestAgent_Remove_IsNoop(t *testing.T) {
+func TestAgent_Remove_MissingAPIServer(t *testing.T) {
 	agent := kubernetes.NewAgent()
 
-	target := domain.TargetInfo{ID: "k8s-test", Type: kubernetes.TargetType, Name: "test-cluster"}
-	if err := agent.Remove(context.Background(), target, "d1", nil, domain.DeliveryAuth{}, &domain.DeliverySignaler{}); err != nil {
-		t.Fatalf("Remove: %v", err)
+	target := domain.TargetInfo{
+		ID:         "k8s-test",
+		Type:       kubernetes.TargetType,
+		Name:       "test-cluster",
+		Properties: map[string]string{},
+	}
+
+	err := agent.Remove(context.Background(), target, "d1", nil, domain.DeliveryAuth{Token: "some-token"}, &domain.DeliverySignaler{})
+	if err == nil {
+		t.Fatal("expected error for missing api_server")
+	}
+}
+
+func TestAgent_Remove_EmptyManifests(t *testing.T) {
+	agent := kubernetes.NewAgent()
+
+	target := domain.TargetInfo{
+		ID:   "k8s-test",
+		Type: kubernetes.TargetType,
+		Name: "test-cluster",
+		Properties: map[string]string{
+			"api_server": "https://127.0.0.1:6443",
+		},
+	}
+
+	// Remove with empty manifests should succeed (no-op)
+	if err := agent.Remove(context.Background(), target, "d1", nil, domain.DeliveryAuth{Token: "some-token"}, &domain.DeliverySignaler{}); err != nil {
+		t.Fatalf("Remove with empty manifests: %v", err)
 	}
 }
 
