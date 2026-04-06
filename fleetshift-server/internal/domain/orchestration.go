@@ -256,16 +256,21 @@ func (s *OrchestrationWorkflowSpec) DeliverToTarget() Activity[DeliverInput, Del
 	})
 }
 
-// RemoveFromTarget removes a deployment's manifests from a target.
+// RemoveFromTarget loads the delivery record for a target (to get
+// manifests) and calls the agent's Remove. If no delivery record
+// exists (e.g., delivery failed before persisting), the target is
+// skipped. The read transaction is closed before calling Remove so
+// that the delivery agent can open write transactions without
+// deadlocking on SQLite.
 func (s *OrchestrationWorkflowSpec) RemoveFromTarget() Activity[RemoveInput, struct{}] {
 	return NewActivity("remove-from-target", func(ctx context.Context, in RemoveInput) (struct{}, error) {
 		tx, err := s.Store.BeginReadOnly(ctx)
 		if err != nil {
 			return struct{}{}, fmt.Errorf("begin tx: %w", err)
 		}
-		defer tx.Rollback()
 
 		delivery, err := tx.Deliveries().GetByDeploymentTarget(ctx, in.DeploymentID, in.Target.ID)
+		tx.Rollback() // close before calling Remove
 		if err != nil {
 			// No delivery record — skip this target.
 			return struct{}{}, nil

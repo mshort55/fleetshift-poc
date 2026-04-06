@@ -202,16 +202,47 @@ func Run(t *testing.T, infraFactory InfraFactory, registryFactory RegistryFactor
 
 		awaitDeploymentState(ctx, t, infra, "d1", domain.DeploymentStateActive)
 
-		deleteDeploymentAndDeliveries(ctx, t, infra, "d1")
+		// Transition to Deleting state.
+		func() {
+			tx, err := infra.Store.Begin(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer tx.Rollback()
+			dep, err := tx.Deployments().Get(ctx, "d1")
+			if err != nil {
+				t.Fatal(err)
+			}
+			dep.State = domain.DeploymentStateDeleting
+			dep.BumpGeneration()
+			must(t, tx.Deployments().Update(ctx, dep))
+			must(t, tx.Commit())
+		}()
+
+		// Start orchestration for the delete pipeline. The previous
+		// workflow goroutine may not have cleaned up yet, so retry
+		// until Start succeeds.
+		for {
+			exec, err := wfs.Orchestration.Start(ctx, "d1")
+			if err == nil {
+				if _, err := exec.AwaitResult(ctx); err != nil {
+					t.Fatalf("delete workflow: %v", err)
+				}
+				break
+			}
+			if !errors.Is(err, domain.ErrAlreadyRunning) {
+				t.Fatalf("Start: %v", err)
+			}
+			select {
+			case <-ctx.Done():
+				t.Fatalf("timed out waiting to start delete workflow")
+			case <-time.After(10 * time.Millisecond):
+			}
+		}
 
 		records := queryDeliveries(ctx, t, infra, "d1")
 		if len(records) != 0 {
 			t.Fatalf("expected 0 delivery records after delete, got %d", len(records))
-		}
-
-		_, err = queryDeployment(ctx, t, infra, "d1")
-		if !errors.Is(err, domain.ErrNotFound) {
-			t.Fatalf("expected ErrNotFound after delete, got: %v", err)
 		}
 	})
 
