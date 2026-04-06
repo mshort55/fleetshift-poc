@@ -5,10 +5,10 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"errors"
-	"strings"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 
@@ -374,5 +374,3 @@ func TestAgent_Remove_WithAttestation_FallsBackWithoutVerifier(t *testing.T) {
 		t.Fatalf("Remove with attestation but no verifier should fall back to passthrough: %v", err)
 	}
 }
-
-
