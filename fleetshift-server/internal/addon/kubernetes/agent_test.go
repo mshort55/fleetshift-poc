@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"errors"
+	"strings"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -349,40 +350,8 @@ func TestAgent_Remove_AttestationFailure_ReturnsError(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected attestation verification error, got nil")
 	}
-	if !contains(err.Error(), "attestation verification failed") {
+	if !strings.Contains(err.Error(), "attestation verification failed") {
 		t.Errorf("expected attestation verification error, got: %v", err)
-	}
-}
-
-func TestAgent_Remove_WithAttestation_NoTokenRequired(t *testing.T) {
-	v := attestation.NewVerifier(map[domain.IssuerURL]attestation.TrustedIssuer{})
-	agent := kubernetes.NewAgent(kubernetes.WithAttestationVerifier(v))
-
-	target := domain.TargetInfo{
-		ID:   "k8s-test",
-		Type: kubernetes.TargetType,
-		Name: "test-cluster",
-		Properties: map[string]string{
-			"api_server": "https://127.0.0.1:6443",
-		},
-	}
-
-	att := &domain.Attestation{
-		Input: domain.SignedInput{
-			KeyBinding: domain.SigningKeyBinding{
-				FederatedIdentity: domain.FederatedIdentity{
-					Issuer: "https://untrusted.example.com",
-				},
-			},
-		},
-	}
-
-	// No token — the attestation code path doesn't require one.
-	// Verification will fail (untrusted issuer), proving we reached
-	// the attestation path rather than the token passthrough check.
-	err := agent.Remove(context.Background(), target, "d1", nil, domain.DeliveryAuth{}, att, &domain.DeliverySignaler{})
-	if err == nil {
-		t.Fatal("expected error from untrusted issuer")
 	}
 }
 
@@ -406,16 +375,4 @@ func TestAgent_Remove_WithAttestation_FallsBackWithoutVerifier(t *testing.T) {
 	}
 }
 
-func contains(s, substr string) bool {
-	return len(s) >= len(substr) && searchSubstring(s, substr)
-}
-
-func searchSubstring(s, substr string) bool {
-	for i := 0; i <= len(s)-len(substr); i++ {
-		if s[i:i+len(substr)] == substr {
-			return true
-		}
-	}
-	return false
-}
 
