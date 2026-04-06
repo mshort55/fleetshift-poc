@@ -21,7 +21,6 @@ func newDeploymentCmd(ctx *cmdContext) *cobra.Command {
 
 	cmd.AddCommand(
 		newDeploymentCreateCmd(ctx),
-		newDeploymentDeleteCmd(ctx),
 		newDeploymentGetCmd(ctx),
 		newDeploymentListCmd(ctx),
 		newDeploymentResumeCmd(ctx),

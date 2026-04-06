@@ -106,20 +106,6 @@ func (s *fakeDeploymentServer) ResumeDeployment(_ context.Context, req *pb.Resum
 	return dep, nil
 }
 
-func (s *fakeDeploymentServer) DeleteDeployment(_ context.Context, req *pb.DeleteDeploymentRequest) (*pb.Deployment, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	dep, ok := s.deployments[req.GetName()]
-	if !ok {
-		return nil, status.Errorf(codes.NotFound, "deployment %q not found", req.GetName())
-	}
-
-	dep.State = pb.Deployment_STATE_DELETING
-	dep.Reconciling = true
-	return dep, nil
-}
-
 // startFakeServer launches an in-process gRPC server with the fake
 // deployment service and returns its address.
 func startFakeServer(t *testing.T) string {
@@ -358,49 +344,5 @@ func TestDeploymentResume_NotFound(t *testing.T) {
 	_, err := runCLIErr(t, "--server", addr, "deployment", "resume", "nonexistent")
 	if err == nil {
 		t.Error("resume nonexistent should fail")
-	}
-}
-
-func TestDeploymentDelete(t *testing.T) {
-	fakeSrv := newFakeDeploymentServer()
-
-	fakeSrv.deployments["deployments/doomed"] = &pb.Deployment{
-		Name:        "deployments/doomed",
-		State:       pb.Deployment_STATE_ACTIVE,
-		Reconciling: false,
-		CreateTime:  timestamppb.Now(),
-		UpdateTime:  timestamppb.Now(),
-		ManifestStrategy: &pb.ManifestStrategy{
-			Type: pb.ManifestStrategy_TYPE_INLINE,
-		},
-		PlacementStrategy: &pb.PlacementStrategy{
-			Type: pb.PlacementStrategy_TYPE_ALL,
-		},
-	}
-
-	srv := grpc.NewServer()
-	pb.RegisterDeploymentServiceServer(srv, fakeSrv)
-	lis, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("listen: %v", err)
-	}
-	go srv.Serve(lis)
-	t.Cleanup(func() { srv.GracefulStop() })
-	addr := lis.Addr().String()
-
-	out := runCLI(t, "--server", addr, "deployment", "delete", "doomed")
-	if !strings.Contains(out, "deployments/doomed") {
-		t.Errorf("delete output should contain deployment name, got:\n%s", out)
-	}
-	if !strings.Contains(out, "Deleting") {
-		t.Errorf("delete output should show deleting state, got:\n%s", out)
-	}
-}
-
-func TestDeploymentDelete_NotFound(t *testing.T) {
-	addr := startFakeServer(t)
-	_, err := runCLIErr(t, "--server", addr, "deployment", "delete", "nonexistent")
-	if err == nil {
-		t.Error("delete nonexistent should fail")
 	}
 }

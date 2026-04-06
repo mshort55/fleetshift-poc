@@ -23,7 +23,6 @@ const (
 	DeploymentService_GetDeployment_FullMethodName    = "/fleetshift.v1.DeploymentService/GetDeployment"
 	DeploymentService_ListDeployments_FullMethodName  = "/fleetshift.v1.DeploymentService/ListDeployments"
 	DeploymentService_ResumeDeployment_FullMethodName = "/fleetshift.v1.DeploymentService/ResumeDeployment"
-	DeploymentService_DeleteDeployment_FullMethodName = "/fleetshift.v1.DeploymentService/DeleteDeployment"
 )
 
 // DeploymentServiceClient is the client API for DeploymentService service.
@@ -43,10 +42,6 @@ type DeploymentServiceClient interface {
 	// deliveries. Any authorized user may resume; this gives approval-gate
 	// semantics for free.
 	ResumeDeployment(ctx context.Context, in *ResumeDeploymentRequest, opts ...grpc.CallOption) (*Deployment, error)
-	// DeleteDeployment initiates deletion of a deployment.
-	// The deployment transitions to DELETING state and the delete
-	// pipeline removes resources from all targets.
-	DeleteDeployment(ctx context.Context, in *DeleteDeploymentRequest, opts ...grpc.CallOption) (*Deployment, error)
 }
 
 type deploymentServiceClient struct {
@@ -97,16 +92,6 @@ func (c *deploymentServiceClient) ResumeDeployment(ctx context.Context, in *Resu
 	return out, nil
 }
 
-func (c *deploymentServiceClient) DeleteDeployment(ctx context.Context, in *DeleteDeploymentRequest, opts ...grpc.CallOption) (*Deployment, error) {
-	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	out := new(Deployment)
-	err := c.cc.Invoke(ctx, DeploymentService_DeleteDeployment_FullMethodName, in, out, cOpts...)
-	if err != nil {
-		return nil, err
-	}
-	return out, nil
-}
-
 // DeploymentServiceServer is the server API for DeploymentService service.
 // All implementations must embed UnimplementedDeploymentServiceServer
 // for forward compatibility.
@@ -124,10 +109,6 @@ type DeploymentServiceServer interface {
 	// deliveries. Any authorized user may resume; this gives approval-gate
 	// semantics for free.
 	ResumeDeployment(context.Context, *ResumeDeploymentRequest) (*Deployment, error)
-	// DeleteDeployment initiates deletion of a deployment.
-	// The deployment transitions to DELETING state and the delete
-	// pipeline removes resources from all targets.
-	DeleteDeployment(context.Context, *DeleteDeploymentRequest) (*Deployment, error)
 	mustEmbedUnimplementedDeploymentServiceServer()
 }
 
@@ -149,9 +130,6 @@ func (UnimplementedDeploymentServiceServer) ListDeployments(context.Context, *Li
 }
 func (UnimplementedDeploymentServiceServer) ResumeDeployment(context.Context, *ResumeDeploymentRequest) (*Deployment, error) {
 	return nil, status.Error(codes.Unimplemented, "method ResumeDeployment not implemented")
-}
-func (UnimplementedDeploymentServiceServer) DeleteDeployment(context.Context, *DeleteDeploymentRequest) (*Deployment, error) {
-	return nil, status.Error(codes.Unimplemented, "method DeleteDeployment not implemented")
 }
 func (UnimplementedDeploymentServiceServer) mustEmbedUnimplementedDeploymentServiceServer() {}
 func (UnimplementedDeploymentServiceServer) testEmbeddedByValue()                           {}
@@ -246,24 +224,6 @@ func _DeploymentService_ResumeDeployment_Handler(srv interface{}, ctx context.Co
 	return interceptor(ctx, in, info, handler)
 }
 
-func _DeploymentService_DeleteDeployment_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(DeleteDeploymentRequest)
-	if err := dec(in); err != nil {
-		return nil, err
-	}
-	if interceptor == nil {
-		return srv.(DeploymentServiceServer).DeleteDeployment(ctx, in)
-	}
-	info := &grpc.UnaryServerInfo{
-		Server:     srv,
-		FullMethod: DeploymentService_DeleteDeployment_FullMethodName,
-	}
-	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(DeploymentServiceServer).DeleteDeployment(ctx, req.(*DeleteDeploymentRequest))
-	}
-	return interceptor(ctx, in, info, handler)
-}
-
 // DeploymentService_ServiceDesc is the grpc.ServiceDesc for DeploymentService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -286,10 +246,6 @@ var DeploymentService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "ResumeDeployment",
 			Handler:    _DeploymentService_ResumeDeployment_Handler,
-		},
-		{
-			MethodName: "DeleteDeployment",
-			Handler:    _DeploymentService_DeleteDeployment_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},
