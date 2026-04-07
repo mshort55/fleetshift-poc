@@ -23,6 +23,13 @@
 
 ## Implementation detail (nontrivial)
 
+- Async delivery resilience: deliveries in Accepted/Progressing state are not
+   recovered after a FleetShift process restart. The watching goroutine is lost
+   and the delivery stays in Accepted permanently. This affects all async
+   delivery agents (kind, hcp) but is most impactful for HCP where the async
+   phase takes 10-20 minutes. Options: persistent delivery state machine,
+   reconciliation loop on startup that resumes in-flight deliveries, or
+   workflow-engine-managed async steps instead of agent goroutines.
 - Not sure about the credential design (should we assume one raw token? what about other token types?)
 - The whole key binding doc should probably not travel on the deployment state
 - Not sure about how canonical deployment representation is calculated for signing (e.g. CLI coupling to strategy types)
