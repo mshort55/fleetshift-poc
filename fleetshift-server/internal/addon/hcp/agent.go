@@ -8,6 +8,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"time"
 
 	"k8s.io/client-go/tools/clientcmd"
 
@@ -165,7 +166,11 @@ func (a *Agent) Deliver(ctx context.Context, _ domain.TargetInfo, _ domain.Deliv
 		}
 	}
 
-	go a.deliverAsync(ctx, specs, signaler)
+	asyncCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 1*time.Hour)
+	go func() {
+		defer cancel()
+		a.deliverAsync(asyncCtx, specs, signaler)
+	}()
 
 	return domain.DeliveryResult{State: domain.DeliveryStateAccepted}, nil
 }
@@ -268,7 +273,12 @@ func (a *Agent) deliverCluster(ctx context.Context, spec ClusterSpec, signaler *
 	platformCfg := PlatformConfig{PullSecret: a.config.PullSecret}
 	hc := BuildHostedCluster(spec, *infra, *iamOut, platformCfg)
 	nodePools := BuildNodePools(spec, *infra)
-	secrets := BuildSecrets(spec, platformCfg)
+	secrets, err := BuildSecrets(spec, platformCfg)
+	if err != nil {
+		probe.Error(err)
+		failDelivery(ctx, signaler, "build secrets for %q: %v", spec.Name, err)
+		return nil, false
+	}
 
 	// 4. Apply to management cluster.
 	signaler.Emit(ctx, domain.DeliveryEvent{

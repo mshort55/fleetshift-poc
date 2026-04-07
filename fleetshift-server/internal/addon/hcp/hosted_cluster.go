@@ -168,15 +168,19 @@ func pickSubnet(index int, zone string, infra InfraOutput) string {
 
 // BuildSecrets creates the Kubernetes Secrets needed for a HostedCluster:
 // pull secret, SSH key, and etcd encryption key.
-func BuildSecrets(spec ClusterSpec, platform PlatformConfig) []corev1.Secret {
+func BuildSecrets(spec ClusterSpec, platform PlatformConfig) ([]corev1.Secret, error) {
 	sshKeyData := platform.SSHKey
 	if len(sshKeyData) == 0 {
-		sshKeyData = generateSSHPublicKey()
+		var err error
+		sshKeyData, err = generateSSHPublicKey()
+		if err != nil {
+			return nil, fmt.Errorf("generate SSH key: %w", err)
+		}
 	}
 
 	encryptionKey := make([]byte, 32)
 	if _, err := rand.Read(encryptionKey); err != nil {
-		panic(fmt.Sprintf("generate etcd encryption key: %v", err))
+		return nil, fmt.Errorf("generate etcd encryption key: %w", err)
 	}
 
 	return []corev1.Secret{
@@ -207,17 +211,17 @@ func BuildSecrets(spec ClusterSpec, platform PlatformConfig) []corev1.Secret {
 				"key": encryptionKey,
 			},
 		},
-	}
+	}, nil
 }
 
-func generateSSHPublicKey() []byte {
+func generateSSHPublicKey() ([]byte, error) {
 	pub, _, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
-		panic(fmt.Sprintf("generate ssh key: %v", err))
+		return nil, fmt.Errorf("generate ssh key: %w", err)
 	}
 	sshPub, err := ssh.NewPublicKey(pub)
 	if err != nil {
-		panic(fmt.Sprintf("convert ssh public key: %v", err))
+		return nil, fmt.Errorf("convert ssh public key: %w", err)
 	}
-	return ssh.MarshalAuthorizedKey(sshPub)
+	return ssh.MarshalAuthorizedKey(sshPub), nil
 }

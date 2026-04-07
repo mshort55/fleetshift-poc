@@ -240,7 +240,10 @@ func TestBuildSecrets(t *testing.T) {
 	spec := defaultClusterSpec()
 	platform := defaultPlatformConfig()
 
-	secrets := BuildSecrets(spec, platform)
+	secrets, err := BuildSecrets(spec, platform)
+	if err != nil {
+		t.Fatalf("BuildSecrets() error = %v", err)
+	}
 
 	t.Run("count", func(t *testing.T) {
 		if len(secrets) != 3 {
@@ -286,7 +289,10 @@ func TestBuildSecrets(t *testing.T) {
 		noSSH := PlatformConfig{
 			PullSecret: platform.PullSecret,
 		}
-		secrets := BuildSecrets(spec, noSSH)
+		secrets, err := BuildSecrets(spec, noSSH)
+		if err != nil {
+			t.Fatalf("BuildSecrets() error = %v", err)
+		}
 		sshSecret := secrets[1]
 		if len(sshSecret.Data["id_rsa.pub"]) == 0 {
 			t.Error("ssh key should be auto-generated when not provided")
