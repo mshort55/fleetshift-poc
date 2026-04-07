@@ -1,0 +1,346 @@
+package hcp
+
+import (
+	"context"
+	"fmt"
+
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/service/ec2"
+	ec2types "github.com/aws/aws-sdk-go-v2/service/ec2/types"
+	"github.com/aws/aws-sdk-go-v2/service/route53"
+	r53types "github.com/aws/aws-sdk-go-v2/service/route53/types"
+)
+
+// EC2API is the subset of the EC2 client needed for infrastructure creation.
+type EC2API interface {
+	CreateVpc(ctx context.Context, params *ec2.CreateVpcInput, optFns ...func(*ec2.Options)) (*ec2.CreateVpcOutput, error)
+	ModifyVpcAttribute(ctx context.Context, params *ec2.ModifyVpcAttributeInput, optFns ...func(*ec2.Options)) (*ec2.ModifyVpcAttributeOutput, error)
+	CreateDhcpOptions(ctx context.Context, params *ec2.CreateDhcpOptionsInput, optFns ...func(*ec2.Options)) (*ec2.CreateDhcpOptionsOutput, error)
+	AssociateDhcpOptions(ctx context.Context, params *ec2.AssociateDhcpOptionsInput, optFns ...func(*ec2.Options)) (*ec2.AssociateDhcpOptionsOutput, error)
+	CreateInternetGateway(ctx context.Context, params *ec2.CreateInternetGatewayInput, optFns ...func(*ec2.Options)) (*ec2.CreateInternetGatewayOutput, error)
+	AttachInternetGateway(ctx context.Context, params *ec2.AttachInternetGatewayInput, optFns ...func(*ec2.Options)) (*ec2.AttachInternetGatewayOutput, error)
+	CreateSubnet(ctx context.Context, params *ec2.CreateSubnetInput, optFns ...func(*ec2.Options)) (*ec2.CreateSubnetOutput, error)
+	AllocateAddress(ctx context.Context, params *ec2.AllocateAddressInput, optFns ...func(*ec2.Options)) (*ec2.AllocateAddressOutput, error)
+	CreateNatGateway(ctx context.Context, params *ec2.CreateNatGatewayInput, optFns ...func(*ec2.Options)) (*ec2.CreateNatGatewayOutput, error)
+	CreateRouteTable(ctx context.Context, params *ec2.CreateRouteTableInput, optFns ...func(*ec2.Options)) (*ec2.CreateRouteTableOutput, error)
+	CreateRoute(ctx context.Context, params *ec2.CreateRouteInput, optFns ...func(*ec2.Options)) (*ec2.CreateRouteOutput, error)
+	AssociateRouteTable(ctx context.Context, params *ec2.AssociateRouteTableInput, optFns ...func(*ec2.Options)) (*ec2.AssociateRouteTableOutput, error)
+	CreateVpcEndpoint(ctx context.Context, params *ec2.CreateVpcEndpointInput, optFns ...func(*ec2.Options)) (*ec2.CreateVpcEndpointOutput, error)
+	CreateTags(ctx context.Context, params *ec2.CreateTagsInput, optFns ...func(*ec2.Options)) (*ec2.CreateTagsOutput, error)
+
+	// Cleanup / describe methods
+	DeleteVpc(ctx context.Context, params *ec2.DeleteVpcInput, optFns ...func(*ec2.Options)) (*ec2.DeleteVpcOutput, error)
+	DeleteSubnet(ctx context.Context, params *ec2.DeleteSubnetInput, optFns ...func(*ec2.Options)) (*ec2.DeleteSubnetOutput, error)
+	DeleteInternetGateway(ctx context.Context, params *ec2.DeleteInternetGatewayInput, optFns ...func(*ec2.Options)) (*ec2.DeleteInternetGatewayOutput, error)
+	DetachInternetGateway(ctx context.Context, params *ec2.DetachInternetGatewayInput, optFns ...func(*ec2.Options)) (*ec2.DetachInternetGatewayOutput, error)
+	DeleteNatGateway(ctx context.Context, params *ec2.DeleteNatGatewayInput, optFns ...func(*ec2.Options)) (*ec2.DeleteNatGatewayOutput, error)
+	ReleaseAddress(ctx context.Context, params *ec2.ReleaseAddressInput, optFns ...func(*ec2.Options)) (*ec2.ReleaseAddressOutput, error)
+	DeleteRouteTable(ctx context.Context, params *ec2.DeleteRouteTableInput, optFns ...func(*ec2.Options)) (*ec2.DeleteRouteTableOutput, error)
+	DeleteVpcEndpoints(ctx context.Context, params *ec2.DeleteVpcEndpointsInput, optFns ...func(*ec2.Options)) (*ec2.DeleteVpcEndpointsOutput, error)
+	DeleteDhcpOptions(ctx context.Context, params *ec2.DeleteDhcpOptionsInput, optFns ...func(*ec2.Options)) (*ec2.DeleteDhcpOptionsOutput, error)
+	DescribeVpcs(ctx context.Context, params *ec2.DescribeVpcsInput, optFns ...func(*ec2.Options)) (*ec2.DescribeVpcsOutput, error)
+	DescribeSubnets(ctx context.Context, params *ec2.DescribeSubnetsInput, optFns ...func(*ec2.Options)) (*ec2.DescribeSubnetsOutput, error)
+	DescribeNatGateways(ctx context.Context, params *ec2.DescribeNatGatewaysInput, optFns ...func(*ec2.Options)) (*ec2.DescribeNatGatewaysOutput, error)
+}
+
+// Route53API is the subset of the Route53 client needed for DNS zone management.
+type Route53API interface {
+	CreateHostedZone(ctx context.Context, params *route53.CreateHostedZoneInput, optFns ...func(*route53.Options)) (*route53.CreateHostedZoneOutput, error)
+	DeleteHostedZone(ctx context.Context, params *route53.DeleteHostedZoneInput, optFns ...func(*route53.Options)) (*route53.DeleteHostedZoneOutput, error)
+	ListHostedZonesByName(ctx context.Context, params *route53.ListHostedZonesByNameInput, optFns ...func(*route53.Options)) (*route53.ListHostedZonesByNameOutput, error)
+	ListResourceRecordSets(ctx context.Context, params *route53.ListResourceRecordSetsInput, optFns ...func(*route53.Options)) (*route53.ListResourceRecordSetsOutput, error)
+	ChangeResourceRecordSets(ctx context.Context, params *route53.ChangeResourceRecordSetsInput, optFns ...func(*route53.Options)) (*route53.ChangeResourceRecordSetsOutput, error)
+}
+
+// InfraOutput captures all AWS resource IDs created during infrastructure setup.
+type InfraOutput struct {
+	VPCID              string
+	DHCPOptionsID      string
+	InternetGatewayID  string
+	PrivateSubnetIDs   []string
+	PublicSubnetIDs    []string
+	ElasticIPAllocIDs  []string
+	NATGatewayIDs      []string
+	PrivateRouteTableIDs []string
+	PublicRouteTableID string
+	S3EndpointID       string
+	PrivateDNSZoneID   string
+	LocalDNSZoneID     string
+	Zones              []string
+}
+
+// InfraSpec holds the parameters for infrastructure creation.
+// If ClusterSpec from agent.go is available, use it instead.
+type InfraSpec struct {
+	Name       string
+	InfraID    string
+	Region     string
+	BaseDomain string
+	Zones      []string
+}
+
+func clusterTag(infraID string) ec2types.Tag {
+	return ec2types.Tag{
+		Key:   aws.String(fmt.Sprintf("kubernetes.io/cluster/%s", infraID)),
+		Value: aws.String("owned"),
+	}
+}
+
+func nameTag(name string) ec2types.Tag {
+	return ec2types.Tag{
+		Key:   aws.String("Name"),
+		Value: aws.String(name),
+	}
+}
+
+// CreateInfra provisions the full VPC + networking stack for an HCP cluster.
+func CreateInfra(ctx context.Context, ec2Client EC2API, r53Client Route53API, spec InfraSpec) (*InfraOutput, error) {
+	out := &InfraOutput{Zones: spec.Zones}
+	tag := clusterTag(spec.InfraID)
+
+	// 1. Create VPC
+	vpcOut, err := ec2Client.CreateVpc(ctx, &ec2.CreateVpcInput{
+		CidrBlock: aws.String("10.0.0.0/16"),
+		TagSpecifications: []ec2types.TagSpecification{{
+			ResourceType: ec2types.ResourceTypeVpc,
+			Tags:         []ec2types.Tag{tag, nameTag(spec.InfraID + "-vpc")},
+		}},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("create VPC: %w", err)
+	}
+	out.VPCID = aws.ToString(vpcOut.Vpc.VpcId)
+
+	// Enable DNS support and hostnames
+	for _, attr := range []struct {
+		value *ec2.ModifyVpcAttributeInput
+	}{
+		{&ec2.ModifyVpcAttributeInput{VpcId: vpcOut.Vpc.VpcId, EnableDnsSupport: &ec2types.AttributeBooleanValue{Value: aws.Bool(true)}}},
+		{&ec2.ModifyVpcAttributeInput{VpcId: vpcOut.Vpc.VpcId, EnableDnsHostnames: &ec2types.AttributeBooleanValue{Value: aws.Bool(true)}}},
+	} {
+		if _, err := ec2Client.ModifyVpcAttribute(ctx, attr.value); err != nil {
+			return nil, fmt.Errorf("modify VPC attribute: %w", err)
+		}
+	}
+
+	// 2. DHCP Options
+	dhcpOut, err := ec2Client.CreateDhcpOptions(ctx, &ec2.CreateDhcpOptionsInput{
+		DhcpConfigurations: []ec2types.NewDhcpConfiguration{
+			{Key: aws.String("domain-name"), Values: []string{spec.Region + ".compute.internal"}},
+			{Key: aws.String("domain-name-servers"), Values: []string{"AmazonProvidedDNS"}},
+		},
+		TagSpecifications: []ec2types.TagSpecification{{
+			ResourceType: ec2types.ResourceTypeDhcpOptions,
+			Tags:         []ec2types.Tag{tag},
+		}},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("create DHCP options: %w", err)
+	}
+	out.DHCPOptionsID = aws.ToString(dhcpOut.DhcpOptions.DhcpOptionsId)
+
+	if _, err := ec2Client.AssociateDhcpOptions(ctx, &ec2.AssociateDhcpOptionsInput{
+		DhcpOptionsId: dhcpOut.DhcpOptions.DhcpOptionsId,
+		VpcId:         vpcOut.Vpc.VpcId,
+	}); err != nil {
+		return nil, fmt.Errorf("associate DHCP options: %w", err)
+	}
+
+	// 3. Internet Gateway
+	igwOut, err := ec2Client.CreateInternetGateway(ctx, &ec2.CreateInternetGatewayInput{
+		TagSpecifications: []ec2types.TagSpecification{{
+			ResourceType: ec2types.ResourceTypeInternetGateway,
+			Tags:         []ec2types.Tag{tag, nameTag(spec.InfraID + "-igw")},
+		}},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("create internet gateway: %w", err)
+	}
+	out.InternetGatewayID = aws.ToString(igwOut.InternetGateway.InternetGatewayId)
+
+	if _, err := ec2Client.AttachInternetGateway(ctx, &ec2.AttachInternetGatewayInput{
+		InternetGatewayId: igwOut.InternetGateway.InternetGatewayId,
+		VpcId:             vpcOut.Vpc.VpcId,
+	}); err != nil {
+		return nil, fmt.Errorf("attach internet gateway: %w", err)
+	}
+
+	// 4. Per-zone: private subnet, public subnet, EIP, NAT GW, private route table
+	for i, zone := range spec.Zones {
+		// Private subnet: 10.0.{i*2}.0/24
+		privCIDR := fmt.Sprintf("10.0.%d.0/24", i*2)
+		privSubnet, err := ec2Client.CreateSubnet(ctx, &ec2.CreateSubnetInput{
+			VpcId:            vpcOut.Vpc.VpcId,
+			CidrBlock:        aws.String(privCIDR),
+			AvailabilityZone: aws.String(zone),
+			TagSpecifications: []ec2types.TagSpecification{{
+				ResourceType: ec2types.ResourceTypeSubnet,
+				Tags:         []ec2types.Tag{tag, nameTag(fmt.Sprintf("%s-private-%s", spec.InfraID, zone))},
+			}},
+		})
+		if err != nil {
+			return nil, fmt.Errorf("create private subnet in %s: %w", zone, err)
+		}
+		out.PrivateSubnetIDs = append(out.PrivateSubnetIDs, aws.ToString(privSubnet.Subnet.SubnetId))
+
+		// Public subnet: 10.0.{i*2+1}.0/24
+		pubCIDR := fmt.Sprintf("10.0.%d.0/24", i*2+1)
+		pubSubnet, err := ec2Client.CreateSubnet(ctx, &ec2.CreateSubnetInput{
+			VpcId:            vpcOut.Vpc.VpcId,
+			CidrBlock:        aws.String(pubCIDR),
+			AvailabilityZone: aws.String(zone),
+			TagSpecifications: []ec2types.TagSpecification{{
+				ResourceType: ec2types.ResourceTypeSubnet,
+				Tags:         []ec2types.Tag{tag, nameTag(fmt.Sprintf("%s-public-%s", spec.InfraID, zone))},
+			}},
+		})
+		if err != nil {
+			return nil, fmt.Errorf("create public subnet in %s: %w", zone, err)
+		}
+		out.PublicSubnetIDs = append(out.PublicSubnetIDs, aws.ToString(pubSubnet.Subnet.SubnetId))
+
+		// Elastic IP for NAT
+		eipOut, err := ec2Client.AllocateAddress(ctx, &ec2.AllocateAddressInput{
+			Domain: ec2types.DomainTypeVpc,
+			TagSpecifications: []ec2types.TagSpecification{{
+				ResourceType: ec2types.ResourceTypeElasticIp,
+				Tags:         []ec2types.Tag{tag, nameTag(fmt.Sprintf("%s-eip-%s", spec.InfraID, zone))},
+			}},
+		})
+		if err != nil {
+			return nil, fmt.Errorf("allocate EIP in %s: %w", zone, err)
+		}
+		out.ElasticIPAllocIDs = append(out.ElasticIPAllocIDs, aws.ToString(eipOut.AllocationId))
+
+		// NAT Gateway in public subnet
+		natOut, err := ec2Client.CreateNatGateway(ctx, &ec2.CreateNatGatewayInput{
+			SubnetId:     pubSubnet.Subnet.SubnetId,
+			AllocationId: eipOut.AllocationId,
+			TagSpecifications: []ec2types.TagSpecification{{
+				ResourceType: ec2types.ResourceTypeNatgateway,
+				Tags:         []ec2types.Tag{tag, nameTag(fmt.Sprintf("%s-nat-%s", spec.InfraID, zone))},
+			}},
+		})
+		if err != nil {
+			return nil, fmt.Errorf("create NAT gateway in %s: %w", zone, err)
+		}
+		out.NATGatewayIDs = append(out.NATGatewayIDs, aws.ToString(natOut.NatGateway.NatGatewayId))
+
+		// Private route table
+		privRT, err := ec2Client.CreateRouteTable(ctx, &ec2.CreateRouteTableInput{
+			VpcId: vpcOut.Vpc.VpcId,
+			TagSpecifications: []ec2types.TagSpecification{{
+				ResourceType: ec2types.ResourceTypeRouteTable,
+				Tags:         []ec2types.Tag{tag, nameTag(fmt.Sprintf("%s-private-rt-%s", spec.InfraID, zone))},
+			}},
+		})
+		if err != nil {
+			return nil, fmt.Errorf("create private route table in %s: %w", zone, err)
+		}
+		privRTID := aws.ToString(privRT.RouteTable.RouteTableId)
+		out.PrivateRouteTableIDs = append(out.PrivateRouteTableIDs, privRTID)
+
+		// Default route via NAT
+		if _, err := ec2Client.CreateRoute(ctx, &ec2.CreateRouteInput{
+			RouteTableId:         aws.String(privRTID),
+			DestinationCidrBlock: aws.String("0.0.0.0/0"),
+			NatGatewayId:         natOut.NatGateway.NatGatewayId,
+		}); err != nil {
+			return nil, fmt.Errorf("create private route in %s: %w", zone, err)
+		}
+
+		// Associate private subnet with private route table
+		if _, err := ec2Client.AssociateRouteTable(ctx, &ec2.AssociateRouteTableInput{
+			RouteTableId: aws.String(privRTID),
+			SubnetId:     privSubnet.Subnet.SubnetId,
+		}); err != nil {
+			return nil, fmt.Errorf("associate private route table in %s: %w", zone, err)
+		}
+	}
+
+	// 5. Public route table
+	pubRT, err := ec2Client.CreateRouteTable(ctx, &ec2.CreateRouteTableInput{
+		VpcId: vpcOut.Vpc.VpcId,
+		TagSpecifications: []ec2types.TagSpecification{{
+			ResourceType: ec2types.ResourceTypeRouteTable,
+			Tags:         []ec2types.Tag{tag, nameTag(spec.InfraID + "-public-rt")},
+		}},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("create public route table: %w", err)
+	}
+	out.PublicRouteTableID = aws.ToString(pubRT.RouteTable.RouteTableId)
+
+	// Default route via IGW
+	if _, err := ec2Client.CreateRoute(ctx, &ec2.CreateRouteInput{
+		RouteTableId:         pubRT.RouteTable.RouteTableId,
+		DestinationCidrBlock: aws.String("0.0.0.0/0"),
+		GatewayId:            igwOut.InternetGateway.InternetGatewayId,
+	}); err != nil {
+		return nil, fmt.Errorf("create public route: %w", err)
+	}
+
+	// Associate all public subnets with public route table
+	for i, subnetID := range out.PublicSubnetIDs {
+		if _, err := ec2Client.AssociateRouteTable(ctx, &ec2.AssociateRouteTableInput{
+			RouteTableId: pubRT.RouteTable.RouteTableId,
+			SubnetId:     aws.String(subnetID),
+		}); err != nil {
+			return nil, fmt.Errorf("associate public route table for subnet %d: %w", i, err)
+		}
+	}
+
+	// 6. S3 VPC Endpoint
+	s3Ep, err := ec2Client.CreateVpcEndpoint(ctx, &ec2.CreateVpcEndpointInput{
+		VpcId:       vpcOut.Vpc.VpcId,
+		ServiceName: aws.String(fmt.Sprintf("com.amazonaws.%s.s3", spec.Region)),
+		RouteTableIds: append(out.PrivateRouteTableIDs, out.PublicRouteTableID),
+		TagSpecifications: []ec2types.TagSpecification{{
+			ResourceType: ec2types.ResourceTypeVpcEndpoint,
+			Tags:         []ec2types.Tag{tag, nameTag(spec.InfraID + "-s3-endpoint")},
+		}},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("create S3 endpoint: %w", err)
+	}
+	out.S3EndpointID = aws.ToString(s3Ep.VpcEndpoint.VpcEndpointId)
+
+	// 7. DNS Zones
+	// Private zone: <infraID>.<baseDomain>
+	privZone, err := r53Client.CreateHostedZone(ctx, &route53.CreateHostedZoneInput{
+		Name:            aws.String(fmt.Sprintf("%s.%s", spec.InfraID, spec.BaseDomain)),
+		CallerReference: aws.String(fmt.Sprintf("%s-private", spec.InfraID)),
+		HostedZoneConfig: &r53types.HostedZoneConfig{
+			PrivateZone: true,
+			Comment:     aws.String(fmt.Sprintf("Private zone for %s", spec.InfraID)),
+		},
+		VPC: &r53types.VPC{
+			VPCId:     aws.String(out.VPCID),
+			VPCRegion: r53types.VPCRegion(spec.Region),
+		},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("create private DNS zone: %w", err)
+	}
+	out.PrivateDNSZoneID = aws.ToString(privZone.HostedZone.Id)
+
+	// Local zone: <infraID>.hypershift.local
+	localZone, err := r53Client.CreateHostedZone(ctx, &route53.CreateHostedZoneInput{
+		Name:            aws.String(fmt.Sprintf("%s.hypershift.local", spec.InfraID)),
+		CallerReference: aws.String(fmt.Sprintf("%s-local", spec.InfraID)),
+		HostedZoneConfig: &r53types.HostedZoneConfig{
+			PrivateZone: true,
+			Comment:     aws.String(fmt.Sprintf("Local zone for %s", spec.InfraID)),
+		},
+		VPC: &r53types.VPC{
+			VPCId:     aws.String(out.VPCID),
+			VPCRegion: r53types.VPCRegion(spec.Region),
+		},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("create local DNS zone: %w", err)
+	}
+	out.LocalDNSZoneID = aws.ToString(localZone.HostedZone.Id)
+
+	return out, nil
+}
