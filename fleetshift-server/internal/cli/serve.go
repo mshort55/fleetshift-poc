@@ -15,6 +15,10 @@ import (
 	"syscall"
 	"time"
 
+	awsconfig "github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/service/ec2"
+	"github.com/aws/aws-sdk-go-v2/service/iam"
+	"github.com/aws/aws-sdk-go-v2/service/route53"
 	wfbackend "github.com/cschleiden/go-workflows/backend"
 	wfsqlite "github.com/cschleiden/go-workflows/backend/sqlite"
 	"github.com/cschleiden/go-workflows/client"
@@ -29,6 +33,7 @@ import (
 	"google.golang.org/grpc/reflection"
 
 	pb "github.com/fleetshift/fleetshift-poc/fleetshift-server/gen/fleetshift/v1"
+	hcpaddon "github.com/fleetshift/fleetshift-poc/fleetshift-server/internal/addon/hcp"
 	kindaddon "github.com/fleetshift/fleetshift-poc/fleetshift-server/internal/addon/kind"
 	kubernetesaddon "github.com/fleetshift/fleetshift-poc/fleetshift-server/internal/addon/kubernetes"
 	"github.com/fleetshift/fleetshift-poc/fleetshift-server/internal/application"
@@ -48,6 +53,11 @@ type serveFlags struct {
 	logLevel   string
 	logFormat  string
 	oidcCAFile string
+
+	hcpKubeconfig string
+	hcpAWSRegion  string
+	hcpS3Bucket   string
+	hcpPullSecret string
 }
 
 func newServeCmd() *cobra.Command {
@@ -65,6 +75,10 @@ func newServeCmd() *cobra.Command {
 	cmd.Flags().StringVar(&f.logLevel, "log-level", "info", "log level (debug, info, warn, error)")
 	cmd.Flags().StringVar(&f.logFormat, "log-format", "text", "log format (text, json)")
 	cmd.Flags().StringVar(&f.oidcCAFile, "oidc-ca-file", "", "PEM CA certificate for OIDC issuers (for kind clusters trusting self-signed or local CAs)")
+	cmd.Flags().StringVar(&f.hcpKubeconfig, "hcp-kubeconfig", "", "path to management cluster kubeconfig (enables HCP agent)")
+	cmd.Flags().StringVar(&f.hcpAWSRegion, "hcp-aws-region", "", "AWS region for HCP clusters")
+	cmd.Flags().StringVar(&f.hcpS3Bucket, "hcp-s3-bucket", "", "S3 bucket for OIDC discovery documents")
+	cmd.Flags().StringVar(&f.hcpPullSecret, "hcp-pull-secret", "", "path to container image pull secret file")
 	return cmd
 }
 
@@ -116,6 +130,38 @@ func runServe(ctx context.Context, f *serveFlags) error {
 	kubeAgent := kubernetesaddon.NewAgent()
 	router.Register(kubernetesaddon.TargetType, kubeAgent)
 
+	if f.hcpKubeconfig != "" {
+		mgmtKubeconfig, err := os.ReadFile(f.hcpKubeconfig)
+		if err != nil {
+			return fmt.Errorf("read HCP kubeconfig: %w", err)
+		}
+		var pullSecret []byte
+		if f.hcpPullSecret != "" {
+			pullSecret, err = os.ReadFile(f.hcpPullSecret)
+			if err != nil {
+				return fmt.Errorf("read HCP pull secret: %w", err)
+			}
+		}
+		awsCfg, err := awsconfig.LoadDefaultConfig(ctx, awsconfig.WithRegion(f.hcpAWSRegion))
+		if err != nil {
+			return fmt.Errorf("load AWS config: %w", err)
+		}
+		hcpAgent := hcpaddon.NewAgent(
+			hcpaddon.AgentConfig{
+				MgmtKubeconfig: mgmtKubeconfig,
+				PullSecret:     pullSecret,
+				S3Bucket:       f.hcpS3Bucket,
+				AWSRegion:      f.hcpAWSRegion,
+			},
+			ec2.NewFromConfig(awsCfg),
+			iam.NewFromConfig(awsCfg),
+			route53.NewFromConfig(awsCfg),
+			hcpaddon.WithObserver(hcpaddon.NewSlogAgentObserver(logger)),
+		)
+		router.Register(hcpaddon.TargetType, hcpAgent)
+		logger.Info("HCP agent enabled", "kubeconfig", f.hcpKubeconfig, "region", f.hcpAWSRegion)
+	}
+
 	wfBackend := wfsqlite.NewSqliteBackend(f.dbPath,
 		wfsqlite.WithBackendOptions(wfbackend.WithLogger(logger)),
 	)
@@ -160,6 +206,17 @@ func runServe(ctx context.Context, f *serveFlags) error {
 		AcceptedResourceTypes: []domain.ResourceType{kindaddon.ClusterResourceType},
 	}); err != nil && !errors.Is(err, domain.ErrAlreadyExists) {
 		return fmt.Errorf("seed kind target: %w", err)
+	}
+
+	if f.hcpKubeconfig != "" {
+		if err := targetSvc.Register(ctx, domain.TargetInfo{
+			ID:                    "hcp-mgmt",
+			Type:                  hcpaddon.TargetType,
+			Name:                  "HCP Management Cluster",
+			AcceptedResourceTypes: []domain.ResourceType{hcpaddon.ClusterResourceType},
+		}); err != nil && !errors.Is(err, domain.ErrAlreadyExists) {
+			return fmt.Errorf("seed HCP target: %w", err)
+		}
 	}
 
 	workerCtx, workerCancel := context.WithCancel(ctx)
