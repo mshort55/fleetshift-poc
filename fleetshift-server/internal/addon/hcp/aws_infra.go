@@ -3,6 +3,7 @@ package hcp
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/ec2"
@@ -416,6 +417,11 @@ func DestroyInfra(ctx context.Context, ec2Client EC2API, r53Client Route53API, i
 	// Wait for NAT gateways to reach "deleted" state
 	for _, natID := range out.NATGatewayIDs {
 		for {
+			select {
+			case <-ctx.Done():
+				return fmt.Errorf("waiting for NAT gateway %s deletion: %w", natID, ctx.Err())
+			default:
+			}
 			desc, err := ec2Client.DescribeNatGateways(ctx, &ec2.DescribeNatGatewaysInput{
 				NatGatewayIds: []string{natID},
 			})
@@ -425,6 +431,7 @@ func DestroyInfra(ctx context.Context, ec2Client EC2API, r53Client Route53API, i
 			if len(desc.NatGateways) == 0 || desc.NatGateways[0].State == ec2types.NatGatewayStateDeleted {
 				break
 			}
+			time.Sleep(5 * time.Second)
 		}
 	}
 
