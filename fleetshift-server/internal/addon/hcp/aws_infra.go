@@ -42,6 +42,9 @@ type EC2API interface {
 	DescribeSubnets(ctx context.Context, params *ec2.DescribeSubnetsInput, optFns ...func(*ec2.Options)) (*ec2.DescribeSubnetsOutput, error)
 	DescribeNatGateways(ctx context.Context, params *ec2.DescribeNatGatewaysInput, optFns ...func(*ec2.Options)) (*ec2.DescribeNatGatewaysOutput, error)
 	DescribeRouteTables(ctx context.Context, params *ec2.DescribeRouteTablesInput, optFns ...func(*ec2.Options)) (*ec2.DescribeRouteTablesOutput, error)
+	DescribeInternetGateways(ctx context.Context, params *ec2.DescribeInternetGatewaysInput, optFns ...func(*ec2.Options)) (*ec2.DescribeInternetGatewaysOutput, error)
+	DescribeVpcEndpoints(ctx context.Context, params *ec2.DescribeVpcEndpointsInput, optFns ...func(*ec2.Options)) (*ec2.DescribeVpcEndpointsOutput, error)
+	DescribeAddresses(ctx context.Context, params *ec2.DescribeAddressesInput, optFns ...func(*ec2.Options)) (*ec2.DescribeAddressesOutput, error)
 	DisassociateRouteTable(ctx context.Context, params *ec2.DisassociateRouteTableInput, optFns ...func(*ec2.Options)) (*ec2.DisassociateRouteTableOutput, error)
 }
 
@@ -352,7 +355,11 @@ func CreateInfra(ctx context.Context, ec2Client EC2API, r53Client Route53API, sp
 // are discovered by the kubernetes.io/cluster/{infraID}: owned tag.
 func DestroyInfra(ctx context.Context, ec2Client EC2API, r53Client Route53API, infraID string, out *InfraOutput) error {
 	if out == nil {
-		return fmt.Errorf("tag-based resource discovery not yet implemented; provide InfraOutput")
+		discovered, err := discoverInfra(ctx, ec2Client, r53Client, infraID)
+		if err != nil {
+			return fmt.Errorf("discover infrastructure for %s: %w", infraID, err)
+		}
+		out = discovered
 	}
 
 	// 1. Delete DNS zones (delete non-default record sets first)
@@ -486,6 +493,148 @@ func DestroyInfra(ctx context.Context, ec2Client EC2API, r53Client Route53API, i
 	}
 
 	return nil
+}
+
+// discoverInfra finds AWS resources belonging to an HCP cluster by the
+// kubernetes.io/cluster/{infraID}:owned tag and returns a populated InfraOutput.
+func discoverInfra(ctx context.Context, ec2Client EC2API, r53Client Route53API, infraID string) (*InfraOutput, error) {
+	out := &InfraOutput{}
+	tagFilter := ec2types.Filter{
+		Name:   aws.String(fmt.Sprintf("tag:kubernetes.io/cluster/%s", infraID)),
+		Values: []string{"owned"},
+	}
+
+	// 1. Discover VPC
+	vpcs, err := ec2Client.DescribeVpcs(ctx, &ec2.DescribeVpcsInput{
+		Filters: []ec2types.Filter{tagFilter},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("discover VPCs: %w", err)
+	}
+	if len(vpcs.Vpcs) == 0 {
+		return out, nil // nothing to clean up
+	}
+	out.VPCID = aws.ToString(vpcs.Vpcs[0].VpcId)
+	if vpcs.Vpcs[0].DhcpOptionsId != nil {
+		dhcpID := aws.ToString(vpcs.Vpcs[0].DhcpOptionsId)
+		if dhcpID != "default" {
+			out.DHCPOptionsID = dhcpID
+		}
+	}
+
+	vpcFilter := ec2types.Filter{
+		Name:   aws.String("vpc-id"),
+		Values: []string{out.VPCID},
+	}
+
+	// 2. Discover subnets
+	subnets, err := ec2Client.DescribeSubnets(ctx, &ec2.DescribeSubnetsInput{
+		Filters: []ec2types.Filter{tagFilter},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("discover subnets: %w", err)
+	}
+	for _, s := range subnets.Subnets {
+		id := aws.ToString(s.SubnetId)
+		if hasNameTagContaining(s.Tags, "private") {
+			out.PrivateSubnetIDs = append(out.PrivateSubnetIDs, id)
+		} else {
+			out.PublicSubnetIDs = append(out.PublicSubnetIDs, id)
+		}
+	}
+
+	// 3. Discover NAT gateways and their EIPs
+	natGWs, err := ec2Client.DescribeNatGateways(ctx, &ec2.DescribeNatGatewaysInput{
+		Filter: []ec2types.Filter{vpcFilter, {
+			Name:   aws.String("state"),
+			Values: []string{"available", "pending"},
+		}},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("discover NAT gateways: %w", err)
+	}
+	for _, ng := range natGWs.NatGateways {
+		out.NATGatewayIDs = append(out.NATGatewayIDs, aws.ToString(ng.NatGatewayId))
+		for _, addr := range ng.NatGatewayAddresses {
+			if addr.AllocationId != nil {
+				out.ElasticIPAllocIDs = append(out.ElasticIPAllocIDs, aws.ToString(addr.AllocationId))
+			}
+		}
+	}
+
+	// 4. Discover route tables
+	rts, err := ec2Client.DescribeRouteTables(ctx, &ec2.DescribeRouteTablesInput{
+		Filters: []ec2types.Filter{tagFilter},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("discover route tables: %w", err)
+	}
+	for _, rt := range rts.RouteTables {
+		id := aws.ToString(rt.RouteTableId)
+		if hasNameTagContaining(rt.Tags, "public") {
+			out.PublicRouteTableID = id
+		} else {
+			out.PrivateRouteTableIDs = append(out.PrivateRouteTableIDs, id)
+		}
+	}
+
+	// 5. Discover internet gateways
+	igws, err := ec2Client.DescribeInternetGateways(ctx, &ec2.DescribeInternetGatewaysInput{
+		Filters: []ec2types.Filter{{
+			Name:   aws.String("attachment.vpc-id"),
+			Values: []string{out.VPCID},
+		}},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("discover internet gateways: %w", err)
+	}
+	if len(igws.InternetGateways) > 0 {
+		out.InternetGatewayID = aws.ToString(igws.InternetGateways[0].InternetGatewayId)
+	}
+
+	// 6. Discover VPC endpoints
+	eps, err := ec2Client.DescribeVpcEndpoints(ctx, &ec2.DescribeVpcEndpointsInput{
+		Filters: []ec2types.Filter{vpcFilter},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("discover VPC endpoints: %w", err)
+	}
+	if len(eps.VpcEndpoints) > 0 {
+		out.S3EndpointID = aws.ToString(eps.VpcEndpoints[0].VpcEndpointId)
+	}
+
+	// 7. Discover DNS zones by listing zones matching the infraID pattern.
+	zones, err := r53Client.ListHostedZonesByName(ctx, &route53.ListHostedZonesByNameInput{})
+	if err != nil {
+		return nil, fmt.Errorf("list hosted zones: %w", err)
+	}
+	localSuffix := infraID + ".hypershift.local."
+	privateSuffix := infraID + "."
+	for _, z := range zones.HostedZones {
+		name := aws.ToString(z.Name)
+		if name == localSuffix {
+			out.LocalDNSZoneID = aws.ToString(z.Id)
+		} else if len(name) > len(privateSuffix) && name[:len(privateSuffix)] == privateSuffix && z.Config != nil && z.Config.PrivateZone {
+			out.PrivateDNSZoneID = aws.ToString(z.Id)
+		}
+	}
+
+	return out, nil
+}
+
+// hasNameTagContaining checks if a tag list has a Name tag containing the substring.
+func hasNameTagContaining(tags []ec2types.Tag, substr string) bool {
+	for _, t := range tags {
+		if aws.ToString(t.Key) == "Name" {
+			val := aws.ToString(t.Value)
+			for i := 0; i <= len(val)-len(substr); i++ {
+				if val[i:i+len(substr)] == substr {
+					return true
+				}
+			}
+		}
+	}
+	return false
 }
 
 // deleteHostedZone deletes all non-default record sets from a hosted zone, then
