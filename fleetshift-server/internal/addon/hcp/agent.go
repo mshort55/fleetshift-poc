@@ -5,9 +5,13 @@
 package hcp
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 
+	"k8s.io/client-go/tools/clientcmd"
+
+	"github.com/fleetshift/fleetshift-poc/fleetshift-server/internal/attestation"
 	"github.com/fleetshift/fleetshift-poc/fleetshift-server/internal/domain"
 )
 
@@ -83,4 +87,300 @@ func validateManifests(manifests []domain.Manifest) ([]ClusterSpec, error) {
 		}
 	}
 	return specs, nil
+}
+
+// AgentConfig holds non-secret configuration for the HCP delivery agent.
+type AgentConfig struct {
+	MgmtKubeconfig []byte // admin kubeconfig for the HyperShift management cluster
+	PullSecret     []byte // container image pull secret
+	S3Bucket       string // S3 bucket for OIDC discovery documents
+	AWSRegion      string // default AWS region
+}
+
+// Agent implements [domain.DeliveryAgent] for HCP clusters.
+type Agent struct {
+	config   AgentConfig
+	ec2      EC2API
+	iam      IAMAPI
+	route53  Route53API
+	observer AgentObserver
+	verifier *attestation.Verifier
+	mgmt     mgmtCluster
+}
+
+// AgentOption configures an [Agent].
+type AgentOption func(*Agent)
+
+// WithObserver sets the [AgentObserver] for delivery lifecycle events.
+func WithObserver(o AgentObserver) AgentOption {
+	return func(a *Agent) { a.observer = o }
+}
+
+// WithAttestationVerifier configures optional attestation verification.
+func WithAttestationVerifier(v *attestation.Verifier) AgentOption {
+	return func(a *Agent) { a.verifier = v }
+}
+
+// withMgmtCluster overrides the management cluster client (for testing).
+func withMgmtCluster(m mgmtCluster) AgentOption {
+	return func(a *Agent) { a.mgmt = m }
+}
+
+// NewAgent returns an Agent configured with the given AWS clients and options.
+func NewAgent(config AgentConfig, ec2Client EC2API, iamClient IAMAPI, r53Client Route53API, opts ...AgentOption) *Agent {
+	a := &Agent{
+		config:  config,
+		ec2:     ec2Client,
+		iam:     iamClient,
+		route53: r53Client,
+	}
+	for _, o := range opts {
+		o(a)
+	}
+	return a
+}
+
+func (a *Agent) agentObserver() AgentObserver {
+	if a.observer != nil {
+		return a.observer
+	}
+	return NoOpAgentObserver{}
+}
+
+// Deliver validates manifests synchronously, optionally verifies
+// attestation, then returns [domain.DeliveryStateAccepted] and performs
+// the actual provisioning in a background goroutine.
+func (a *Agent) Deliver(ctx context.Context, _ domain.TargetInfo, _ domain.DeliveryID, manifests []domain.Manifest, _ domain.DeliveryAuth, att *domain.Attestation, signaler *domain.DeliverySignaler) (domain.DeliveryResult, error) {
+	specs, err := validateManifests(manifests)
+	if err != nil {
+		return domain.DeliveryResult{State: domain.DeliveryStateFailed}, err
+	}
+
+	if att != nil && a.verifier != nil {
+		if err := a.verifier.Verify(ctx, att); err != nil {
+			return domain.DeliveryResult{
+				State:   domain.DeliveryStateAuthFailed,
+				Message: fmt.Sprintf("attestation verification failed: %v", err),
+			}, nil
+		}
+	}
+
+	go a.deliverAsync(ctx, specs, signaler)
+
+	return domain.DeliveryResult{State: domain.DeliveryStateAccepted}, nil
+}
+
+// Remove deletes HyperShift resources described by the manifests from
+// the management cluster. Destroy functions for AWS infra/IAM are
+// called if available (added by Task 11).
+func (a *Agent) Remove(_ context.Context, _ domain.TargetInfo, _ domain.DeliveryID, manifests []domain.Manifest, _ domain.DeliveryAuth, _ *domain.Attestation, _ *domain.DeliverySignaler) error {
+	specs, err := validateManifests(manifests)
+	if err != nil {
+		return fmt.Errorf("validate manifests: %w", err)
+	}
+
+	mc, err := a.mgmtClient()
+	if err != nil {
+		return fmt.Errorf("management cluster client: %w", err)
+	}
+
+	for _, spec := range specs {
+		if err := mc.deleteNodePools(spec); err != nil {
+			return fmt.Errorf("delete node pools for %q: %w", spec.Name, err)
+		}
+		if err := mc.deleteHostedCluster(spec.Name); err != nil {
+			return fmt.Errorf("delete hosted cluster %q: %w", spec.Name, err)
+		}
+	}
+	return nil
+}
+
+func (a *Agent) deliverAsync(ctx context.Context, specs []ClusterSpec, signaler *domain.DeliverySignaler) {
+	defer func() {
+		if r := recover(); r != nil {
+			failDelivery(ctx, signaler, "internal error: %v", r)
+		}
+	}()
+
+	var outputs []ClusterOutput
+
+	for _, spec := range specs {
+		out, ok := a.deliverCluster(ctx, spec, signaler)
+		if !ok {
+			return
+		}
+		if out != nil {
+			outputs = append(outputs, *out)
+		}
+	}
+
+	result := domain.DeliveryResult{State: domain.DeliveryStateDelivered}
+	for _, out := range outputs {
+		result.ProvisionedTargets = append(result.ProvisionedTargets, out.Target())
+		result.ProducedSecrets = append(result.ProducedSecrets, out.Secrets()...)
+	}
+	signaler.Done(ctx, result)
+}
+
+func (a *Agent) deliverCluster(ctx context.Context, spec ClusterSpec, signaler *domain.DeliverySignaler) (*ClusterOutput, bool) {
+	ctx, probe := a.agentObserver().ClusterDeliverStarted(ctx, spec.Name)
+	defer probe.End()
+
+	// 1. Create AWS infrastructure.
+	signaler.Emit(ctx, domain.DeliveryEvent{
+		Kind:    domain.DeliveryEventProgress,
+		Message: fmt.Sprintf("Creating AWS infrastructure for %q", spec.Name),
+	})
+	infraSpec := InfraSpec{
+		Name:       spec.Name,
+		InfraID:    spec.InfraID,
+		Region:     a.region(spec),
+		BaseDomain: spec.BaseDomain,
+		Zones:      defaultZones(a.region(spec)),
+	}
+	infra, err := CreateInfra(ctx, a.ec2, a.route53, infraSpec)
+	if err != nil {
+		probe.Error(err)
+		failDelivery(ctx, signaler, "create infrastructure for %q: %v", spec.Name, err)
+		return nil, false
+	}
+	probe.InfraCreated(infra.VPCID)
+
+	// 2. Create IAM roles and OIDC provider.
+	signaler.Emit(ctx, domain.DeliveryEvent{
+		Kind:    domain.DeliveryEventProgress,
+		Message: fmt.Sprintf("Creating IAM roles for %q", spec.Name),
+	})
+	iamParams := IAMParams{
+		InfraID:  spec.InfraID,
+		Region:   a.region(spec),
+		S3Bucket: a.config.S3Bucket,
+	}
+	iamOut, err := CreateIAM(ctx, a.iam, iamParams)
+	if err != nil {
+		probe.Error(err)
+		failDelivery(ctx, signaler, "create IAM for %q: %v", spec.Name, err)
+		return nil, false
+	}
+	probe.IAMCreated(iamOut.OIDCProviderArn)
+
+	// 3. Build HyperShift resources.
+	platformCfg := PlatformConfig{PullSecret: a.config.PullSecret}
+	hc := BuildHostedCluster(spec, *infra, *iamOut, platformCfg)
+	nodePools := BuildNodePools(spec, *infra)
+	secrets := BuildSecrets(spec, platformCfg)
+
+	// 4. Apply to management cluster.
+	signaler.Emit(ctx, domain.DeliveryEvent{
+		Kind:    domain.DeliveryEventProgress,
+		Message: fmt.Sprintf("Applying HyperShift resources to management cluster for %q", spec.Name),
+	})
+	mc, err := a.mgmtClient()
+	if err != nil {
+		probe.Error(err)
+		failDelivery(ctx, signaler, "management cluster client for %q: %v", spec.Name, err)
+		return nil, false
+	}
+	if err := mc.applyResources(ctx, hc, nodePools, secrets); err != nil {
+		probe.Error(err)
+		failDelivery(ctx, signaler, "apply HyperShift resources for %q: %v", spec.Name, err)
+		return nil, false
+	}
+	probe.CRDsApplied()
+
+	// 5. Wait for HostedCluster to become available.
+	signaler.Emit(ctx, domain.DeliveryEvent{
+		Kind:    domain.DeliveryEventProgress,
+		Message: fmt.Sprintf("Waiting for HostedCluster %q to become available", spec.Name),
+	})
+	if err := mc.waitForAvailable(ctx, spec.Name); err != nil {
+		probe.Error(err)
+		failDelivery(ctx, signaler, "wait for HostedCluster %q: %v", spec.Name, err)
+		return nil, false
+	}
+
+	// 6. Read admin kubeconfig from control plane namespace.
+	guestKubeconfig, err := mc.getAdminKubeconfig(ctx, spec.Name)
+	if err != nil {
+		probe.Error(err)
+		failDelivery(ctx, signaler, "get admin kubeconfig for %q: %v", spec.Name, err)
+		return nil, false
+	}
+
+	apiServer, caCert, err := extractClusterConnInfo(guestKubeconfig)
+	if err != nil {
+		probe.Error(err)
+		failDelivery(ctx, signaler, "extract connection info for %q: %v", spec.Name, err)
+		return nil, false
+	}
+	probe.HostedClusterAvailable(apiServer)
+
+	// 7. Bootstrap platform SA on the guest cluster.
+	targetID := domain.TargetID("hcp-" + spec.Name)
+	out := ClusterOutput{
+		TargetID:  targetID,
+		Name:      spec.Name,
+		APIServer: apiServer,
+		CACert:    caCert,
+	}
+
+	signaler.Emit(ctx, domain.DeliveryEvent{
+		Kind:    domain.DeliveryEventProgress,
+		Message: fmt.Sprintf("Bootstrapping platform ServiceAccount on %q", spec.Name),
+	})
+	ref, token, saErr := bootstrapPlatformSA(ctx, guestKubeconfig, targetID)
+	if saErr != nil {
+		signaler.Emit(ctx, domain.DeliveryEvent{
+			Kind:    domain.DeliveryEventWarning,
+			Message: fmt.Sprintf("platform SA bootstrap on %q: %v (attested delivery will not work)", spec.Name, saErr),
+		})
+	} else {
+		out.SATokenRef = ref
+		out.SAToken = token
+	}
+
+	probe.TargetRegistered(string(targetID))
+	return &out, true
+}
+
+func failDelivery(ctx context.Context, signaler *domain.DeliverySignaler, format string, args ...any) {
+	msg := fmt.Sprintf(format, args...)
+	signaler.Emit(ctx, domain.DeliveryEvent{
+		Kind:    domain.DeliveryEventError,
+		Message: msg,
+	})
+	signaler.Done(ctx, domain.DeliveryResult{
+		State:   domain.DeliveryStateFailed,
+		Message: msg,
+	})
+}
+
+func (a *Agent) region(spec ClusterSpec) string {
+	if spec.Region != "" {
+		return spec.Region
+	}
+	return a.config.AWSRegion
+}
+
+func defaultZones(region string) []string {
+	return []string{region + "a"}
+}
+
+// extractClusterConnInfo parses a kubeconfig to extract API server and CA cert.
+func extractClusterConnInfo(kubeconfig []byte) (string, []byte, error) {
+	cfg, err := clientcmd.Load(kubeconfig)
+	if err != nil {
+		return "", nil, fmt.Errorf("parse kubeconfig: %w", err)
+	}
+	for _, cluster := range cfg.Clusters {
+		return cluster.Server, cluster.CertificateAuthorityData, nil
+	}
+	return "", nil, fmt.Errorf("kubeconfig contains no clusters")
+}
+
+func (a *Agent) mgmtClient() (mgmtCluster, error) {
+	if a.mgmt != nil {
+		return a.mgmt, nil
+	}
+	return newKubeMgmtCluster(a.config.MgmtKubeconfig)
 }

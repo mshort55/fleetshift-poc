@@ -1,9 +1,15 @@
 package hcp
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"sync"
 	"testing"
+
+	hyperv1 "github.com/openshift/hypershift/api/hypershift/v1beta1"
+	corev1 "k8s.io/api/core/v1"
 
 	"github.com/fleetshift/fleetshift-poc/fleetshift-server/internal/domain"
 )
@@ -123,5 +129,179 @@ func TestValidateManifests_EmptyNodePools(t *testing.T) {
 	}
 	if !errors.Is(err, domain.ErrInvalidArgument) {
 		t.Errorf("got %v, want ErrInvalidArgument", err)
+	}
+}
+
+// --- Agent-level tests ---
+
+// fakeMgmt implements mgmtCluster for unit tests.
+type fakeMgmt struct {
+	applyErr     error
+	waitErr      error
+	kubeconfigErr error
+	kubeconfig   []byte
+	deleteErr    error
+
+	mu             sync.Mutex
+	applyCalled    bool
+	deleteClusters []string
+}
+
+func (f *fakeMgmt) applyResources(_ context.Context, _ hyperv1.HostedCluster, _ []hyperv1.NodePool, _ []corev1.Secret) error {
+	f.mu.Lock()
+	f.applyCalled = true
+	f.mu.Unlock()
+	return f.applyErr
+}
+
+func (f *fakeMgmt) waitForAvailable(_ context.Context, _ string) error {
+	return f.waitErr
+}
+
+func (f *fakeMgmt) getAdminKubeconfig(_ context.Context, _ string) ([]byte, error) {
+	if f.kubeconfigErr != nil {
+		return nil, f.kubeconfigErr
+	}
+	return f.kubeconfig, nil
+}
+
+func (f *fakeMgmt) deleteNodePools(spec ClusterSpec) error {
+	return f.deleteErr
+}
+
+func (f *fakeMgmt) deleteHostedCluster(name string) error {
+	f.mu.Lock()
+	f.deleteClusters = append(f.deleteClusters, name)
+	f.mu.Unlock()
+	return f.deleteErr
+}
+
+func validSpec() ClusterSpec {
+	return ClusterSpec{
+		Name:    "test-cluster",
+		InfraID: "test-infra",
+		RoleARN: "arn:aws:iam::123456789012:role/test",
+		Region:  "us-east-1",
+		NodePools: []NodePoolSpec{
+			{Name: "default", Replicas: 2},
+		},
+	}
+}
+
+// stubInfraCreator wraps CreateInfra calls so tests with nil AWS
+// clients don't panic in the async goroutine. The fakeMgmt already
+// intercepts K8s calls; we also need the AWS calls to either succeed
+// or fail gracefully. We use a cancelled context so the goroutine
+// exits quickly when we only care about the synchronous return.
+
+func TestDeliver_ReturnsAccepted(t *testing.T) {
+	// Use a cancelled context so deliverAsync exits early without
+	// touching nil AWS clients.
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	agent := NewAgent(
+		AgentConfig{AWSRegion: "us-east-1"},
+		nil, nil, nil,
+		withMgmtCluster(&fakeMgmt{}),
+	)
+
+	manifests := []domain.Manifest{makeManifest(t, validSpec())}
+	result, err := agent.Deliver(ctx, domain.TargetInfo{}, "", manifests, domain.DeliveryAuth{}, nil, &domain.DeliverySignaler{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.State != domain.DeliveryStateAccepted {
+		t.Errorf("state = %v, want Accepted", result.State)
+	}
+}
+
+func TestDeliver_InvalidManifest_ReturnsFailed(t *testing.T) {
+	agent := NewAgent(
+		AgentConfig{AWSRegion: "us-east-1"},
+		nil, nil, nil,
+	)
+
+	// Missing name and roleArn
+	badSpec := ClusterSpec{
+		NodePools: []NodePoolSpec{{Name: "x", Replicas: 1}},
+	}
+	manifests := []domain.Manifest{makeManifest(t, badSpec)}
+	result, err := agent.Deliver(context.Background(), domain.TargetInfo{}, "", manifests, domain.DeliveryAuth{}, nil, &domain.DeliverySignaler{})
+	if err == nil {
+		t.Fatal("expected error for invalid manifest")
+	}
+	if result.State != domain.DeliveryStateFailed {
+		t.Errorf("state = %v, want Failed", result.State)
+	}
+}
+
+func TestDeliver_AttestationSkippedWhenNoVerifier(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	agent := NewAgent(
+		AgentConfig{AWSRegion: "us-east-1"},
+		nil, nil, nil,
+		withMgmtCluster(&fakeMgmt{}),
+	)
+
+	manifests := []domain.Manifest{makeManifest(t, validSpec())}
+	att := &domain.Attestation{} // non-nil attestation but no verifier
+
+	result, err := agent.Deliver(ctx, domain.TargetInfo{}, "", manifests, domain.DeliveryAuth{}, att, &domain.DeliverySignaler{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	// No verifier configured, so attestation is skipped — should still accept.
+	if result.State != domain.DeliveryStateAccepted {
+		t.Errorf("state = %v, want Accepted", result.State)
+	}
+}
+
+func TestRemove_CallsDeleteOnMgmtCluster(t *testing.T) {
+	mgmt := &fakeMgmt{}
+	agent := NewAgent(
+		AgentConfig{AWSRegion: "us-east-1"},
+		nil, nil, nil,
+		withMgmtCluster(mgmt),
+	)
+
+	manifests := []domain.Manifest{makeManifest(t, validSpec())}
+	err := agent.Remove(context.Background(), domain.TargetInfo{}, "", manifests, domain.DeliveryAuth{}, nil, nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(mgmt.deleteClusters) != 1 || mgmt.deleteClusters[0] != "test-cluster" {
+		t.Errorf("deleteClusters = %v, want [test-cluster]", mgmt.deleteClusters)
+	}
+}
+
+func TestRemove_InvalidManifest_ReturnsError(t *testing.T) {
+	agent := NewAgent(
+		AgentConfig{AWSRegion: "us-east-1"},
+		nil, nil, nil,
+	)
+
+	badSpec := ClusterSpec{} // missing name
+	manifests := []domain.Manifest{makeManifest(t, badSpec)}
+	err := agent.Remove(context.Background(), domain.TargetInfo{}, "", manifests, domain.DeliveryAuth{}, nil, nil)
+	if err == nil {
+		t.Fatal("expected error for invalid manifest")
+	}
+}
+
+func TestRemove_DeleteError_Propagated(t *testing.T) {
+	mgmt := &fakeMgmt{deleteErr: fmt.Errorf("k8s unavailable")}
+	agent := NewAgent(
+		AgentConfig{AWSRegion: "us-east-1"},
+		nil, nil, nil,
+		withMgmtCluster(mgmt),
+	)
+
+	manifests := []domain.Manifest{makeManifest(t, validSpec())}
+	err := agent.Remove(context.Background(), domain.TargetInfo{}, "", manifests, domain.DeliveryAuth{}, nil, nil)
+	if err == nil {
+		t.Fatal("expected error from delete failure")
 	}
 }
