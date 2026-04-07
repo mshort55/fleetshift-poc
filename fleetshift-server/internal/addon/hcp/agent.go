@@ -178,7 +178,7 @@ func (a *Agent) Deliver(ctx context.Context, _ domain.TargetInfo, _ domain.Deliv
 // Remove deletes HyperShift resources described by the manifests from
 // the management cluster. Destroy functions for AWS infra/IAM are
 // called if available (added by Task 11).
-func (a *Agent) Remove(_ context.Context, _ domain.TargetInfo, _ domain.DeliveryID, manifests []domain.Manifest, _ domain.DeliveryAuth, _ *domain.Attestation, _ *domain.DeliverySignaler) error {
+func (a *Agent) Remove(ctx context.Context, _ domain.TargetInfo, _ domain.DeliveryID, manifests []domain.Manifest, _ domain.DeliveryAuth, _ *domain.Attestation, _ *domain.DeliverySignaler) error {
 	specs, err := validateManifests(manifests)
 	if err != nil {
 		return fmt.Errorf("validate manifests: %w", err)
@@ -190,11 +190,26 @@ func (a *Agent) Remove(_ context.Context, _ domain.TargetInfo, _ domain.Delivery
 	}
 
 	for _, spec := range specs {
-		if err := mc.deleteNodePools(spec); err != nil {
+		if err := mc.deleteNodePools(ctx, spec); err != nil {
 			return fmt.Errorf("delete node pools for %q: %w", spec.Name, err)
 		}
-		if err := mc.deleteHostedCluster(spec.Name); err != nil {
+		if err := mc.deleteHostedCluster(ctx, spec.Name); err != nil {
 			return fmt.Errorf("delete hosted cluster %q: %w", spec.Name, err)
+		}
+
+		// Clean up AWS IAM resources (roles, instance profile, OIDC provider).
+		infraID := spec.InfraID
+		if infraID == "" {
+			infraID = spec.Name
+		}
+		if err := DestroyIAM(ctx, a.iam, infraID, nil); err != nil {
+			return fmt.Errorf("destroy IAM for %q: %w", spec.Name, err)
+		}
+
+		// Clean up AWS infrastructure (VPC, subnets, NAT gateways, etc.)
+		// via tag-based resource discovery.
+		if err := DestroyInfra(ctx, a.ec2, a.route53, infraID, nil); err != nil {
+			return fmt.Errorf("destroy infrastructure for %q: %w", spec.Name, err)
 		}
 	}
 	return nil

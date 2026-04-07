@@ -165,11 +165,11 @@ func (f *fakeMgmt) getAdminKubeconfig(_ context.Context, _ string) ([]byte, erro
 	return f.kubeconfig, nil
 }
 
-func (f *fakeMgmt) deleteNodePools(spec ClusterSpec) error {
+func (f *fakeMgmt) deleteNodePools(_ context.Context, spec ClusterSpec) error {
 	return f.deleteErr
 }
 
-func (f *fakeMgmt) deleteHostedCluster(name string) error {
+func (f *fakeMgmt) deleteHostedCluster(_ context.Context, name string) error {
 	f.mu.Lock()
 	f.deleteClusters = append(f.deleteClusters, name)
 	f.mu.Unlock()
@@ -263,7 +263,7 @@ func TestRemove_CallsDeleteOnMgmtCluster(t *testing.T) {
 	mgmt := &fakeMgmt{}
 	agent := NewAgent(
 		AgentConfig{AWSRegion: "us-east-1"},
-		nil, nil, nil,
+		&mockEC2{}, &mockIAM{}, &mockRoute53{},
 		withMgmtCluster(mgmt),
 	)
 
@@ -295,7 +295,7 @@ func TestRemove_DeleteError_Propagated(t *testing.T) {
 	mgmt := &fakeMgmt{deleteErr: fmt.Errorf("k8s unavailable")}
 	agent := NewAgent(
 		AgentConfig{AWSRegion: "us-east-1"},
-		nil, nil, nil,
+		&mockEC2{}, &mockIAM{}, &mockRoute53{},
 		withMgmtCluster(mgmt),
 	)
 

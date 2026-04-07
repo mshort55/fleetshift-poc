@@ -253,6 +253,15 @@ func (m *mockEC2) DescribeRouteTables(_ context.Context, _ *ec2.DescribeRouteTab
 		RouteTables: []ec2types.RouteTable{{}},
 	}, nil
 }
+func (m *mockEC2) DescribeInternetGateways(_ context.Context, _ *ec2.DescribeInternetGatewaysInput, _ ...func(*ec2.Options)) (*ec2.DescribeInternetGatewaysOutput, error) {
+	return &ec2.DescribeInternetGatewaysOutput{}, nil
+}
+func (m *mockEC2) DescribeVpcEndpoints(_ context.Context, _ *ec2.DescribeVpcEndpointsInput, _ ...func(*ec2.Options)) (*ec2.DescribeVpcEndpointsOutput, error) {
+	return &ec2.DescribeVpcEndpointsOutput{}, nil
+}
+func (m *mockEC2) DescribeAddresses(_ context.Context, _ *ec2.DescribeAddressesInput, _ ...func(*ec2.Options)) (*ec2.DescribeAddressesOutput, error) {
+	return &ec2.DescribeAddressesOutput{}, nil
+}
 func (m *mockEC2) DisassociateRouteTable(_ context.Context, in *ec2.DisassociateRouteTableInput, _ ...func(*ec2.Options)) (*ec2.DisassociateRouteTableOutput, error) {
 	m.operations = append(m.operations, "DisassociateRouteTable:"+aws.ToString(in.AssociationId))
 	return &ec2.DisassociateRouteTableOutput{}, nil
@@ -626,12 +635,14 @@ func TestDestroyInfra_DNSRecordCleanup(t *testing.T) {
 	}
 }
 
-func TestDestroyInfra_NilOutput(t *testing.T) {
+func TestDestroyInfra_NilOutput_NoResources(t *testing.T) {
+	// When no VPCs are found by tag, discovery returns empty output and
+	// DestroyInfra completes as a no-op.
 	ec2Mock := &mockEC2{}
 	r53Mock := &mockRoute53{}
 
 	err := DestroyInfra(context.Background(), ec2Mock, r53Mock, "test-infra", nil)
-	if err == nil {
-		t.Fatal("expected error for nil output, got nil")
+	if err != nil {
+		t.Fatalf("expected no error when no resources found, got: %v", err)
 	}
 }

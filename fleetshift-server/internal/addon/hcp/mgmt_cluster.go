@@ -10,7 +10,6 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
-	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
@@ -22,8 +21,8 @@ type mgmtCluster interface {
 	applyResources(ctx context.Context, hc hyperv1.HostedCluster, nodePools []hyperv1.NodePool, secrets []corev1.Secret) error
 	waitForAvailable(ctx context.Context, name string) error
 	getAdminKubeconfig(ctx context.Context, name string) ([]byte, error)
-	deleteNodePools(spec ClusterSpec) error
-	deleteHostedCluster(name string) error
+	deleteNodePools(ctx context.Context, spec ClusterSpec) error
+	deleteHostedCluster(ctx context.Context, name string) error
 }
 
 var (
@@ -139,8 +138,7 @@ func (m *kubeMgmtCluster) getAdminKubeconfig(ctx context.Context, name string) (
 	return kc, nil
 }
 
-func (m *kubeMgmtCluster) deleteNodePools(spec ClusterSpec) error {
-	ctx := context.Background()
+func (m *kubeMgmtCluster) deleteNodePools(ctx context.Context, spec ClusterSpec) error {
 	for _, np := range spec.NodePools {
 		poolName := spec.Name + "-" + np.Name
 		err := m.dynamicClient.Resource(nodePoolGVR).Namespace(hostedClusterNamespace).Delete(ctx, poolName, metav1.DeleteOptions{})
@@ -151,8 +149,7 @@ func (m *kubeMgmtCluster) deleteNodePools(spec ClusterSpec) error {
 	return nil
 }
 
-func (m *kubeMgmtCluster) deleteHostedCluster(name string) error {
-	ctx := context.Background()
+func (m *kubeMgmtCluster) deleteHostedCluster(ctx context.Context, name string) error {
 	return m.dynamicClient.Resource(hostedClusterGVR).Namespace(hostedClusterNamespace).Delete(ctx, name, metav1.DeleteOptions{})
 }
 
@@ -188,7 +185,3 @@ func gvrToKind(gvr schema.GroupVersionResource) string {
 
 // Ensure kubeMgmtCluster satisfies the interface at compile time.
 var _ mgmtCluster = (*kubeMgmtCluster)(nil)
-
-// Suppress unused import warnings for runtime package used only
-// indirectly via toUnstructured.
-var _ = runtime.DefaultUnstructuredConverter
