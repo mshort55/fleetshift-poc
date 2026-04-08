@@ -409,6 +409,7 @@ func (s *OrchestrationWorkflowSpec) Run(record Record, deploymentID DeploymentID
 			if errors.Is(err, errAuthPaused) {
 				result = NewPausedAuthResult(deploymentID, dep.Auth)
 				probe.StateChanged(result.State)
+				probe.Error(err)
 				if _, err := RunActivity(record, s.PersistReconciliationResult(), result); err != nil {
 					probe.Error(err)
 					return struct{}{}, fmt.Errorf("persist reconciliation result (paused_auth): %w", err)
