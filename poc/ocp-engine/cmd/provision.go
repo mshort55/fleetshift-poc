@@ -23,10 +23,12 @@ var provisionCmd = &cobra.Command{
 }
 
 var provisionConfigPath string
+var provisionAttempt int
 
 func init() {
 	provisionCmd.Flags().StringVar(&provisionConfigPath, "config", "", "Path to cluster.yaml (required). Parent directory is used as work directory.")
 	provisionCmd.MarkFlagRequired("config")
+	provisionCmd.Flags().IntVar(&provisionAttempt, "attempt", 1, "Attempt number for retry tracking (metadata only, no engine behavior change)")
 	rootCmd.AddCommand(provisionCmd)
 }
 
@@ -105,7 +107,7 @@ func runProvision(cmd *cobra.Command, args []string) error {
 		if wd.IsPhaseComplete(p.Name) {
 			continue
 		}
-		if err := phase.RunPhase(p, phaseFns[p.Name], os.Stdout); err != nil {
+		if err := phase.RunPhase(p, phaseFns[p.Name], os.Stdout, provisionAttempt); err != nil {
 			output.WriteErrorResult(os.Stdout, output.ErrorResult{
 				Category:        "phase_error",
 				Phase:           p.Name,
@@ -113,6 +115,7 @@ func runProvision(cmd *cobra.Command, args []string) error {
 				LogTail:         wd.LogTail(50),
 				HasMetadata:     wd.HasMetadata(),
 				RequiresDestroy: p.RequiresDestroyOnFailure,
+				Attempt:         provisionAttempt,
 			})
 			return err
 		}
@@ -123,6 +126,7 @@ func runProvision(cmd *cobra.Command, args []string) error {
 	output.WriteProvisionResult(os.Stdout, output.ProvisionResult{
 		Status:  "succeeded",
 		InfraID: infraID,
+		Attempt: provisionAttempt,
 	})
 
 	return nil

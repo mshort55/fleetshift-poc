@@ -12,6 +12,7 @@ type PhaseResult struct {
 	LogTail         string `json:"log_tail,omitempty"`
 	ElapsedSeconds  int    `json:"elapsed_seconds"`
 	RequiresDestroy bool   `json:"requires_destroy,omitempty"`
+	Attempt         int    `json:"attempt,omitempty"`
 }
 
 type ErrorResult struct {
@@ -21,6 +22,7 @@ type ErrorResult struct {
 	LogTail         string `json:"log_tail,omitempty"`
 	HasMetadata     bool   `json:"has_metadata,omitempty"`
 	RequiresDestroy bool   `json:"requires_destroy"`
+	Attempt         int    `json:"attempt,omitempty"`
 }
 
 type StatusResult struct {
@@ -38,6 +40,7 @@ type StatusResult struct {
 type ProvisionResult struct {
 	Status  string `json:"status"`
 	InfraID string `json:"infra_id,omitempty"`
+	Attempt int    `json:"attempt,omitempty"`
 }
 
 type DestroyResult struct {
