@@ -37,6 +37,23 @@ func TestScrub_Password(t *testing.T) {
 	}
 }
 
+func TestScrub_PasswordEscapedQuotes(t *testing.T) {
+	// Reproduces the exact format from openshift-install log output
+	input := `time="2026-04-13T22:08:35Z" level=info msg="Login to the console with user: \"kubeadmin\", and password=\"Q4vHU-G4Rky-K9ZJh-hXYKZ\""`
+	got := Scrub(input)
+	if containsSubstr(got, "Q4vHU") {
+		t.Errorf("output still contains password value: %s", got)
+	}
+}
+
+func TestScrub_PasswordUnquoted(t *testing.T) {
+	input := `password=mysecretvalue123`
+	got := Scrub(input)
+	if containsSubstr(got, "mysecretvalue") {
+		t.Errorf("output still contains password: %s", got)
+	}
+}
+
 func TestScrub_NoSecrets(t *testing.T) {
 	input := `level=info msg="Creating VPC in us-east-1"`
 	got := Scrub(input)

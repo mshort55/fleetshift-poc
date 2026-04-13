@@ -9,7 +9,7 @@ var scrubPatterns = []struct {
 	{regexp.MustCompile(`AKIA[A-Z0-9]{16}`), "[REDACTED_AWS_KEY]"},
 	{regexp.MustCompile(`(?i)(secret_?access_?key|secretkey)\s*[=:]\s*"?[A-Za-z0-9/+=]{20,}"?`), "${1}=[REDACTED]"},
 	{regexp.MustCompile(`(?i)(bearer\s+)[A-Za-z0-9\-._~+/]+=*`), "${1}[REDACTED]"},
-	{regexp.MustCompile(`(?i)(password)\s*[=:]\s*"?[^\s"]*"?`), "${1}=[REDACTED]"},
+	{regexp.MustCompile(`(?i)(password\s*[=:]\s*)\S+`), "${1}[REDACTED]"},
 	{regexp.MustCompile(`\{"auths":\{[^}]*\}[^}]*\}`), `{"auths":"[REDACTED]"}`},
 }
 
