@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/ocp-engine/internal/artifacts"
 	"github.com/ocp-engine/internal/config"
 	"github.com/ocp-engine/internal/installer"
 	"github.com/ocp-engine/internal/logpipeline"
@@ -37,6 +38,7 @@ func init() {
 }
 
 func runProvision(cmd *cobra.Command, args []string) error {
+	provisionStart := time.Now()
 	ctx, cancel := context.WithTimeout(context.Background(), provisionTimeout)
 	defer cancel()
 	var recoveryAttempted bool
@@ -158,11 +160,26 @@ func runProvision(cmd *cobra.Command, args []string) error {
 		wd.MarkPhaseComplete(p.Name)
 	}
 
-	infraID, _ := wd.InfraID()
+	// Post-install artifact validation
+	artifactResult, err := artifacts.Validate(wd.Path)
+	if err != nil {
+		output.WriteErrorResult(os.Stdout, output.ErrorResult{
+			Category:        "artifact_error",
+			Message:         fmt.Sprintf("install succeeded but artifact validation failed: %s", err),
+			RequiresDestroy: true,
+			Attempt:         provisionAttempt,
+		})
+		return err
+	}
+
+	elapsed := int(time.Since(provisionStart).Seconds())
 	output.WriteProvisionResult(os.Stdout, output.ProvisionResult{
 		Status:            "succeeded",
-		InfraID:           infraID,
+		InfraID:           artifactResult.InfraID,
+		ClusterID:         artifactResult.ClusterID,
+		HasKubeconfig:     artifactResult.HasKubeconfig,
 		RecoveryAttempted: recoveryAttempted,
+		ElapsedSeconds:    elapsed,
 		Attempt:           provisionAttempt,
 	})
 

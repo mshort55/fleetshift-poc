@@ -53,7 +53,10 @@ type PreflightResult struct {
 type ProvisionResult struct {
 	Status            string `json:"status"`
 	InfraID           string `json:"infra_id,omitempty"`
+	ClusterID         string `json:"cluster_id,omitempty"`
+	HasKubeconfig     bool   `json:"has_kubeconfig,omitempty"`
 	RecoveryAttempted bool   `json:"recovery_attempted,omitempty"`
+	ElapsedSeconds    int    `json:"elapsed_seconds,omitempty"`
 	Attempt           int    `json:"attempt,omitempty"`
 }
 
