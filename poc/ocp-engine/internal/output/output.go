@@ -16,15 +16,16 @@ type PhaseResult struct {
 }
 
 type ErrorResult struct {
-	Category        string `json:"category"`
-	Phase           string `json:"phase,omitempty"`
-	Message         string `json:"message"`
-	FailureReason   string `json:"failure_reason,omitempty"`
-	FailureMessage  string `json:"failure_message,omitempty"`
-	LogTail         string `json:"log_tail,omitempty"`
-	HasMetadata     bool   `json:"has_metadata,omitempty"`
-	RequiresDestroy bool   `json:"requires_destroy"`
-	Attempt         int    `json:"attempt,omitempty"`
+	Category          string `json:"category"`
+	Phase             string `json:"phase,omitempty"`
+	Message           string `json:"message"`
+	FailureReason     string `json:"failure_reason,omitempty"`
+	FailureMessage    string `json:"failure_message,omitempty"`
+	LogTail           string `json:"log_tail,omitempty"`
+	HasMetadata       bool   `json:"has_metadata,omitempty"`
+	RequiresDestroy   bool   `json:"requires_destroy"`
+	RecoveryAttempted bool   `json:"recovery_attempted,omitempty"`
+	Attempt           int    `json:"attempt,omitempty"`
 }
 
 type StatusResult struct {
@@ -50,9 +51,10 @@ type PreflightResult struct {
 }
 
 type ProvisionResult struct {
-	Status  string `json:"status"`
-	InfraID string `json:"infra_id,omitempty"`
-	Attempt int    `json:"attempt,omitempty"`
+	Status            string `json:"status"`
+	InfraID           string `json:"infra_id,omitempty"`
+	RecoveryAttempted bool   `json:"recovery_attempted,omitempty"`
+	Attempt           int    `json:"attempt,omitempty"`
 }
 
 type DestroyResult struct {

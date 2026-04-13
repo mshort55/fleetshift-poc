@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -36,6 +37,11 @@ func init() {
 }
 
 func runProvision(cmd *cobra.Command, args []string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), provisionTimeout)
+	defer cancel()
+	var recoveryAttempted bool
+	var pipeline *logpipeline.Pipeline
+
 	cfg, err := config.LoadConfig(provisionConfigPath)
 	if err != nil {
 		return output.WriteError(os.Stdout, "config_error", err, false)
@@ -99,10 +105,10 @@ func runProvision(cmd *cobra.Command, args []string) error {
 			return inst.CreateIgnitionConfigs(logPath)
 		},
 		"cluster": func() error {
-			pipeline := logpipeline.NewPipeline(logPath, os.Stdout, os.Stderr, provisionAttempt)
+			pipeline = logpipeline.NewPipeline(logPath, os.Stdout, os.Stderr, provisionAttempt)
 			pipeline.Start()
 			defer pipeline.Stop()
-			return inst.CreateClusterQuiet(logPath)
+			return inst.CreateClusterWithContext(ctx, logPath)
 		},
 	}
 
@@ -118,14 +124,28 @@ func runProvision(cmd *cobra.Command, args []string) error {
 			continue
 		}
 		if err := phase.RunPhase(p, fn, os.Stdout, provisionAttempt); err != nil {
+			// For cluster phase: attempt bootstrap-aware recovery
+			if p.Name == "cluster" && pipeline != nil && pipeline.BootstrapComplete() {
+				fmt.Fprintln(os.Stderr, "Bootstrap complete — attempting recovery with wait-for install-complete")
+				recoveryErr := inst.WaitForInstallComplete(ctx, logPath)
+				if recoveryErr == nil {
+					// Recovery succeeded — mark phase complete and continue
+					wd.MarkPhaseComplete(p.Name)
+					recoveryAttempted = true
+					continue
+				}
+				fmt.Fprintf(os.Stderr, "Recovery failed: %v\n", recoveryErr)
+			}
+
 			errResult := output.ErrorResult{
-				Category:        "phase_error",
-				Phase:           p.Name,
-				Message:         err.Error(),
-				LogTail:         wd.LogTail(50),
-				HasMetadata:     wd.HasMetadata(),
-				RequiresDestroy: p.RequiresDestroyOnFailure,
-				Attempt:         provisionAttempt,
+				Category:          "phase_error",
+				Phase:             p.Name,
+				Message:           err.Error(),
+				LogTail:           wd.LogTail(50),
+				HasMetadata:       wd.HasMetadata(),
+				RequiresDestroy:   p.RequiresDestroyOnFailure,
+				RecoveryAttempted: pipeline != nil && pipeline.BootstrapComplete(),
+				Attempt:           provisionAttempt,
 			}
 			// For cluster phase, parse failure reason from logs
 			if p.Name == "cluster" {
@@ -140,9 +160,10 @@ func runProvision(cmd *cobra.Command, args []string) error {
 
 	infraID, _ := wd.InfraID()
 	output.WriteProvisionResult(os.Stdout, output.ProvisionResult{
-		Status:  "succeeded",
-		InfraID: infraID,
-		Attempt: provisionAttempt,
+		Status:            "succeeded",
+		InfraID:           infraID,
+		RecoveryAttempted: recoveryAttempted,
+		Attempt:           provisionAttempt,
 	})
 
 	return nil
