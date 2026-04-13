@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/ocp-engine/internal/config"
 	"github.com/ocp-engine/internal/installer"
@@ -24,11 +25,13 @@ var provisionCmd = &cobra.Command{
 
 var provisionConfigPath string
 var provisionAttempt int
+var provisionTimeout time.Duration
 
 func init() {
 	provisionCmd.Flags().StringVar(&provisionConfigPath, "config", "", "Path to cluster.yaml (required). Parent directory is used as work directory.")
 	provisionCmd.MarkFlagRequired("config")
 	provisionCmd.Flags().IntVar(&provisionAttempt, "attempt", 1, "Attempt number for retry tracking (metadata only, no engine behavior change)")
+	provisionCmd.Flags().DurationVar(&provisionTimeout, "timeout", 3*time.Hour, "Total timeout for all provision phases")
 	rootCmd.AddCommand(provisionCmd)
 }
 
