@@ -58,6 +58,12 @@ func (i *Installer) CreateCluster(logPath string) error {
 	return RunCommand(i.InstallerPath, i.buildInstallerArgs("create", "cluster"), i.buildEnv(), logPath)
 }
 
+// CreateClusterQuiet runs create cluster writing only to the log file.
+// Use when a log pipeline is handling stderr output.
+func (i *Installer) CreateClusterQuiet(logPath string) error {
+	return RunCommandQuiet(i.InstallerPath, i.buildInstallerArgs("create", "cluster"), i.buildEnv(), logPath)
+}
+
 func (i *Installer) DestroyCluster(logPath string) error {
 	return RunCommand(i.InstallerPath, i.buildInstallerArgs("destroy", "cluster"), i.buildEnv(), logPath)
 }
@@ -73,6 +79,28 @@ func RunCommand(binary string, args []string, env []string, logPath string) erro
 	// Stream output to both the log file and stderr so the user sees progress
 	cmd.Stdout = io.MultiWriter(logFile, os.Stderr)
 	cmd.Stderr = io.MultiWriter(logFile, os.Stderr)
+
+	if env != nil {
+		cmd.Env = env
+	}
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("command %s failed: %w", binary, err)
+	}
+	return nil
+}
+
+// RunCommandQuiet runs a command writing output only to the log file, not stderr.
+// Use this when a log pipeline is handling stderr output separately.
+func RunCommandQuiet(binary string, args []string, env []string, logPath string) error {
+	cmd := exec.Command(binary, args...)
+	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+	if err != nil {
+		return fmt.Errorf("opening log file: %w", err)
+	}
+	defer logFile.Close()
+
+	cmd.Stdout = logFile
+	cmd.Stderr = logFile
 
 	if env != nil {
 		cmd.Env = env

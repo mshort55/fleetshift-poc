@@ -7,6 +7,7 @@ import (
 
 	"github.com/ocp-engine/internal/config"
 	"github.com/ocp-engine/internal/installer"
+	"github.com/ocp-engine/internal/logpipeline"
 	"github.com/ocp-engine/internal/output"
 	"github.com/ocp-engine/internal/phase"
 	"github.com/ocp-engine/internal/preflight"
@@ -95,7 +96,10 @@ func runProvision(cmd *cobra.Command, args []string) error {
 			return inst.CreateIgnitionConfigs(logPath)
 		},
 		"cluster": func() error {
-			return inst.CreateCluster(logPath)
+			pipeline := logpipeline.NewPipeline(logPath, os.Stdout, os.Stderr, provisionAttempt)
+			pipeline.Start()
+			defer pipeline.Stop()
+			return inst.CreateClusterQuiet(logPath)
 		},
 	}
 
