@@ -2,13 +2,14 @@ module github.com/ocp-engine
 
 go 1.25.0
 
+replace github.com/fleetshift/fleetshift-poc/gen => ../gen
+
 require (
 	github.com/aws/aws-sdk-go-v2/config v1.32.14
 	github.com/aws/aws-sdk-go-v2/credentials v1.19.14
 	github.com/aws/aws-sdk-go-v2/service/sts v1.41.10
 	github.com/spf13/cobra v1.10.2
 	google.golang.org/grpc v1.80.0
-	google.golang.org/protobuf v1.36.11
 	gopkg.in/yaml.v3 v3.0.1
 )
 
@@ -30,4 +31,5 @@ require (
 	golang.org/x/sys v0.40.0 // indirect
 	golang.org/x/text v0.33.0 // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20260120221211-b8f7ae30c516 // indirect
+	google.golang.org/protobuf v1.36.11 // indirect
 )
