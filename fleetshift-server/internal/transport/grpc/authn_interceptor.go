@@ -16,13 +16,31 @@ import (
 	"github.com/fleetshift/fleetshift-poc/fleetshift-server/internal/domain"
 )
 
+// InterceptorOption configures optional behaviour of [AuthnInterceptor].
+type InterceptorOption func(*AuthnInterceptor)
+
+// WithSkipMethods returns an option that exempts the listed gRPC methods
+// from OIDC validation. Skipped methods are expected to handle their own
+// authentication (e.g. OCP callback JWT verification).
+func WithSkipMethods(methods ...string) InterceptorOption {
+	return func(a *AuthnInterceptor) {
+		if a.skipMethods == nil {
+			a.skipMethods = make(map[string]bool, len(methods))
+		}
+		for _, m := range methods {
+			a.skipMethods[m] = true
+		}
+	}
+}
+
 // AuthnInterceptor extracts credentials from incoming requests, validates
 // them against configured authentication methods, and attaches an
 // [application.AuthorizationContext] to the request context.
 type AuthnInterceptor struct {
-	methods  *application.AuthMethodService
-	verifier domain.OIDCTokenVerifier
-	observer domain.AuthnObserver
+	methods     *application.AuthMethodService
+	verifier    domain.OIDCTokenVerifier
+	observer    domain.AuthnObserver
+	skipMethods map[string]bool
 
 	cacheMu      sync.RWMutex
 	cachedAt     time.Time
@@ -31,14 +49,19 @@ type AuthnInterceptor struct {
 }
 
 // NewAuthnInterceptor creates an interceptor that authenticates requests
-// using the given services.
-func NewAuthnInterceptor(methods *application.AuthMethodService, verifier domain.OIDCTokenVerifier, observer domain.AuthnObserver) *AuthnInterceptor {
-	return &AuthnInterceptor{
+// using the given services. Optional [InterceptorOption] values configure
+// additional behaviour such as method-level skip lists.
+func NewAuthnInterceptor(methods *application.AuthMethodService, verifier domain.OIDCTokenVerifier, observer domain.AuthnObserver, opts ...InterceptorOption) *AuthnInterceptor {
+	a := &AuthnInterceptor{
 		methods:  methods,
 		verifier: verifier,
 		observer: observer,
 		cacheTTL: 30 * time.Second,
 	}
+	for _, opt := range opts {
+		opt(a)
+	}
+	return a
 }
 
 // Unary returns a unary server interceptor.
@@ -74,6 +97,10 @@ func (a *AuthnInterceptor) Stream() grpclib.StreamServerInterceptor {
 }
 
 func (a *AuthnInterceptor) authenticate(ctx context.Context, fullMethod string) (context.Context, error) {
+	if a.skipMethods != nil && a.skipMethods[fullMethod] {
+		return ctx, nil
+	}
+
 	reqInfo := domain.AuthnRequestInfo{Method: fullMethod}
 	if p, ok := peer.FromContext(ctx); ok {
 		reqInfo.PeerAddr = p.Addr.String()
