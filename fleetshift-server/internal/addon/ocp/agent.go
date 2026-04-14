@@ -12,6 +12,8 @@ import (
 	"sync"
 	"time"
 
+	"google.golang.org/grpc"
+
 	ocpv1 "github.com/fleetshift/fleetshift-poc/gen/ocp/v1"
 	"github.com/fleetshift/fleetshift-poc/fleetshift-server/internal/domain"
 )
@@ -29,6 +31,7 @@ type Agent struct {
 	tokenSigner      *CallbackTokenSigner
 	provisionTimeout time.Duration
 	provisions       sync.Map // clusterID → *provisionState
+	grpcServer       *grpc.Server
 }
 
 // AgentOption configures an [Agent].
