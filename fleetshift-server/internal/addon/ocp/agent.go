@@ -26,6 +26,7 @@ type Agent struct {
 	credentials  CredentialProvider
 	oidcConfig   OIDCProviderConfig
 	observer     AgentObserver
+	tokenSigner  *CallbackTokenSigner
 	provisions   sync.Map // clusterID → *provisionState
 }
 
@@ -65,6 +66,12 @@ func WithObserver(o AgentObserver) AgentOption {
 	return func(a *Agent) { a.observer = o }
 }
 
+// WithTokenSigner sets the [CallbackTokenSigner] used for minting and
+// verifying callback JWTs.
+func WithTokenSigner(s *CallbackTokenSigner) AgentOption {
+	return func(a *Agent) { a.tokenSigner = s }
+}
+
 // NewAgent returns an Agent configured with the given options.
 // Default engineBinary is "ocp-engine"; default observer is
 // [NoOpAgentObserver].
@@ -84,7 +91,10 @@ func NewAgent(opts ...AgentOption) *Agent {
 // provisions map with the agent, so callbacks signal the correct
 // in-flight delivery.
 func (a *Agent) CallbackServer() fleetshiftv1.OCPCallbackServiceServer {
-	return &callbackServer{provisions: &a.provisions}
+	return &callbackServer{
+		provisions:    &a.provisions,
+		tokenVerifier: a.tokenSigner,
+	}
 }
 
 // Deliver implements [domain.DeliveryAgent.Deliver]. It parses the
@@ -236,8 +246,15 @@ func (a *Agent) deliverAsync(
 	defer a.provisions.Delete(clusterID)
 	defer os.RemoveAll(workDir)
 
-	// Generate callback token (placeholder — proper JWT is future work)
-	token := generateCallbackToken(clusterID)
+	// Generate callback JWT
+	token, err := a.tokenSigner.Sign(clusterID, provisionTimeout())
+	if err != nil {
+		signaler.Done(ctx, domain.DeliveryResult{
+			State:   domain.DeliveryStateFailed,
+			Message: fmt.Sprintf("generate callback token: %v", err),
+		})
+		return
+	}
 
 	timeout := "2h"
 
@@ -248,9 +265,9 @@ func (a *Agent) deliverAsync(
 		"--timeout", timeout,
 		"--callback-url", a.callbackAddr,
 		"--cluster-id", clusterID,
-		"--callback-token", token,
 	)
 	cmd.Env = append(os.Environ(), awsCreds.Env()...)
+	cmd.Env = append(cmd.Env, "OCP_CALLBACK_TOKEN="+token)
 	cmd.Stdout = os.Stderr
 	cmd.Stderr = os.Stderr
 
@@ -501,12 +518,6 @@ func (a *Agent) Remove(
 	}
 
 	return nil
-}
-
-// generateCallbackToken creates a callback authentication token.
-// This is a placeholder; proper JWT implementation is future work.
-func generateCallbackToken(clusterID string) string {
-	return fmt.Sprintf("ocp-callback-%s", clusterID)
 }
 
 // provisionTimeout returns the default provision timeout as a duration.
