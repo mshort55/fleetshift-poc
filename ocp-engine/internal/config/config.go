@@ -124,12 +124,14 @@ func expandPaths(engine *EngineConfig) {
 	engine.Credentials.CredentialsFile = expandTilde(engine.Credentials.CredentialsFile)
 }
 
-// hasCredentials checks if at least one credential mode is configured
+// hasCredentials checks if at least one credential mode is configured,
+// either in the config file or via AWS environment variables.
 func hasCredentials(c *AWSCredentials) bool {
 	return c.AccessKeyID != "" ||
 		c.CredentialsFile != "" ||
 		c.Profile != "" ||
-		c.RoleARN != ""
+		c.RoleARN != "" ||
+		os.Getenv("AWS_ACCESS_KEY_ID") != ""
 }
 
 // GenerateInstallConfig produces a valid install-config.yaml by inlining

@@ -132,7 +132,20 @@ func runServe(ctx context.Context, f *serveFlags) error {
 		return fmt.Errorf("create callback token signer: %w", err)
 	}
 
-	ocpCredProvider := &ocpaddon.PassthroughCredentialProvider{}
+	var ocpPullSecret []byte
+	if ps := os.Getenv("OCP_PULL_SECRET_FILE"); ps != "" {
+		var err error
+		ocpPullSecret, err = os.ReadFile(ps)
+		if err != nil {
+			return fmt.Errorf("read pull secret file %s: %w", ps, err)
+		}
+	}
+	ocpCredProvider := &ocpaddon.PassthroughCredentialProvider{
+		AWSAccessKeyID:     os.Getenv("AWS_ACCESS_KEY_ID"),
+		AWSSecretAccessKey: os.Getenv("AWS_SECRET_ACCESS_KEY"),
+		AWSSessionToken:    os.Getenv("AWS_SESSION_TOKEN"),
+		PullSecret:         ocpPullSecret,
+	}
 	ocpAgent := ocpaddon.NewAgent(
 		ocpaddon.WithCallbackAddr(f.grpcAddr),
 		ocpaddon.WithVault(vault),
@@ -192,9 +205,13 @@ func runServe(ctx context.Context, f *serveFlags) error {
 	}
 
 	if err := targetSvc.Register(ctx, domain.TargetInfo{
-		ID:                    "ocp-aws",
-		Type:                  ocpaddon.TargetType,
-		Name:                  "OCP on AWS",
+		ID:   "ocp-aws",
+		Type: ocpaddon.TargetType,
+		Name: "OCP on AWS",
+		Properties: map[string]string{
+			"region":   os.Getenv("OCP_AWS_REGION"),
+			"role_arn": os.Getenv("OCP_AWS_ROLE_ARN"),
+		},
 		AcceptedResourceTypes: []domain.ResourceType{ocpaddon.ClusterResourceType},
 	}); err != nil && !errors.Is(err, domain.ErrAlreadyExists) {
 		return fmt.Errorf("seed ocp-aws target: %w", err)
