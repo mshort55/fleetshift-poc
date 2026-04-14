@@ -51,8 +51,7 @@ type serveFlags struct {
 	logLevel         string
 	logFormat        string
 	logLevelOverride string
-	oidcCAFile       string
-	ocpEngineBinary  string
+	oidcCAFile string
 }
 
 func newServeCmd() *cobra.Command {
@@ -71,7 +70,6 @@ func newServeCmd() *cobra.Command {
 	cmd.Flags().StringVar(&f.logFormat, "log-format", "text", "log format (text, json)")
 	cmd.Flags().StringVar(&f.logLevelOverride, "log-level-override", "", "per-component log level overrides (e.g. deployment=debug,authn=debug)")
 	cmd.Flags().StringVar(&f.oidcCAFile, "oidc-ca-file", "", "PEM CA certificate for OIDC issuers (for kind clusters trusting self-signed or local CAs)")
-	cmd.Flags().StringVar(&f.ocpEngineBinary, "ocp-engine-binary", "ocp-engine", "Path to the ocp-engine binary")
 	return cmd
 }
 
@@ -136,7 +134,6 @@ func runServe(ctx context.Context, f *serveFlags) error {
 
 	ocpCredProvider := &ocpaddon.PassthroughCredentialProvider{}
 	ocpAgent := ocpaddon.NewAgent(
-		ocpaddon.WithEngineBinary(f.ocpEngineBinary),
 		ocpaddon.WithCallbackAddr(f.grpcAddr),
 		ocpaddon.WithVault(vault),
 		ocpaddon.WithCredentialProvider(ocpCredProvider),

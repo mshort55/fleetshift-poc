@@ -73,11 +73,15 @@ func WithTokenSigner(s *CallbackTokenSigner) AgentOption {
 }
 
 // NewAgent returns an Agent configured with the given options.
-// Default engineBinary is "ocp-engine"; default observer is
-// [NoOpAgentObserver].
+// Default engineBinary is read from OCP_ENGINE_BINARY env var,
+// falling back to "ocp-engine" (PATH lookup).
 func NewAgent(opts ...AgentOption) *Agent {
+	engineBinary := os.Getenv("OCP_ENGINE_BINARY")
+	if engineBinary == "" {
+		engineBinary = "ocp-engine"
+	}
 	a := &Agent{
-		engineBinary: "ocp-engine",
+		engineBinary: engineBinary,
 		observer:     NoOpAgentObserver{},
 	}
 	for _, o := range opts {
