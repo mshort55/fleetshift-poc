@@ -205,13 +205,9 @@ func runServe(ctx context.Context, f *serveFlags) error {
 	}
 
 	if err := targetSvc.Register(ctx, domain.TargetInfo{
-		ID:   "ocp-aws",
-		Type: ocpaddon.TargetType,
-		Name: "OCP on AWS",
-		Properties: map[string]string{
-			"region":   os.Getenv("OCP_AWS_REGION"),
-			"role_arn": os.Getenv("OCP_AWS_ROLE_ARN"),
-		},
+		ID:                    "ocp-aws",
+		Type:                  ocpaddon.TargetType,
+		Name:                  "OCP on AWS",
 		AcceptedResourceTypes: []domain.ResourceType{ocpaddon.ClusterResourceType},
 	}); err != nil && !errors.Is(err, domain.ErrAlreadyExists) {
 		return fmt.Errorf("seed ocp-aws target: %w", err)

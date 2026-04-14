@@ -905,7 +905,238 @@ git commit -m "refactor: remove callback service from main gRPC server, use addo
 
 ---
 
-### Task 7: Clean up and verify
+### Task 7: Move region/role_arn from target properties to ClusterSpec
+
+**Files:**
+- Modify: `fleetshift-server/internal/addon/ocp/cluster_spec.go`
+- Modify: `fleetshift-server/internal/addon/ocp/cluster_spec_test.go`
+- Modify: `fleetshift-server/internal/addon/ocp/agent.go`
+- Modify: `fleetshift-server/internal/addon/ocp/cluster_output.go`
+- Modify: `fleetshift-server/internal/addon/ocp/cluster_output_test.go`
+- Modify: `fleetshift-server/internal/cli/serve.go`
+
+- [ ] **Step 1: Write failing test — ClusterSpec requires region and role_arn**
+
+Add to `cluster_spec_test.go`:
+
+```go
+func TestParseClusterSpec_RequiresRegionAndRoleARN(t *testing.T) {
+	tests := []struct {
+		name string
+		raw  string
+	}{
+		{
+			name: "missing region",
+			raw:  `{"name":"c","base_domain":"d","role_arn":"arn:aws:iam::123:role/r"}`,
+		},
+		{
+			name: "missing role_arn",
+			raw:  `{"name":"c","base_domain":"d","region":"us-east-1"}`,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			manifests := []domain.Manifest{{
+				ResourceType: ClusterResourceType,
+				Raw:          json.RawMessage(tt.raw),
+			}}
+			_, err := ParseClusterSpec(manifests)
+			if err == nil {
+				t.Fatal("expected error, got nil")
+			}
+		})
+	}
+}
+
+func TestParseClusterSpec_WithRegionAndRoleARN(t *testing.T) {
+	manifests := []domain.Manifest{{
+		ResourceType: ClusterResourceType,
+		Raw: json.RawMessage(`{
+			"name": "test-cluster",
+			"base_domain": "example.com",
+			"region": "us-west-2",
+			"role_arn": "arn:aws:iam::123456789012:role/provision"
+		}`),
+	}}
+
+	spec, err := ParseClusterSpec(manifests)
+	if err != nil {
+		t.Fatalf("ParseClusterSpec failed: %v", err)
+	}
+	if spec.Region != "us-west-2" {
+		t.Errorf("Region = %q, want us-west-2", spec.Region)
+	}
+	if spec.RoleARN != "arn:aws:iam::123456789012:role/provision" {
+		t.Errorf("RoleARN = %q, want arn:...", spec.RoleARN)
+	}
+}
+```
+
+- [ ] **Step 2: Run test to verify it fails**
+
+```bash
+cd fleetshift-server && go test ./internal/addon/ocp/ -run TestParseClusterSpec_Requires -v -count=1
+```
+
+Expected: FAIL — `ClusterSpec` has no `Region` or `RoleARN` fields, and `ParseClusterSpec` doesn't validate them.
+
+- [ ] **Step 3: Add Region and RoleARN to ClusterSpec**
+
+In `cluster_spec.go`, update the struct:
+
+```go
+type ClusterSpec struct {
+	Name          string         `json:"name"`
+	BaseDomain    string         `json:"base_domain"`
+	Region        string         `json:"region"`
+	RoleARN       string         `json:"role_arn"`
+	ReleaseImage  string         `json:"release_image,omitempty"`
+	InstallConfig map[string]any `json:"install_config,omitempty"`
+}
+```
+
+Add validation in `ParseClusterSpec()` after the existing `BaseDomain` check:
+
+```go
+if spec.Region == "" {
+	return nil, fmt.Errorf("cluster spec missing required field: region")
+}
+if spec.RoleARN == "" {
+	return nil, fmt.Errorf("cluster spec missing required field: role_arn")
+}
+```
+
+- [ ] **Step 4: Fix existing tests that don't provide region/role_arn**
+
+Update `TestParseClusterSpec` manifest JSON to include region and role_arn:
+
+```json
+{
+    "name": "test-cluster",
+    "base_domain": "example.com",
+    "region": "us-east-1",
+    "role_arn": "arn:aws:iam::123456789012:role/test",
+    "release_image": "quay.io/openshift-release-dev/ocp-release:4.14.0-x86_64"
+}
+```
+
+Update `TestParseClusterSpec_Errors` — the "missing name" and "missing base_domain" cases need region/role_arn added so they fail for the right reason:
+
+```go
+{
+    name: "missing name",
+    manifests: []domain.Manifest{
+        {ResourceType: ClusterResourceType, Raw: json.RawMessage(`{"base_domain":"example.com","region":"us-east-1","role_arn":"arn:aws:iam::123:role/r"}`)},
+    },
+},
+{
+    name: "missing base_domain",
+    manifests: []domain.Manifest{
+        {ResourceType: ClusterResourceType, Raw: json.RawMessage(`{"name":"test-cluster","region":"us-east-1","role_arn":"arn:aws:iam::123:role/r"}`)},
+    },
+},
+```
+
+Update `TestBuildClusterYAML`, `TestBuildClusterYAML_WithInstallConfig`, `TestBuildClusterYAML_BaseKeysCannotBeOverridden`, and `TestBuildClusterYAML_PlatformDeepMerge` — all `ClusterSpec` literals need `Region` and `RoleARN` fields added (the values don't affect BuildClusterYAML behavior since region is passed as a separate parameter, but the struct now requires them).
+
+- [ ] **Step 5: Update agent.go Deliver() to read from spec**
+
+Replace:
+
+```go
+// 3. Read region and role_arn from target.Properties
+region := target.Properties["region"]
+roleARN := target.Properties["role_arn"]
+if region == "" {
+    return domain.DeliveryResult{
+        State:   domain.DeliveryStateFailed,
+        Message: "target property 'region' is required",
+    }, nil
+}
+if roleARN == "" {
+    return domain.DeliveryResult{
+        State:   domain.DeliveryStateFailed,
+        Message: "target property 'role_arn' is required",
+    }, nil
+}
+```
+
+With:
+
+```go
+// 3. Read region and role_arn from cluster spec
+region := spec.Region
+roleARN := spec.RoleARN
+```
+
+The validation already happened in `ParseClusterSpec()` at step 1 of `Deliver()`.
+
+- [ ] **Step 6: Add role_arn to ClusterOutput provisioned target properties**
+
+In `cluster_output.go`, in the `Target()` method, add after the existing region property:
+
+```go
+if o.RoleARN != "" {
+    props["role_arn"] = o.RoleARN
+}
+```
+
+Add `RoleARN string` field to the `ClusterOutput` struct.
+
+In `agent.go` `handleCompletion()`, set `RoleARN` on the output:
+
+```go
+output := &ClusterOutput{
+    // ... existing fields ...
+    RoleARN:       spec.RoleARN,  // note: spec needs to be passed to handleCompletion
+}
+```
+
+This requires threading `spec.RoleARN` through to `handleCompletion`. The simplest way: pass the whole `spec` or just `roleARN` as an additional parameter. Pass `roleARN`:
+
+Update `handleCompletion` signature to accept `roleARN string` and set it on the output.
+
+Update the call in `deliverAsync`:
+
+```go
+output, err := a.handleCompletion(ctx, clusterID, completion, sshPrivateKey, auth, roleARN)
+```
+
+Where `roleARN` is captured from `spec.RoleARN` at the top of `deliverAsync` (passed through from `Deliver`).
+
+- [ ] **Step 7: Remove Properties from ocp-aws target seed in serve.go**
+
+The target seed should already have no Properties (we edited this earlier). Verify:
+
+```go
+if err := targetSvc.Register(ctx, domain.TargetInfo{
+    ID:                    "ocp-aws",
+    Type:                  ocpaddon.TargetType,
+    Name:                  "OCP on AWS",
+    AcceptedResourceTypes: []domain.ResourceType{ocpaddon.ClusterResourceType},
+}); err != nil && !errors.Is(err, domain.ErrAlreadyExists) {
+    return fmt.Errorf("seed ocp-aws target: %w", err)
+}
+```
+
+- [ ] **Step 8: Run all tests**
+
+```bash
+cd fleetshift-server && go test ./internal/addon/ocp/ -v -count=1
+```
+
+Expected: All tests pass.
+
+- [ ] **Step 9: Commit**
+
+```bash
+git add fleetshift-server/internal/addon/ocp/ fleetshift-server/internal/cli/serve.go
+git commit -m "refactor: move region/role_arn from target properties to ClusterSpec"
+```
+
+---
+
+### Task 8: Final verification
 
 **Files:**
 - Verify: all deleted files are gone

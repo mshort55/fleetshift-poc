@@ -167,3 +167,76 @@ When the addon moves to its own binary:
 - It implements `DeliveryAgent` (`Deliver`/`Remove`)
 - It has `Start(addr)` and `Shutdown(ctx)` for lifecycle
 - Nothing else. No callback proto, no auth skip list, no service registration.
+
+---
+
+## Design: Move region/role_arn from Target Properties to Cluster Spec
+
+### Problem
+
+The `ocp-aws` target is seeded in serve.go with `region` and `role_arn` read from environment variables at server startup. This couples target registration to environment configuration and locks a target into a single region/role. It also means the properties are empty strings if the env vars aren't set, causing silent failures at delivery time.
+
+### Design
+
+Move `region` and `role_arn` into the `ClusterSpec` — the per-deployment manifest that the user submits. The target represents "I can provision OCP clusters on AWS" without encoding where. Each deployment specifies its own region and role.
+
+**ClusterSpec gains two fields:**
+
+```go
+type ClusterSpec struct {
+    Name          string         `json:"name"`
+    BaseDomain    string         `json:"base_domain"`
+    Region        string         `json:"region"`
+    RoleARN       string         `json:"role_arn"`
+    ReleaseImage  string         `json:"release_image,omitempty"`
+    InstallConfig map[string]any `json:"install_config,omitempty"`
+}
+```
+
+**Validation moves from target property checks to ClusterSpec validation** in `ParseClusterSpec()`:
+
+```go
+if spec.Region == "" {
+    return nil, fmt.Errorf("cluster spec missing required field: region")
+}
+if spec.RoleARN == "" {
+    return nil, fmt.Errorf("cluster spec missing required field: role_arn")
+}
+```
+
+**Deliver() reads from spec instead of target:**
+
+```go
+// Before
+region := target.Properties["region"]
+roleARN := target.Properties["role_arn"]
+
+// After
+region := spec.Region
+roleARN := spec.RoleARN
+```
+
+**Remove() still reads from target properties** — but these are the *provisioned* target's properties (set by `ClusterOutput.Target()` when the cluster was created), not the seed target's properties. `ClusterOutput` already stores `region` in the provisioned target's properties (`cluster_output.go:63`), and `role_arn` should be added to it so Remove can retrieve it.
+
+**ocp-aws target seed drops Properties entirely:**
+
+```go
+targetSvc.Register(ctx, domain.TargetInfo{
+    ID:                    "ocp-aws",
+    Type:                  ocpaddon.TargetType,
+    Name:                  "OCP on AWS",
+    AcceptedResourceTypes: []domain.ResourceType{ocpaddon.ClusterResourceType},
+})
+```
+
+**Example deployment manifest after this change:**
+
+```yaml
+name: my-cluster
+base_domain: example.com
+region: us-east-1
+role_arn: arn:aws:iam::123456789012:role/fleetshift-provision
+install_config:
+  controlPlane:
+    replicas: 3
+```
