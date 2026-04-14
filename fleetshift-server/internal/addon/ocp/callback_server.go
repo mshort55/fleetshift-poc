@@ -3,30 +3,46 @@ package ocp
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync"
+
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/metadata"
+	"google.golang.org/grpc/status"
 
 	fleetshiftv1 "github.com/fleetshift/fleetshift-poc/fleetshift-server/gen/fleetshift/v1"
 )
 
-// provisionState holds the in-memory state for a single in-flight provision.
-// The agent creates it in Deliver() and stores it in a sync.Map. The callback
-// server looks it up by cluster ID and signals completion/failure.
 type provisionState struct {
 	done       chan struct{}
 	completion *fleetshiftv1.OCPCompletionRequest
 	failure    *fleetshiftv1.OCPFailureRequest
 }
 
-// callbackServer implements fleetshiftv1.OCPCallbackServiceServer.
-// It receives callbacks from ocp-engine subprocesses and signals the agent's
-// provision state channel on completion or failure.
 type callbackServer struct {
 	fleetshiftv1.UnimplementedOCPCallbackServiceServer
-	provisions *sync.Map
+	provisions    *sync.Map
+	tokenVerifier *CallbackTokenSigner
 }
 
-// getProvision loads a provision state from the sync.Map by cluster ID.
-// Returns an error if the provision is not found.
+func (s *callbackServer) authenticateCallback(ctx context.Context, requestClusterID string) (*provisionState, error) {
+	token := extractCallbackToken(ctx)
+	if token == "" {
+		return nil, status.Error(codes.Unauthenticated, "missing callback token")
+	}
+
+	tokenClusterID, err := s.tokenVerifier.Verify(token)
+	if err != nil {
+		return nil, status.Errorf(codes.Unauthenticated, "invalid callback token: %v", err)
+	}
+
+	if tokenClusterID != requestClusterID {
+		return nil, status.Error(codes.PermissionDenied, "token cluster ID does not match request")
+	}
+
+	return s.getProvision(requestClusterID)
+}
+
 func (s *callbackServer) getProvision(clusterID string) (*provisionState, error) {
 	val, ok := s.provisions.Load(clusterID)
 	if !ok {
@@ -39,33 +55,22 @@ func (s *callbackServer) getProvision(clusterID string) (*provisionState, error)
 	return state, nil
 }
 
-// ReportPhaseResult receives phase result reports from ocp-engine.
-// This is for observability only; the server acknowledges receipt but does
-// not modify provision state.
 func (s *callbackServer) ReportPhaseResult(ctx context.Context, req *fleetshiftv1.OCPPhaseResultRequest) (*fleetshiftv1.OCPAck, error) {
-	_, err := s.getProvision(req.ClusterId)
-	if err != nil {
+	if _, err := s.authenticateCallback(ctx, req.ClusterId); err != nil {
 		return nil, err
 	}
 	return &fleetshiftv1.OCPAck{}, nil
 }
 
-// ReportMilestone receives milestone reports from ocp-engine.
-// This is for observability only; the server acknowledges receipt but does
-// not modify provision state.
 func (s *callbackServer) ReportMilestone(ctx context.Context, req *fleetshiftv1.OCPMilestoneRequest) (*fleetshiftv1.OCPAck, error) {
-	_, err := s.getProvision(req.ClusterId)
-	if err != nil {
+	if _, err := s.authenticateCallback(ctx, req.ClusterId); err != nil {
 		return nil, err
 	}
 	return &fleetshiftv1.OCPAck{}, nil
 }
 
-// ReportCompletion receives completion reports from ocp-engine.
-// It stores the completion request in provision state and closes the done
-// channel to signal the waiting agent.
 func (s *callbackServer) ReportCompletion(ctx context.Context, req *fleetshiftv1.OCPCompletionRequest) (*fleetshiftv1.OCPAck, error) {
-	state, err := s.getProvision(req.ClusterId)
+	state, err := s.authenticateCallback(ctx, req.ClusterId)
 	if err != nil {
 		return nil, err
 	}
@@ -74,15 +79,28 @@ func (s *callbackServer) ReportCompletion(ctx context.Context, req *fleetshiftv1
 	return &fleetshiftv1.OCPAck{}, nil
 }
 
-// ReportFailure receives failure reports from ocp-engine.
-// It stores the failure request in provision state and closes the done
-// channel to signal the waiting agent.
 func (s *callbackServer) ReportFailure(ctx context.Context, req *fleetshiftv1.OCPFailureRequest) (*fleetshiftv1.OCPAck, error) {
-	state, err := s.getProvision(req.ClusterId)
+	state, err := s.authenticateCallback(ctx, req.ClusterId)
 	if err != nil {
 		return nil, err
 	}
 	state.failure = req
 	close(state.done)
 	return &fleetshiftv1.OCPAck{}, nil
+}
+
+func extractCallbackToken(ctx context.Context) string {
+	md, ok := metadata.FromIncomingContext(ctx)
+	if !ok {
+		return ""
+	}
+	vals := md.Get("authorization")
+	if len(vals) == 0 {
+		return ""
+	}
+	const prefix = "Bearer "
+	if !strings.HasPrefix(vals[0], prefix) {
+		return ""
+	}
+	return vals[0][len(prefix):]
 }
