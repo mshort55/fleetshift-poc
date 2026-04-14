@@ -6,6 +6,7 @@ import (
 	"sync"
 	"testing"
 
+	ocpv1 "github.com/fleetshift/fleetshift-poc/gen/ocp/v1"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/metadata"
@@ -13,13 +14,13 @@ import (
 
 // mockServer records every request it receives so tests can inspect them.
 type mockServer struct {
-	UnimplementedOCPEngineCallbackServiceServer
+	ocpv1.UnimplementedCallbackServiceServer
 
 	mu           sync.Mutex
-	phaseResults []*OCPEnginePhaseResultRequest
-	milestones   []*OCPEngineMilestoneRequest
-	completions  []*OCPEngineCompletionRequest
-	failures     []*OCPEngineFailureRequest
+	phaseResults []*ocpv1.PhaseResultRequest
+	milestones   []*ocpv1.MilestoneRequest
+	completions  []*ocpv1.CompletionRequest
+	failures     []*ocpv1.FailureRequest
 	authTokens   []string // bearer tokens extracted from metadata
 }
 
@@ -32,36 +33,36 @@ func (m *mockServer) extractToken(ctx context.Context) {
 	}
 }
 
-func (m *mockServer) ReportPhaseResult(ctx context.Context, req *OCPEnginePhaseResultRequest) (*OCPEngineAck, error) {
+func (m *mockServer) ReportPhaseResult(ctx context.Context, req *ocpv1.PhaseResultRequest) (*ocpv1.Ack, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.extractToken(ctx)
 	m.phaseResults = append(m.phaseResults, req)
-	return &OCPEngineAck{}, nil
+	return &ocpv1.Ack{}, nil
 }
 
-func (m *mockServer) ReportMilestone(ctx context.Context, req *OCPEngineMilestoneRequest) (*OCPEngineAck, error) {
+func (m *mockServer) ReportMilestone(ctx context.Context, req *ocpv1.MilestoneRequest) (*ocpv1.Ack, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.extractToken(ctx)
 	m.milestones = append(m.milestones, req)
-	return &OCPEngineAck{}, nil
+	return &ocpv1.Ack{}, nil
 }
 
-func (m *mockServer) ReportCompletion(ctx context.Context, req *OCPEngineCompletionRequest) (*OCPEngineAck, error) {
+func (m *mockServer) ReportCompletion(ctx context.Context, req *ocpv1.CompletionRequest) (*ocpv1.Ack, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.extractToken(ctx)
 	m.completions = append(m.completions, req)
-	return &OCPEngineAck{}, nil
+	return &ocpv1.Ack{}, nil
 }
 
-func (m *mockServer) ReportFailure(ctx context.Context, req *OCPEngineFailureRequest) (*OCPEngineAck, error) {
+func (m *mockServer) ReportFailure(ctx context.Context, req *ocpv1.FailureRequest) (*ocpv1.Ack, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.extractToken(ctx)
 	m.failures = append(m.failures, req)
-	return &OCPEngineAck{}, nil
+	return &ocpv1.Ack{}, nil
 }
 
 // startMockServer starts a gRPC server on a random port and returns
@@ -74,7 +75,7 @@ func startMockServer(t *testing.T) (*mockServer, string, func()) {
 	}
 	srv := grpc.NewServer()
 	mock := &mockServer{}
-	RegisterOCPEngineCallbackServiceServer(srv, mock)
+	ocpv1.RegisterCallbackServiceServer(srv, mock)
 	go func() { _ = srv.Serve(lis) }()
 	return mock, lis.Addr().String(), func() { srv.Stop() }
 }
@@ -88,7 +89,7 @@ func newTestClient(t *testing.T, addr, clusterID, token string) *Client {
 	}
 	return &Client{
 		conn:      conn,
-		client:    NewOCPEngineCallbackServiceClient(conn),
+		client:    ocpv1.NewCallbackServiceClient(conn),
 		clusterID: clusterID,
 		token:     token,
 	}

@@ -8,6 +8,7 @@ require (
 	github.com/aws/aws-sdk-go-v2/config v1.32.14
 	github.com/aws/aws-sdk-go-v2/credentials v1.19.14
 	github.com/aws/aws-sdk-go-v2/service/sts v1.41.10
+	github.com/fleetshift/fleetshift-poc/gen v0.0.0-00010101000000-000000000000
 	github.com/spf13/cobra v1.10.2
 	google.golang.org/grpc v1.80.0
 	gopkg.in/yaml.v3 v3.0.1

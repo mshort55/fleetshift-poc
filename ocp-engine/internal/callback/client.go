@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 
+	ocpv1 "github.com/fleetshift/fleetshift-poc/gen/ocp/v1"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/metadata"
@@ -26,11 +27,11 @@ type FailureData struct {
 	Attempt                                        int32
 }
 
-// Client wraps the generated OCPEngineCallbackServiceClient with convenience
+// Client wraps the generated CallbackServiceClient with convenience
 // methods that inject the cluster ID and bearer token automatically.
 type Client struct {
 	conn      *grpc.ClientConn
-	client    OCPEngineCallbackServiceClient
+	client    ocpv1.CallbackServiceClient
 	clusterID string
 	token     string
 }
@@ -44,7 +45,7 @@ func New(addr, clusterID, token string) (*Client, error) {
 	}
 	return &Client{
 		conn:      conn,
-		client:    NewOCPEngineCallbackServiceClient(conn),
+		client:    ocpv1.NewCallbackServiceClient(conn),
 		clusterID: clusterID,
 		token:     token,
 	}, nil
@@ -62,7 +63,7 @@ func (c *Client) withAuth(ctx context.Context) context.Context {
 
 // ReportPhaseResult reports the outcome of a single provision phase.
 func (c *Client) ReportPhaseResult(ctx context.Context, phase, status string, elapsed int32, errMsg string, attempt int32) error {
-	_, err := c.client.ReportPhaseResult(c.withAuth(ctx), &OCPEnginePhaseResultRequest{
+	_, err := c.client.ReportPhaseResult(c.withAuth(ctx), &ocpv1.PhaseResultRequest{
 		ClusterId:      c.clusterID,
 		Phase:          phase,
 		Status:         status,
@@ -75,7 +76,7 @@ func (c *Client) ReportPhaseResult(ctx context.Context, phase, status string, el
 
 // ReportMilestone reports a notable event during provisioning.
 func (c *Client) ReportMilestone(ctx context.Context, event string, elapsed, attempt int32) error {
-	_, err := c.client.ReportMilestone(c.withAuth(ctx), &OCPEngineMilestoneRequest{
+	_, err := c.client.ReportMilestone(c.withAuth(ctx), &ocpv1.MilestoneRequest{
 		ClusterId:      c.clusterID,
 		Event:          event,
 		ElapsedSeconds: elapsed,
@@ -86,7 +87,7 @@ func (c *Client) ReportMilestone(ctx context.Context, event string, elapsed, att
 
 // ReportCompletion reports a successful provision along with all produced artifacts.
 func (c *Client) ReportCompletion(ctx context.Context, data CompletionData) error {
-	_, err := c.client.ReportCompletion(c.withAuth(ctx), &OCPEngineCompletionRequest{
+	_, err := c.client.ReportCompletion(c.withAuth(ctx), &ocpv1.CompletionRequest{
 		ClusterId:         c.clusterID,
 		InfraId:           data.InfraID,
 		ClusterUuid:       data.ClusterUUID,
@@ -106,7 +107,7 @@ func (c *Client) ReportCompletion(ctx context.Context, data CompletionData) erro
 
 // ReportFailure reports a terminal provision failure.
 func (c *Client) ReportFailure(ctx context.Context, data FailureData) error {
-	_, err := c.client.ReportFailure(c.withAuth(ctx), &OCPEngineFailureRequest{
+	_, err := c.client.ReportFailure(c.withAuth(ctx), &ocpv1.FailureRequest{
 		ClusterId:         c.clusterID,
 		Phase:             data.Phase,
 		FailureReason:     data.FailureReason,
