@@ -1,0 +1,226 @@
+package ocp
+
+import (
+	"encoding/json"
+	"testing"
+
+	"github.com/fleetshift/fleetshift-poc/fleetshift-server/internal/domain"
+	"gopkg.in/yaml.v3"
+)
+
+func TestParseClusterSpec(t *testing.T) {
+	manifests := []domain.Manifest{
+		{
+			ResourceType: "other.resource",
+			Raw:          json.RawMessage(`{"foo": "bar"}`),
+		},
+		{
+			ResourceType: ClusterResourceType,
+			Raw: json.RawMessage(`{
+				"name": "test-cluster",
+				"base_domain": "example.com",
+				"release_image": "quay.io/openshift-release-dev/ocp-release:4.14.0-x86_64"
+			}`),
+		},
+	}
+
+	spec, err := ParseClusterSpec(manifests)
+	if err != nil {
+		t.Fatalf("ParseClusterSpec failed: %v", err)
+	}
+
+	if spec.Name != "test-cluster" {
+		t.Errorf("expected Name=test-cluster, got %s", spec.Name)
+	}
+	if spec.BaseDomain != "example.com" {
+		t.Errorf("expected BaseDomain=example.com, got %s", spec.BaseDomain)
+	}
+	if spec.ReleaseImage != "quay.io/openshift-release-dev/ocp-release:4.14.0-x86_64" {
+		t.Errorf("unexpected ReleaseImage: %s", spec.ReleaseImage)
+	}
+}
+
+func TestParseClusterSpec_NoOCPManifest(t *testing.T) {
+	manifests := []domain.Manifest{
+		{
+			ResourceType: "other.resource",
+			Raw:          json.RawMessage(`{"foo": "bar"}`),
+		},
+	}
+
+	_, err := ParseClusterSpec(manifests)
+	if err == nil {
+		t.Fatal("expected error for missing OCP manifest, got nil")
+	}
+}
+
+func TestParseClusterSpec_MissingName(t *testing.T) {
+	manifests := []domain.Manifest{
+		{
+			ResourceType: ClusterResourceType,
+			Raw: json.RawMessage(`{
+				"base_domain": "example.com"
+			}`),
+		},
+	}
+
+	_, err := ParseClusterSpec(manifests)
+	if err == nil {
+		t.Fatal("expected error for missing name, got nil")
+	}
+}
+
+func TestParseClusterSpec_MissingBaseDomain(t *testing.T) {
+	manifests := []domain.Manifest{
+		{
+			ResourceType: ClusterResourceType,
+			Raw: json.RawMessage(`{
+				"name": "test-cluster"
+			}`),
+		},
+	}
+
+	_, err := ParseClusterSpec(manifests)
+	if err == nil {
+		t.Fatal("expected error for missing base_domain, got nil")
+	}
+}
+
+func TestBuildClusterYAML(t *testing.T) {
+	spec := &ClusterSpec{
+		Name:         "test-cluster",
+		BaseDomain:   "example.com",
+		ReleaseImage: "quay.io/openshift-release-dev/ocp-release:4.14.0-x86_64",
+	}
+
+	yamlBytes, err := BuildClusterYAML(spec, "us-east-1", "/path/to/pull-secret.json", "ssh-ed25519 AAAAC3...")
+	if err != nil {
+		t.Fatalf("BuildClusterYAML failed: %v", err)
+	}
+
+	// Parse the generated YAML to verify structure
+	var result map[string]any
+	if err := yaml.Unmarshal(yamlBytes, &result); err != nil {
+		t.Fatalf("generated YAML is invalid: %v", err)
+	}
+
+	// Verify ocp_engine section
+	ocpEngine, ok := result["ocp_engine"].(map[string]any)
+	if !ok {
+		t.Fatal("missing or invalid ocp_engine section")
+	}
+	if ocpEngine["pull_secret_file"] != "/path/to/pull-secret.json" {
+		t.Errorf("unexpected pull_secret_file: %v", ocpEngine["pull_secret_file"])
+	}
+	if ocpEngine["release_image"] != "quay.io/openshift-release-dev/ocp-release:4.14.0-x86_64" {
+		t.Errorf("unexpected release_image: %v", ocpEngine["release_image"])
+	}
+
+	// Verify baseDomain
+	if result["baseDomain"] != "example.com" {
+		t.Errorf("unexpected baseDomain: %v", result["baseDomain"])
+	}
+
+	// Verify credentialsMode
+	if result["credentialsMode"] != "Manual" {
+		t.Errorf("unexpected credentialsMode: %v", result["credentialsMode"])
+	}
+
+	// Verify metadata
+	metadata, ok := result["metadata"].(map[string]any)
+	if !ok {
+		t.Fatal("missing or invalid metadata section")
+	}
+	if metadata["name"] != "test-cluster" {
+		t.Errorf("unexpected metadata.name: %v", metadata["name"])
+	}
+
+	// Verify platform.aws.region
+	platform, ok := result["platform"].(map[string]any)
+	if !ok {
+		t.Fatal("missing or invalid platform section")
+	}
+	aws, ok := platform["aws"].(map[string]any)
+	if !ok {
+		t.Fatal("missing or invalid platform.aws section")
+	}
+	if aws["region"] != "us-east-1" {
+		t.Errorf("unexpected platform.aws.region: %v", aws["region"])
+	}
+
+	// Verify sshKey
+	if result["sshKey"] != "ssh-ed25519 AAAAC3..." {
+		t.Errorf("unexpected sshKey: %v", result["sshKey"])
+	}
+}
+
+func TestBuildClusterYAML_WithInstallConfig(t *testing.T) {
+	spec := &ClusterSpec{
+		Name:       "test-cluster",
+		BaseDomain: "example.com",
+		InstallConfig: map[string]any{
+			"controlPlane": map[string]any{
+				"architecture": "amd64",
+				"replicas":     3,
+			},
+			"compute": []any{
+				map[string]any{
+					"architecture": "amd64",
+					"replicas":     3,
+				},
+			},
+			"networking": map[string]any{
+				"networkType": "OVNKubernetes",
+			},
+		},
+	}
+
+	yamlBytes, err := BuildClusterYAML(spec, "us-west-2", "/pull-secret.json", "ssh-ed25519 KEY")
+	if err != nil {
+		t.Fatalf("BuildClusterYAML failed: %v", err)
+	}
+
+	// Parse the generated YAML
+	var result map[string]any
+	if err := yaml.Unmarshal(yamlBytes, &result); err != nil {
+		t.Fatalf("generated YAML is invalid: %v", err)
+	}
+
+	// Verify pass-through fields are preserved
+	controlPlane, ok := result["controlPlane"].(map[string]any)
+	if !ok {
+		t.Fatal("missing or invalid controlPlane section")
+	}
+	if controlPlane["architecture"] != "amd64" {
+		t.Errorf("unexpected controlPlane.architecture: %v", controlPlane["architecture"])
+	}
+	if controlPlane["replicas"] != 3 {
+		t.Errorf("unexpected controlPlane.replicas: %v", controlPlane["replicas"])
+	}
+
+	// Verify compute
+	compute, ok := result["compute"].([]any)
+	if !ok {
+		t.Fatal("missing or invalid compute section")
+	}
+	if len(compute) != 1 {
+		t.Fatalf("expected 1 compute entry, got %d", len(compute))
+	}
+
+	// Verify networking
+	networking, ok := result["networking"].(map[string]any)
+	if !ok {
+		t.Fatal("missing or invalid networking section")
+	}
+	if networking["networkType"] != "OVNKubernetes" {
+		t.Errorf("unexpected networking.networkType: %v", networking["networkType"])
+	}
+
+	// Verify that our required fields are still present
+	if result["baseDomain"] != "example.com" {
+		t.Errorf("baseDomain was overwritten")
+	}
+	if result["credentialsMode"] != "Manual" {
+		t.Errorf("credentialsMode was overwritten")
+	}
+}
