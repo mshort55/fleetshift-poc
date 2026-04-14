@@ -129,12 +129,18 @@ func runServe(ctx context.Context, f *serveFlags) error {
 	router.Register(kindaddon.TargetType, kindAgent)
 
 	// --- OCP agent ---
+	callbackSigner, err := ocpaddon.NewCallbackTokenSigner()
+	if err != nil {
+		return fmt.Errorf("create callback token signer: %w", err)
+	}
+
 	ocpCredProvider := &ocpaddon.PassthroughCredentialProvider{}
 	ocpAgent := ocpaddon.NewAgent(
 		ocpaddon.WithEngineBinary(f.ocpEngineBinary),
 		ocpaddon.WithCallbackAddr(f.grpcAddr),
 		ocpaddon.WithVault(vault),
 		ocpaddon.WithCredentialProvider(ocpCredProvider),
+		ocpaddon.WithTokenSigner(callbackSigner),
 		ocpaddon.WithOIDCConfig(ocpaddon.OIDCProviderConfig{
 			// Will be populated from flags/config in future
 		}),
@@ -264,7 +270,14 @@ func runServe(ctx context.Context, f *serveFlags) error {
 		}
 	}
 
-	authnInterceptor := transportgrpc.NewAuthnInterceptor(authMethodSvc, tokenVerifier, observability.NewAuthnObserver(logger))
+	authnInterceptor := transportgrpc.NewAuthnInterceptor(authMethodSvc, tokenVerifier, observability.NewAuthnObserver(logger),
+		transportgrpc.WithSkipMethods(
+			"/fleetshift.v1.OCPCallbackService/ReportPhaseResult",
+			"/fleetshift.v1.OCPCallbackService/ReportMilestone",
+			"/fleetshift.v1.OCPCallbackService/ReportCompletion",
+			"/fleetshift.v1.OCPCallbackService/ReportFailure",
+		),
+	)
 
 	// --- application services ---
 
