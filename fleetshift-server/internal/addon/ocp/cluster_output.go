@@ -22,6 +22,7 @@ type ClusterOutput struct {
 	InfraID    string // OCP infrastructure ID
 	ClusterID  string // OCP cluster UUID
 	Region     string // cloud region (e.g. "us-east-1")
+	RoleARN    string // AWS IAM role ARN used for provisioning
 
 	// SATokenRef and SAToken are set when platform SA bootstrapping
 	// succeeds. SATokenRef is a vault key; SAToken is the raw bearer
@@ -62,6 +63,9 @@ func (o *ClusterOutput) Target() domain.ProvisionedTarget {
 	}
 	if o.Region != "" {
 		props["region"] = o.Region
+	}
+	if o.RoleARN != "" {
+		props["role_arn"] = o.RoleARN
 	}
 	return domain.ProvisionedTarget{
 		ID:                    o.TargetID,

@@ -15,6 +15,8 @@ const ClusterResourceType domain.ResourceType = "api.ocp.cluster"
 type ClusterSpec struct {
 	Name          string         `json:"name"`
 	BaseDomain    string         `json:"base_domain"`
+	Region        string         `json:"region"`
+	RoleARN       string         `json:"role_arn"`
 	ReleaseImage  string         `json:"release_image,omitempty"`
 	InstallConfig map[string]any `json:"install_config,omitempty"`
 }
@@ -48,6 +50,12 @@ func ParseClusterSpec(manifests []domain.Manifest) (*ClusterSpec, error) {
 	}
 	if spec.BaseDomain == "" {
 		return nil, fmt.Errorf("cluster spec missing required field: base_domain")
+	}
+	if spec.Region == "" {
+		return nil, fmt.Errorf("cluster spec missing required field: region")
+	}
+	if spec.RoleARN == "" {
+		return nil, fmt.Errorf("cluster spec missing required field: role_arn")
 	}
 
 	return &spec, nil

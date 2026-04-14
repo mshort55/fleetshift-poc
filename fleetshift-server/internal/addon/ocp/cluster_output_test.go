@@ -16,6 +16,7 @@ func TestClusterOutput_Target(t *testing.T) {
 		InfraID:       "test-infra-id",
 		ClusterID:     "test-cluster-uuid",
 		Region:        "us-east-1",
+		RoleARN:       "arn:aws:iam::123456789012:role/test",
 	}
 
 	target := output.Target()
@@ -53,6 +54,10 @@ func TestClusterOutput_Target(t *testing.T) {
 	if target.Properties["region"] != "us-east-1" {
 		t.Errorf("properties[region] = %q; want %q",
 			target.Properties["region"], "us-east-1")
+	}
+	if target.Properties["role_arn"] != "arn:aws:iam::123456789012:role/test" {
+		t.Errorf("properties[role_arn] = %q; want %q",
+			target.Properties["role_arn"], "arn:aws:iam::123456789012:role/test")
 	}
 
 	// Verify AcceptedResourceTypes

@@ -13,6 +13,8 @@ func TestPrepareWorkDir(t *testing.T) {
 	spec := &ClusterSpec{
 		Name:         "test-cluster",
 		BaseDomain:   "example.com",
+		Region:       "us-east-1",
+		RoleARN:      "arn:aws:iam::123456789012:role/test",
 		ReleaseImage: "quay.io/ocp-release:4.21.0",
 	}
 	pullSecret := []byte(`{"auths":{}}`)

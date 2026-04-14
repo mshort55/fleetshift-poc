@@ -129,21 +129,9 @@ func (a *Agent) Deliver(
 	ctx, probe := a.observer.ClusterDeliverStarted(ctx, clusterID)
 	defer probe.End()
 
-	// 3. Read region and role_arn from target.Properties
-	region := target.Properties["region"]
-	roleARN := target.Properties["role_arn"]
-	if region == "" {
-		return domain.DeliveryResult{
-			State:   domain.DeliveryStateFailed,
-			Message: "target property 'region' is required",
-		}, nil
-	}
-	if roleARN == "" {
-		return domain.DeliveryResult{
-			State:   domain.DeliveryStateFailed,
-			Message: "target property 'role_arn' is required",
-		}, nil
-	}
+	// 3. Read region and role_arn from cluster spec (validated in ParseClusterSpec)
+	region := spec.Region
+	roleARN := spec.RoleARN
 
 	// 4. Resolve AWS credentials
 	awsCreds, err := a.credentials.ResolveAWS(ctx, AWSCredentialRequest{
@@ -197,7 +185,7 @@ func (a *Agent) Deliver(
 	a.provisions.Store(clusterID, state)
 
 	// 9. Launch background goroutine
-	go a.deliverAsync(ctx, clusterID, configPath, workDir, awsCreds, sshPrivateKey, auth, signaler, state)
+	go a.deliverAsync(ctx, clusterID, configPath, workDir, awsCreds, sshPrivateKey, auth, signaler, state, roleARN)
 
 	// 10. Return accepted
 	return domain.DeliveryResult{State: domain.DeliveryStateAccepted}, nil
@@ -214,6 +202,7 @@ func (a *Agent) deliverAsync(
 	auth domain.DeliveryAuth,
 	signaler *domain.DeliverySignaler,
 	state *provisionState,
+	roleARN string,
 ) {
 	defer a.provisions.Delete(clusterID)
 	defer os.RemoveAll(workDir)
@@ -311,7 +300,7 @@ func (a *Agent) deliverAsync(
 	}
 
 	// Handle successful completion
-	output, err := a.handleCompletion(ctx, clusterID, completion, sshPrivateKey, auth)
+	output, err := a.handleCompletion(ctx, clusterID, completion, sshPrivateKey, auth, roleARN)
 	if err != nil {
 		signaler.Done(ctx, domain.DeliveryResult{
 			State:   domain.DeliveryStateFailed,
@@ -338,6 +327,7 @@ func (a *Agent) handleCompletion(
 	completion *ocpv1.CompletionRequest,
 	sshPrivateKey []byte,
 	auth domain.DeliveryAuth,
+	roleARN string,
 ) (*ClusterOutput, error) {
 	targetID := domain.TargetID("k8s-" + completion.GetInfraId())
 
@@ -369,6 +359,7 @@ func (a *Agent) handleCompletion(
 		InfraID:       completion.GetInfraId(),
 		ClusterID:     completion.GetClusterUuid(),
 		Region:        completion.GetRegion(),
+		RoleARN:       roleARN,
 		SATokenRef:    bootstrapResult.SATokenRef,
 		SAToken:       bootstrapResult.SAToken,
 		KubeconfigRef: bootstrapResult.KubeconfigRef,

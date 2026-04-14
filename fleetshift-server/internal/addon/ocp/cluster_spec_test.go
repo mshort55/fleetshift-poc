@@ -19,6 +19,8 @@ func TestParseClusterSpec(t *testing.T) {
 			Raw: json.RawMessage(`{
 				"name": "test-cluster",
 				"base_domain": "example.com",
+				"region": "us-east-1",
+				"role_arn": "arn:aws:iam::123456789012:role/test",
 				"release_image": "quay.io/openshift-release-dev/ocp-release:4.14.0-x86_64"
 			}`),
 		},
@@ -34,6 +36,12 @@ func TestParseClusterSpec(t *testing.T) {
 	}
 	if spec.BaseDomain != "example.com" {
 		t.Errorf("expected BaseDomain=example.com, got %s", spec.BaseDomain)
+	}
+	if spec.Region != "us-east-1" {
+		t.Errorf("expected Region=us-east-1, got %s", spec.Region)
+	}
+	if spec.RoleARN != "arn:aws:iam::123456789012:role/test" {
+		t.Errorf("expected RoleARN=arn:aws:iam::123456789012:role/test, got %s", spec.RoleARN)
 	}
 	if spec.ReleaseImage != "quay.io/openshift-release-dev/ocp-release:4.14.0-x86_64" {
 		t.Errorf("unexpected ReleaseImage: %s", spec.ReleaseImage)
@@ -54,13 +62,13 @@ func TestParseClusterSpec_Errors(t *testing.T) {
 		{
 			name: "missing name",
 			manifests: []domain.Manifest{
-				{ResourceType: ClusterResourceType, Raw: json.RawMessage(`{"base_domain": "example.com"}`)},
+				{ResourceType: ClusterResourceType, Raw: json.RawMessage(`{"base_domain": "example.com", "region": "us-east-1", "role_arn": "arn:aws:iam::123:role/r"}`)},
 			},
 		},
 		{
 			name: "missing base_domain",
 			manifests: []domain.Manifest{
-				{ResourceType: ClusterResourceType, Raw: json.RawMessage(`{"name": "test-cluster"}`)},
+				{ResourceType: ClusterResourceType, Raw: json.RawMessage(`{"name": "test-cluster", "region": "us-east-1", "role_arn": "arn:aws:iam::123:role/r"}`)},
 			},
 		},
 	}
@@ -79,6 +87,8 @@ func TestBuildClusterYAML(t *testing.T) {
 	spec := &ClusterSpec{
 		Name:         "test-cluster",
 		BaseDomain:   "example.com",
+		Region:       "us-east-1",
+		RoleARN:      "arn:aws:iam::123:role/r",
 		ReleaseImage: "quay.io/openshift-release-dev/ocp-release:4.14.0-x86_64",
 	}
 
@@ -147,6 +157,8 @@ func TestBuildClusterYAML_WithInstallConfig(t *testing.T) {
 	spec := &ClusterSpec{
 		Name:       "test-cluster",
 		BaseDomain: "example.com",
+		Region:     "us-east-1",
+		RoleARN:    "arn:aws:iam::123:role/r",
 		InstallConfig: map[string]any{
 			"controlPlane": map[string]any{
 				"architecture": "amd64",
@@ -218,6 +230,8 @@ func TestBuildClusterYAML_BaseKeysCannotBeOverridden(t *testing.T) {
 	spec := &ClusterSpec{
 		Name:       "real-cluster",
 		BaseDomain: "real.example.com",
+		Region:     "us-east-1",
+		RoleARN:    "arn:aws:iam::123:role/r",
 		InstallConfig: map[string]any{
 			"baseDomain":      "evil.example.com",
 			"credentialsMode": "Passthrough",
@@ -262,6 +276,8 @@ func TestBuildClusterYAML_PlatformDeepMerge(t *testing.T) {
 	spec := &ClusterSpec{
 		Name:       "test-cluster",
 		BaseDomain: "example.com",
+		Region:     "us-east-1",
+		RoleARN:    "arn:aws:iam::123:role/r",
 		InstallConfig: map[string]any{
 			"platform": map[string]any{
 				"aws": map[string]any{
@@ -300,5 +316,33 @@ func TestBuildClusterYAML_PlatformDeepMerge(t *testing.T) {
 	}
 	if subnets[0] != "subnet-aaa" || subnets[1] != "subnet-bbb" {
 		t.Errorf("unexpected subnets: %v", subnets)
+	}
+}
+
+func TestParseClusterSpec_RequiresRegionAndRoleARN(t *testing.T) {
+	tests := []struct {
+		name string
+		raw  string
+	}{
+		{
+			name: "missing region",
+			raw:  `{"name":"c","base_domain":"d","role_arn":"arn:aws:iam::123:role/r"}`,
+		},
+		{
+			name: "missing role_arn",
+			raw:  `{"name":"c","base_domain":"d","region":"us-east-1"}`,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			manifests := []domain.Manifest{{
+				ResourceType: ClusterResourceType,
+				Raw:          json.RawMessage(tt.raw),
+			}}
+			_, err := ParseClusterSpec(manifests)
+			if err == nil {
+				t.Fatal("expected error, got nil")
+			}
+		})
 	}
 }
