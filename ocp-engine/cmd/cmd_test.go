@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"runtime"
 	"testing"
+
+	"github.com/ocp-engine/internal/config"
 )
 
 func projectRoot() string {
@@ -140,5 +142,81 @@ func TestStatus_Succeeded(t *testing.T) {
 	}
 	if result["has_kubeconfig"] != true {
 		t.Error("has_kubeconfig should be true")
+	}
+}
+
+func TestExtractKubeconfigData(t *testing.T) {
+	kubeconfig := `apiVersion: v1
+clusters:
+- cluster:
+    server: https://api.test.example.com:6443
+    certificate-authority-data: dGVzdC1jYS1kYXRh
+  name: test-cluster
+contexts: []
+`
+	tmpFile := filepath.Join(t.TempDir(), "kubeconfig")
+	if err := os.WriteFile(tmpFile, []byte(kubeconfig), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	apiServer, caCert := extractKubeconfigData(tmpFile)
+	if apiServer != "https://api.test.example.com:6443" {
+		t.Errorf("apiServer = %q, want %q", apiServer, "https://api.test.example.com:6443")
+	}
+	if string(caCert) != "test-ca-data" {
+		t.Errorf("caCert = %q, want %q", string(caCert), "test-ca-data")
+	}
+}
+
+func TestExtractKubeconfigData_Missing(t *testing.T) {
+	apiServer, caCert := extractKubeconfigData("/nonexistent/path")
+	if apiServer != "" {
+		t.Errorf("apiServer = %q, want empty", apiServer)
+	}
+	if caCert != nil {
+		t.Errorf("caCert = %v, want nil", caCert)
+	}
+}
+
+func TestExtractKubeconfigData_Empty(t *testing.T) {
+	tmpFile := filepath.Join(t.TempDir(), "kubeconfig")
+	if err := os.WriteFile(tmpFile, []byte("apiVersion: v1\nclusters: []\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	apiServer, caCert := extractKubeconfigData(tmpFile)
+	if apiServer != "" {
+		t.Errorf("apiServer = %q, want empty", apiServer)
+	}
+	if caCert != nil {
+		t.Errorf("caCert = %v, want nil", caCert)
+	}
+}
+
+func TestExtractRegion(t *testing.T) {
+	cfg := &config.ClusterConfig{
+		InstallConfig: map[string]any{
+			"platform": map[string]any{
+				"aws": map[string]any{
+					"region": "eu-west-1",
+				},
+			},
+		},
+	}
+
+	region := extractRegion(cfg)
+	if region != "eu-west-1" {
+		t.Errorf("extractRegion = %q, want %q", region, "eu-west-1")
+	}
+}
+
+func TestExtractRegion_Missing(t *testing.T) {
+	cfg := &config.ClusterConfig{
+		InstallConfig: map[string]any{},
+	}
+
+	region := extractRegion(cfg)
+	if region != "" {
+		t.Errorf("extractRegion = %q, want empty", region)
 	}
 }

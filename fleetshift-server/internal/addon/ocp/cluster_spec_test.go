@@ -40,49 +40,38 @@ func TestParseClusterSpec(t *testing.T) {
 	}
 }
 
-func TestParseClusterSpec_NoOCPManifest(t *testing.T) {
-	manifests := []domain.Manifest{
+func TestParseClusterSpec_Errors(t *testing.T) {
+	tests := []struct {
+		name      string
+		manifests []domain.Manifest
+	}{
 		{
-			ResourceType: "other.resource",
-			Raw:          json.RawMessage(`{"foo": "bar"}`),
+			name: "no OCP manifest",
+			manifests: []domain.Manifest{
+				{ResourceType: "other.resource", Raw: json.RawMessage(`{"foo": "bar"}`)},
+			},
+		},
+		{
+			name: "missing name",
+			manifests: []domain.Manifest{
+				{ResourceType: ClusterResourceType, Raw: json.RawMessage(`{"base_domain": "example.com"}`)},
+			},
+		},
+		{
+			name: "missing base_domain",
+			manifests: []domain.Manifest{
+				{ResourceType: ClusterResourceType, Raw: json.RawMessage(`{"name": "test-cluster"}`)},
+			},
 		},
 	}
 
-	_, err := ParseClusterSpec(manifests)
-	if err == nil {
-		t.Fatal("expected error for missing OCP manifest, got nil")
-	}
-}
-
-func TestParseClusterSpec_MissingName(t *testing.T) {
-	manifests := []domain.Manifest{
-		{
-			ResourceType: ClusterResourceType,
-			Raw: json.RawMessage(`{
-				"base_domain": "example.com"
-			}`),
-		},
-	}
-
-	_, err := ParseClusterSpec(manifests)
-	if err == nil {
-		t.Fatal("expected error for missing name, got nil")
-	}
-}
-
-func TestParseClusterSpec_MissingBaseDomain(t *testing.T) {
-	manifests := []domain.Manifest{
-		{
-			ResourceType: ClusterResourceType,
-			Raw: json.RawMessage(`{
-				"name": "test-cluster"
-			}`),
-		},
-	}
-
-	_, err := ParseClusterSpec(manifests)
-	if err == nil {
-		t.Fatal("expected error for missing base_domain, got nil")
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := ParseClusterSpec(tt.manifests)
+			if err == nil {
+				t.Fatal("expected error, got nil")
+			}
+		})
 	}
 }
 

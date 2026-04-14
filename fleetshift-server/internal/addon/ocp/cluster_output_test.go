@@ -108,12 +108,14 @@ func TestClusterOutput_Secrets(t *testing.T) {
 
 func TestClusterOutput_Secrets_Empty(t *testing.T) {
 	tests := []struct {
-		name   string
-		output ClusterOutput
+		name      string
+		output    ClusterOutput
+		wantCount int
 	}{
 		{
-			name:   "no refs set",
-			output: ClusterOutput{},
+			name:      "no refs set",
+			output:    ClusterOutput{},
+			wantCount: 0,
 		},
 		{
 			name: "only values set without refs",
@@ -122,6 +124,7 @@ func TestClusterOutput_Secrets_Empty(t *testing.T) {
 				Kubeconfig:    []byte("config"),
 				SSHPrivateKey: []byte("key"),
 			},
+			wantCount: 0,
 		},
 		{
 			name: "partial - only SA token",
@@ -129,20 +132,21 @@ func TestClusterOutput_Secrets_Empty(t *testing.T) {
 				SATokenRef: "vault/sa-token",
 				SAToken:    []byte("token"),
 			},
+			wantCount: 1,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			secrets := tt.output.Secrets()
-			if tt.name == "partial - only SA token" {
-				if len(secrets) != 1 {
-					t.Errorf("len(secrets) = %d; want 1", len(secrets))
+			if tt.wantCount == 0 {
+				if secrets != nil {
+					t.Errorf("secrets = %v; want nil", secrets)
 				}
 				return
 			}
-			if secrets != nil {
-				t.Errorf("secrets = %v; want nil", secrets)
+			if len(secrets) != tt.wantCount {
+				t.Errorf("len(secrets) = %d; want %d", len(secrets), tt.wantCount)
 			}
 		})
 	}

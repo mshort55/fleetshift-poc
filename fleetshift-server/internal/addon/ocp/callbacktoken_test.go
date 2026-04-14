@@ -1,6 +1,7 @@
 package ocp
 
 import (
+	"strings"
 	"testing"
 	"time"
 )
@@ -89,14 +90,13 @@ func TestCallbackTokenSigner_TamperedToken(t *testing.T) {
 		t.Fatalf("Sign: %v", err)
 	}
 
-	// Flip the last byte of the token to tamper with it.
-	tampered := token[:len(token)-1]
-	lastByte := token[len(token)-1]
-	if lastByte == 'A' {
-		tampered += "B"
-	} else {
-		tampered += "A"
+	// Replace the signature segment with garbage to ensure verification fails.
+	// A JWT has three dot-separated segments: header.payload.signature
+	parts := strings.SplitN(token, ".", 3)
+	if len(parts) != 3 {
+		t.Fatalf("token doesn't have 3 parts: %q", token)
 	}
+	tampered := parts[0] + "." + parts[1] + ".INVALIDSIGNATURE"
 
 	_, err = signer.Verify(tampered)
 	if err == nil {

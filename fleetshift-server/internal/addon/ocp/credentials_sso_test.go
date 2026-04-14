@@ -2,7 +2,9 @@ package ocp
 
 import (
 	"context"
+	"net/http"
 	"testing"
+	"time"
 
 	"github.com/fleetshift/fleetshift-poc/fleetshift-server/internal/domain"
 )
@@ -68,5 +70,22 @@ func TestSSOProvider_ResolvePullSecret_MissingToken(t *testing.T) {
 	expectedMsg := "auth token is required"
 	if err.Error() != expectedMsg {
 		t.Errorf("expected error message %q, got %q", expectedMsg, err.Error())
+	}
+}
+
+func TestSSOProvider_DefaultHTTPClientTimeout(t *testing.T) {
+	provider := &SSOCredentialProvider{}
+	client := provider.httpClient()
+	if client.Timeout != 30*time.Second {
+		t.Errorf("default timeout = %v, want 30s", client.Timeout)
+	}
+}
+
+func TestSSOProvider_CustomHTTPClient(t *testing.T) {
+	custom := &http.Client{Timeout: 5 * time.Second}
+	provider := &SSOCredentialProvider{HTTPClient: custom}
+	client := provider.httpClient()
+	if client != custom {
+		t.Error("expected custom client to be returned")
 	}
 }
