@@ -52,6 +52,7 @@ type serveFlags struct {
 	logFormat        string
 	logLevelOverride string
 	oidcCAFile       string
+	ocpCallbackAddr  string
 }
 
 func newServeCmd() *cobra.Command {
@@ -70,6 +71,7 @@ func newServeCmd() *cobra.Command {
 	cmd.Flags().StringVar(&f.logFormat, "log-format", "text", "log format (text, json)")
 	cmd.Flags().StringVar(&f.logLevelOverride, "log-level-override", "", "per-component log level overrides (e.g. deployment=debug,authn=debug)")
 	cmd.Flags().StringVar(&f.oidcCAFile, "oidc-ca-file", "", "PEM CA certificate for OIDC issuers (for kind clusters trusting self-signed or local CAs)")
+	cmd.Flags().StringVar(&f.ocpCallbackAddr, "ocp-callback-addr", ":50052", "OCP addon callback listen address")
 	return cmd
 }
 
@@ -147,12 +149,17 @@ func runServe(ctx context.Context, f *serveFlags) error {
 		PullSecret:         ocpPullSecret,
 	}
 	ocpAgent := ocpaddon.NewAgent(
-		ocpaddon.WithCallbackAddr(f.grpcAddr),
 		ocpaddon.WithVault(vault),
 		ocpaddon.WithCredentialProvider(ocpCredProvider),
 		ocpaddon.WithTokenSigner(callbackSigner),
 		ocpaddon.WithObserver(ocpaddon.NewSlogAgentObserver(logger)),
 	)
+	if err := ocpAgent.Start(f.ocpCallbackAddr); err != nil {
+		return fmt.Errorf("start ocp agent: %w", err)
+	}
+	defer ocpAgent.Shutdown(ctx)
+	logger.Info("OCP addon callback server listening", "addr", ocpAgent.CallbackAddr())
+
 	router.Register(ocpaddon.TargetType, ocpAgent)
 
 	// Kubernetes agent is registered after the attestation verifier is
@@ -278,14 +285,7 @@ func runServe(ctx context.Context, f *serveFlags) error {
 		}
 	}
 
-	authnInterceptor := transportgrpc.NewAuthnInterceptor(authMethodSvc, tokenVerifier, observability.NewAuthnObserver(logger),
-		transportgrpc.WithSkipMethods(
-			"/fleetshift.v1.OCPEngineCallbackService/ReportPhaseResult",
-			"/fleetshift.v1.OCPEngineCallbackService/ReportMilestone",
-			"/fleetshift.v1.OCPEngineCallbackService/ReportCompletion",
-			"/fleetshift.v1.OCPEngineCallbackService/ReportFailure",
-		),
-	)
+	authnInterceptor := transportgrpc.NewAuthnInterceptor(authMethodSvc, tokenVerifier, observability.NewAuthnObserver(logger))
 
 	// --- application services ---
 
@@ -337,7 +337,6 @@ func runServe(ctx context.Context, f *serveFlags) error {
 	pb.RegisterSignerEnrollmentServiceServer(grpcServer, &transportgrpc.SignerEnrollmentServer{
 		Enrollments: signerEnrollmentSvc,
 	})
-	pb.RegisterOCPEngineCallbackServiceServer(grpcServer, ocpAgent.CallbackServer())
 	reflection.Register(grpcServer)
 
 	grpcLis, err := net.Listen("tcp", f.grpcAddr)
