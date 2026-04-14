@@ -6,7 +6,7 @@ tags:
   - name: AuthMethodService
   - name: DeploymentService
   - name: FleetletService
-  - name: OCPCallbackService
+  - name: OCPEngineCallbackService
   - name: SignerEnrollmentService
 consumes:
   - application/json

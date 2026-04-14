@@ -42,7 +42,7 @@ func TestCallbackServer_ReportCompletion(t *testing.T) {
 		t.Fatalf("Sign: %v", err)
 	}
 
-	req := &fleetshiftv1.OCPCompletionRequest{
+	req := &fleetshiftv1.OCPEngineCompletionRequest{
 		ClusterId: clusterID,
 		InfraId:   "infra-123",
 		ApiServer: "https://api.test.example.com:6443",
@@ -77,7 +77,7 @@ func TestCallbackServer_ReportFailure(t *testing.T) {
 		t.Fatalf("Sign: %v", err)
 	}
 
-	req := &fleetshiftv1.OCPFailureRequest{
+	req := &fleetshiftv1.OCPEngineFailureRequest{
 		ClusterId:      clusterID,
 		Phase:          "bootstrap",
 		FailureReason:  "timeout",
@@ -113,7 +113,7 @@ func TestCallbackServer_ReportPhaseResult(t *testing.T) {
 		t.Fatalf("Sign: %v", err)
 	}
 
-	req := &fleetshiftv1.OCPPhaseResultRequest{
+	req := &fleetshiftv1.OCPEnginePhaseResultRequest{
 		ClusterId: clusterID,
 		Phase:     "infrastructure",
 		Status:    "completed",
@@ -143,7 +143,7 @@ func TestCallbackServer_ReportMilestone(t *testing.T) {
 		t.Fatalf("Sign: %v", err)
 	}
 
-	req := &fleetshiftv1.OCPMilestoneRequest{
+	req := &fleetshiftv1.OCPEngineMilestoneRequest{
 		ClusterId: clusterID,
 		Event:     "control_plane_ready",
 	}
@@ -162,7 +162,7 @@ func TestCallbackServer_MissingToken(t *testing.T) {
 	clusterID := "test-cluster"
 	provisions.Store(clusterID, &provisionState{done: make(chan struct{})})
 
-	_, err := server.ReportCompletion(context.Background(), &fleetshiftv1.OCPCompletionRequest{
+	_, err := server.ReportCompletion(context.Background(), &fleetshiftv1.OCPEngineCompletionRequest{
 		ClusterId: clusterID,
 	})
 	if err == nil {
@@ -178,7 +178,7 @@ func TestCallbackServer_InvalidToken(t *testing.T) {
 	clusterID := "test-cluster"
 	provisions.Store(clusterID, &provisionState{done: make(chan struct{})})
 
-	_, err := server.ReportCompletion(ctxWithToken("not-a-jwt"), &fleetshiftv1.OCPCompletionRequest{
+	_, err := server.ReportCompletion(ctxWithToken("not-a-jwt"), &fleetshiftv1.OCPEngineCompletionRequest{
 		ClusterId: clusterID,
 	})
 	if err == nil {
@@ -195,7 +195,7 @@ func TestCallbackServer_WrongClusterID(t *testing.T) {
 	provisions.Store("cluster-b", &provisionState{done: make(chan struct{})})
 
 	token, _ := signer.Sign("cluster-a", 2*time.Hour)
-	_, err := server.ReportCompletion(ctxWithToken(token), &fleetshiftv1.OCPCompletionRequest{
+	_, err := server.ReportCompletion(ctxWithToken(token), &fleetshiftv1.OCPEngineCompletionRequest{
 		ClusterId: "cluster-b",
 	})
 	if err == nil {
@@ -210,7 +210,7 @@ func TestCallbackServer_UnknownCluster(t *testing.T) {
 	server, signer, _ := newTestCallbackServer(t)
 	token, _ := signer.Sign("unknown-cluster", 2*time.Hour)
 
-	_, err := server.ReportCompletion(ctxWithToken(token), &fleetshiftv1.OCPCompletionRequest{
+	_, err := server.ReportCompletion(ctxWithToken(token), &fleetshiftv1.OCPEngineCompletionRequest{
 		ClusterId: "unknown-cluster",
 	})
 	if err == nil {

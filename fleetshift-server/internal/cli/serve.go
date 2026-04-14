@@ -264,10 +264,10 @@ func runServe(ctx context.Context, f *serveFlags) error {
 
 	authnInterceptor := transportgrpc.NewAuthnInterceptor(authMethodSvc, tokenVerifier, observability.NewAuthnObserver(logger),
 		transportgrpc.WithSkipMethods(
-			"/fleetshift.v1.OCPCallbackService/ReportPhaseResult",
-			"/fleetshift.v1.OCPCallbackService/ReportMilestone",
-			"/fleetshift.v1.OCPCallbackService/ReportCompletion",
-			"/fleetshift.v1.OCPCallbackService/ReportFailure",
+			"/fleetshift.v1.OCPEngineCallbackService/ReportPhaseResult",
+			"/fleetshift.v1.OCPEngineCallbackService/ReportMilestone",
+			"/fleetshift.v1.OCPEngineCallbackService/ReportCompletion",
+			"/fleetshift.v1.OCPEngineCallbackService/ReportFailure",
 		),
 	)
 
@@ -321,7 +321,7 @@ func runServe(ctx context.Context, f *serveFlags) error {
 	pb.RegisterSignerEnrollmentServiceServer(grpcServer, &transportgrpc.SignerEnrollmentServer{
 		Enrollments: signerEnrollmentSvc,
 	})
-	pb.RegisterOCPCallbackServiceServer(grpcServer, ocpAgent.CallbackServer())
+	pb.RegisterOCPEngineCallbackServiceServer(grpcServer, ocpAgent.CallbackServer())
 	reflection.Register(grpcServer)
 
 	grpcLis, err := net.Listen("tcp", f.grpcAddr)

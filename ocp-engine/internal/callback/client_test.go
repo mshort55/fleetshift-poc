@@ -13,13 +13,13 @@ import (
 
 // mockServer records every request it receives so tests can inspect them.
 type mockServer struct {
-	UnimplementedOCPCallbackServiceServer
+	UnimplementedOCPEngineCallbackServiceServer
 
 	mu           sync.Mutex
-	phaseResults []*OCPPhaseResultRequest
-	milestones   []*OCPMilestoneRequest
-	completions  []*OCPCompletionRequest
-	failures     []*OCPFailureRequest
+	phaseResults []*OCPEnginePhaseResultRequest
+	milestones   []*OCPEngineMilestoneRequest
+	completions  []*OCPEngineCompletionRequest
+	failures     []*OCPEngineFailureRequest
 	authTokens   []string // bearer tokens extracted from metadata
 }
 
@@ -32,36 +32,36 @@ func (m *mockServer) extractToken(ctx context.Context) {
 	}
 }
 
-func (m *mockServer) ReportPhaseResult(ctx context.Context, req *OCPPhaseResultRequest) (*OCPAck, error) {
+func (m *mockServer) ReportPhaseResult(ctx context.Context, req *OCPEnginePhaseResultRequest) (*OCPEngineAck, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.extractToken(ctx)
 	m.phaseResults = append(m.phaseResults, req)
-	return &OCPAck{}, nil
+	return &OCPEngineAck{}, nil
 }
 
-func (m *mockServer) ReportMilestone(ctx context.Context, req *OCPMilestoneRequest) (*OCPAck, error) {
+func (m *mockServer) ReportMilestone(ctx context.Context, req *OCPEngineMilestoneRequest) (*OCPEngineAck, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.extractToken(ctx)
 	m.milestones = append(m.milestones, req)
-	return &OCPAck{}, nil
+	return &OCPEngineAck{}, nil
 }
 
-func (m *mockServer) ReportCompletion(ctx context.Context, req *OCPCompletionRequest) (*OCPAck, error) {
+func (m *mockServer) ReportCompletion(ctx context.Context, req *OCPEngineCompletionRequest) (*OCPEngineAck, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.extractToken(ctx)
 	m.completions = append(m.completions, req)
-	return &OCPAck{}, nil
+	return &OCPEngineAck{}, nil
 }
 
-func (m *mockServer) ReportFailure(ctx context.Context, req *OCPFailureRequest) (*OCPAck, error) {
+func (m *mockServer) ReportFailure(ctx context.Context, req *OCPEngineFailureRequest) (*OCPEngineAck, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.extractToken(ctx)
 	m.failures = append(m.failures, req)
-	return &OCPAck{}, nil
+	return &OCPEngineAck{}, nil
 }
 
 // startMockServer starts a gRPC server on a random port and returns
@@ -74,7 +74,7 @@ func startMockServer(t *testing.T) (*mockServer, string, func()) {
 	}
 	srv := grpc.NewServer()
 	mock := &mockServer{}
-	RegisterOCPCallbackServiceServer(srv, mock)
+	RegisterOCPEngineCallbackServiceServer(srv, mock)
 	go func() { _ = srv.Serve(lis) }()
 	return mock, lis.Addr().String(), func() { srv.Stop() }
 }
@@ -88,7 +88,7 @@ func newTestClient(t *testing.T, addr, clusterID, token string) *Client {
 	}
 	return &Client{
 		conn:      conn,
-		client:    NewOCPCallbackServiceClient(conn),
+		client:    NewOCPEngineCallbackServiceClient(conn),
 		clusterID: clusterID,
 		token:     token,
 	}

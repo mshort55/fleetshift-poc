@@ -90,7 +90,7 @@ func NewAgent(opts ...AgentOption) *Agent {
 // ocp-engine subprocesses report to. The returned server shares the
 // provisions map with the agent, so callbacks signal the correct
 // in-flight delivery.
-func (a *Agent) CallbackServer() fleetshiftv1.OCPCallbackServiceServer {
+func (a *Agent) CallbackServer() fleetshiftv1.OCPEngineCallbackServiceServer {
 	return &callbackServer{
 		provisions:    &a.provisions,
 		tokenVerifier: a.tokenSigner,
@@ -357,7 +357,7 @@ func (a *Agent) deliverAsync(
 func (a *Agent) handleCompletion(
 	ctx context.Context,
 	clusterName string,
-	completion *fleetshiftv1.OCPCompletionRequest,
+	completion *fleetshiftv1.OCPEngineCompletionRequest,
 	sshPrivateKey []byte,
 	auth domain.DeliveryAuth,
 ) (*ClusterOutput, error) {
