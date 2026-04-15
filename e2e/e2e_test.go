@@ -100,7 +100,7 @@ func TestE2E(t *testing.T) {
 	// need the server running. The pull secret must be available when the
 	// server starts because SSOCredentialProvider caches it at init time.
 
-	step("02_KeycloakLogin", func(t *testing.T) {
+	step("02_KeycloakLogin", func(st *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 		defer cancel()
 
@@ -108,10 +108,11 @@ func TestE2E(t *testing.T) {
 			cfg.KeycloakIssuer, cfg.KeycloakClientID,
 			"openid", "Keycloak Login")
 		if err != nil {
-			t.Fatalf("Keycloak device code login: %v", err)
+			st.Fatalf("Keycloak device code login: %v", err)
 		}
 		keycloakToken = token
-		storeTokenForFleetctl(t, token)
+		// Pass parent t for cleanup so tokens survive across subtests.
+		storeTokenForFleetctl(st, t, token)
 	})
 
 	step("03_RedHatSSOLogin", func(t *testing.T) {
@@ -366,7 +367,7 @@ func waitForServer(t *testing.T, addr string, timeout time.Duration) {
 // Helper: storeTokenForFleetctl
 // ---------------------------------------------------------------------------
 
-func storeTokenForFleetctl(t *testing.T, token *TokenResponse) {
+func storeTokenForFleetctl(t, parentT *testing.T, token *TokenResponse) {
 	t.Helper()
 
 	// Store each token field in the OS keyring so fleetctl can use them.
@@ -404,7 +405,7 @@ func storeTokenForFleetctl(t *testing.T, token *TokenResponse) {
 		t.Fatalf("store meta in keyring: %v", err)
 	}
 
-	t.Cleanup(func() {
+	parentT.Cleanup(func() {
 		for _, key := range []string{"access_token", "refresh_token", "id_token", "meta"} {
 			_ = keyring.Delete(service, key)
 		}
