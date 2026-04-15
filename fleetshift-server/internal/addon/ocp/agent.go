@@ -438,15 +438,81 @@ func (a *Agent) handleCompletion(
 // Remove implements [domain.DeliveryAgent.Remove]. It destroys the OCP
 // cluster via ocp-engine destroy (which handles ccoctl IAM cleanup) and
 // removes vault entries.
+//
+// Remove first checks for a retained failed provision — either in-memory
+// (provisions map) or on disk (deterministic work dir). If found, it
+// destroys using that work directory directly. Otherwise it falls through
+// to the normal target-property-based destroy path.
 func (a *Agent) Remove(
 	ctx context.Context,
 	target domain.TargetInfo,
 	_ domain.DeliveryID,
-	_ []domain.Manifest,
+	manifests []domain.Manifest,
 	auth domain.DeliveryAuth,
 	_ *domain.Attestation,
 	_ *domain.DeliverySignaler,
 ) error {
+	// Try to get cluster name from manifests for work dir lookup
+	spec, specErr := ParseClusterSpec(manifests)
+	if specErr != nil {
+		// Can't parse spec — fall through to target-property destroy
+		return a.removeByTargetProperties(ctx, target, auth)
+	}
+	clusterID := spec.Name
+
+	// 1. Check for retained failed provision (in-memory)
+	workDir := ""
+	if val, ok := a.provisions.Load(clusterID); ok {
+		state := val.(*provisionState)
+		state.mu.Lock()
+		workDir = state.workDir
+		state.mu.Unlock()
+	}
+
+	// 2. Fallback: check deterministic path on disk (survives server restart)
+	if workDir == "" {
+		candidate := provisionWorkDirPath(clusterID)
+		if _, err := os.Stat(candidate); err == nil {
+			workDir = candidate
+		}
+	}
+
+	// 3. If we found a retained work dir, destroy using it
+	if workDir != "" {
+		awsCreds, err := a.credentials.ResolveAWS(ctx, AWSCredentialRequest{
+			Region:  spec.Region,
+			RoleARN: spec.RoleARN,
+			Auth:    auth,
+		})
+		if err != nil {
+			return fmt.Errorf("resolve AWS credentials for destroy: %w", err)
+		}
+
+		cmd := exec.CommandContext(ctx, a.engineBinary,
+			"destroy",
+			"--work-dir", workDir,
+		)
+		cmd.Env = append(os.Environ(), awsCreds.Env()...)
+		cmd.Stdout = os.Stderr
+		cmd.Stderr = os.Stderr
+
+		if err := cmd.Run(); err != nil {
+			return fmt.Errorf("ocp-engine destroy failed: %w", err)
+		}
+
+		os.RemoveAll(workDir)
+		a.provisions.Delete(clusterID)
+		return nil
+	}
+
+	// 4. Normal destroy path (successfully provisioned clusters)
+	return a.removeByTargetProperties(ctx, target, auth)
+}
+
+// removeByTargetProperties destroys a successfully provisioned cluster
+// using infra_id/region/role_arn stored in target.Properties. It creates a
+// temporary work directory with reconstructed metadata.json.
+func (a *Agent) removeByTargetProperties(ctx context.Context, target domain.TargetInfo, auth domain.DeliveryAuth) error {
 	// 1. Read infra_id, region, role_arn from target.Properties
 	infraID := target.Properties["infra_id"]
 	region := target.Properties["region"]
