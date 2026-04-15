@@ -33,7 +33,8 @@ var (
 	binDir        string
 	repoRoot      string
 	serverCmd     *exec.Cmd
-	infraID   string // set after provision
+	infraID       string // set after provision
+	serverLogFile string // path to server log file
 )
 
 func TestE2E(t *testing.T) {
@@ -58,6 +59,13 @@ func TestE2E(t *testing.T) {
 	failed := false
 
 	t.Cleanup(func() {
+		if failed && serverLogFile != "" {
+			t.Logf("Server log: %s", serverLogFile)
+			tail, _ := exec.Command("tail", "-50", serverLogFile).Output()
+			if len(tail) > 0 {
+				t.Logf("=== Last 50 lines of server log ===\n%s", tail)
+			}
+		}
 		if provisioned && failed {
 			printClusterWarning(cfg)
 		}
@@ -287,10 +295,17 @@ func startServer(t, parentT *testing.T, binDir, repoRoot string, cfg *Config) {
 		"OCP_CREDENTIAL_MODE=sso",
 		"OCP_PULL_SECRET_FILE="+psFile,
 	)
-	serverCmd.Stdout = os.Stdout
-	serverCmd.Stderr = os.Stderr
+	serverLogPath := filepath.Join(dbDir, "server.log")
+	serverLog, err := os.Create(serverLogPath)
+	if err != nil {
+		t.Fatalf("create server log: %v", err)
+	}
+	parentT.Cleanup(func() { serverLog.Close() })
+	serverCmd.Stdout = serverLog
+	serverCmd.Stderr = serverLog
 
-	t.Logf("Starting fleetshift-server (db=%s)...", dbPath)
+	serverLogFile = serverLogPath
+	t.Logf("Starting fleetshift-server (db=%s, log=%s)...", dbPath, serverLogPath)
 	if err := serverCmd.Start(); err != nil {
 		t.Fatalf("start server: %v", err)
 	}
