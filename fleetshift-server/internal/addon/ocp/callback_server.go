@@ -19,6 +19,7 @@ type provisionState struct {
 	mu         sync.Mutex
 	completion *ocpv1.CompletionRequest
 	failure    *ocpv1.FailureRequest
+	workDir    string // retained on failure for cleanup by Remove()
 }
 
 type callbackServer struct {
