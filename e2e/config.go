@@ -73,7 +73,7 @@ func LoadConfig() (*Config, error) {
 func generateClusterName() string {
 	b := make([]byte, 2)
 	rand.Read(b)
-	return fmt.Sprintf("fleetshift-e2etest-%x", b)
+	return fmt.Sprintf("fleetshift-e2e-%x", b)
 }
 
 func loadEnvFile(path string) {

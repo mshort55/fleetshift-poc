@@ -9,7 +9,7 @@ import (
 
 func TestGenerateClusterName(t *testing.T) {
 	name := generateClusterName()
-	if !strings.HasPrefix(name, "fleetshift-e2etest-") {
+	if !strings.HasPrefix(name, "fleetshift-e2e-") {
 		t.Errorf("cluster name %q missing expected prefix", name)
 	}
 	name2 := generateClusterName()
