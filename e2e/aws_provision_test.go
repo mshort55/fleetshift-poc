@@ -605,6 +605,8 @@ func waitForProvision(t *testing.T, binDir string, cfg *Config, timeout time.Dur
 	start := time.Now()
 	lastState := ""
 	pollInterval := 30 * time.Second
+	heartbeatInterval := 5 * time.Minute
+	lastHeartbeat := time.Now()
 
 	t.Logf("Waiting for deployment %s to reach STATE_ACTIVE (timeout %s)...", cfg.ClusterName, timeout)
 
@@ -629,8 +631,10 @@ func waitForProvision(t *testing.T, binDir string, cfg *Config, timeout time.Dur
 		if dep.State != lastState {
 			t.Logf("[%s] State: %s -> %s", elapsed(start), lastState, dep.State)
 			lastState = dep.State
-		} else {
+			lastHeartbeat = time.Now()
+		} else if time.Since(lastHeartbeat) >= heartbeatInterval {
 			t.Logf("[%s] Still %s...", elapsed(start), dep.State)
+			lastHeartbeat = time.Now()
 		}
 
 		switch dep.State {
