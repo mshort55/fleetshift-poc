@@ -7,6 +7,7 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/ec2 v1.297.0
 	github.com/aws/aws-sdk-go-v2/service/iam v1.53.7
 	github.com/aws/aws-sdk-go-v2/service/s3 v1.99.0
+	github.com/mattn/go-sqlite3 v1.14.42
 	github.com/zalando/go-keyring v0.2.8
 	k8s.io/apimachinery v0.35.3
 	k8s.io/client-go v0.35.3

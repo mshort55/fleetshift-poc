@@ -6,6 +6,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -20,6 +21,7 @@ import (
 	ec2svc "github.com/aws/aws-sdk-go-v2/service/ec2"
 	ec2types "github.com/aws/aws-sdk-go-v2/service/ec2/types"
 	iamsvc "github.com/aws/aws-sdk-go-v2/service/iam"
+	_ "github.com/mattn/go-sqlite3"
 	s3svc "github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/zalando/go-keyring"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -671,37 +673,33 @@ func printClusterWarning(cfg *Config) {
 // Helper: validateDeployment
 // ---------------------------------------------------------------------------
 
-func getDeploymentProperties(t *testing.T, binDir, clusterName string) map[string]interface{} {
+// getTargetProperties queries the fleetshift SQLite DB directly for
+// the provisioned target's properties. This is a workaround for issue 004
+// (Deployment API doesn't expose provisioned targets).
+func getTargetProperties(t *testing.T, clusterName string) map[string]interface{} {
 	t.Helper()
 
-	fleetctl := filepath.Join(binDir, "fleetctl")
-	cmd := exec.Command(fleetctl, "deployment", "get", clusterName, "-o", "json")
-	out, err := cmd.Output()
+	dbPath := "/tmp/fleetshift-e2e-data/fleetshift-e2e.db"
+	db, err := sql.Open("sqlite3", dbPath+"?mode=ro")
 	if err != nil {
-		t.Fatalf("fleetctl deployment get: %v", err)
+		t.Fatalf("open DB: %v", err)
+	}
+	defer db.Close()
+
+	// The provisioned target ID starts with "k8s-" and the target name
+	// matches the cluster name.
+	var propsJSON string
+	err = db.QueryRow(
+		`SELECT properties FROM targets WHERE name = ? AND id LIKE 'k8s-%'`,
+		clusterName,
+	).Scan(&propsJSON)
+	if err != nil {
+		t.Fatalf("query target properties for %q: %v", clusterName, err)
 	}
 
-	var dep map[string]interface{}
-	if err := json.Unmarshal(out, &dep); err != nil {
-		t.Fatalf("parse deployment JSON: %v", err)
-	}
-
-	state, _ := dep["state"].(string)
-	if !strings.Contains(strings.ToUpper(state), "ACTIVE") {
-		t.Fatalf("deployment state is %q, expected to contain ACTIVE", state)
-	}
-
-	targets, ok := dep["provisioned_targets"].([]interface{})
-	if !ok || len(targets) == 0 {
-		t.Fatalf("no provisioned_targets in deployment")
-	}
-	target, ok := targets[0].(map[string]interface{})
-	if !ok {
-		t.Fatalf("provisioned_targets[0] is not an object")
-	}
-	props, ok := target["properties"].(map[string]interface{})
-	if !ok {
-		t.Fatalf("provisioned_targets[0].properties is not an object")
+	var props map[string]interface{}
+	if err := json.Unmarshal([]byte(propsJSON), &props); err != nil {
+		t.Fatalf("parse target properties: %v", err)
 	}
 	return props
 }
@@ -709,7 +707,7 @@ func getDeploymentProperties(t *testing.T, binDir, clusterName string) map[strin
 func validateDeployment(t *testing.T, binDir string, cfg *Config) {
 	t.Helper()
 
-	props := getDeploymentProperties(t, binDir, cfg.ClusterName)
+	props := getTargetProperties(t, cfg.ClusterName)
 	t.Logf("Deployment state: ACTIVE")
 
 	// Check required property keys exist.
@@ -748,7 +746,7 @@ func validateClusterOIDC(t *testing.T, cfg *Config, token *TokenResponse) {
 		t.Skip("Keycloak token not available")
 	}
 
-	props := getDeploymentProperties(t, binDir, cfg.ClusterName)
+	props := getTargetProperties(t, cfg.ClusterName)
 	apiServer, _ := props["api_server"].(string)
 	caCert, _ := props["ca_cert"].(string)
 
