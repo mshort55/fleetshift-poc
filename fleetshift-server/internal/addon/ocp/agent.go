@@ -239,6 +239,20 @@ func (a *Agent) cleanupProvision(clusterID, workDir string) {
 	a.provisions.Delete(clusterID)
 }
 
+// retainOrCleanup checks whether AWS infrastructure may have been created
+// (metadata.json exists) and either retains the work directory for later
+// cleanup by Remove(), or cleans up immediately.
+func (a *Agent) retainOrCleanup(state *provisionState, clusterID, workDir string) {
+	metadataPath := filepath.Join(workDir, "metadata.json")
+	if _, err := os.Stat(metadataPath); os.IsNotExist(err) {
+		a.cleanupProvision(clusterID, workDir)
+	} else {
+		state.mu.Lock()
+		state.workDir = workDir
+		state.mu.Unlock()
+	}
+}
+
 // deliverAsync runs ocp-engine and waits for the callback or process exit.
 func (a *Agent) deliverAsync(
 	ctx context.Context,
@@ -304,14 +318,7 @@ func (a *Agent) deliverAsync(
 			if err != nil {
 				msg = fmt.Sprintf("ocp-engine exited with error: %v", err)
 			}
-			metadataPath := filepath.Join(req.workDir, "metadata.json")
-			if _, statErr := os.Stat(metadataPath); os.IsNotExist(statErr) {
-				a.cleanupProvision(req.clusterID, req.workDir)
-			} else {
-				state.mu.Lock()
-				state.workDir = req.workDir
-				state.mu.Unlock()
-			}
+			a.retainOrCleanup(state, req.clusterID, req.workDir)
 			signaler.Done(ctx, domain.DeliveryResult{
 				State:   domain.DeliveryStateFailed,
 				Message: msg,
@@ -319,14 +326,7 @@ func (a *Agent) deliverAsync(
 			return
 		}
 	case <-ctx.Done():
-		metadataPath := filepath.Join(req.workDir, "metadata.json")
-		if _, statErr := os.Stat(metadataPath); os.IsNotExist(statErr) {
-			a.cleanupProvision(req.clusterID, req.workDir)
-		} else {
-			state.mu.Lock()
-			state.workDir = req.workDir
-			state.mu.Unlock()
-		}
+		a.retainOrCleanup(state, req.clusterID, req.workDir)
 		signaler.Done(ctx, domain.DeliveryResult{
 			State:   domain.DeliveryStateFailed,
 			Message: fmt.Sprintf("context cancelled: %v", ctx.Err()),
@@ -487,19 +487,9 @@ func (a *Agent) Remove(
 		if err != nil {
 			return fmt.Errorf("resolve AWS credentials for destroy: %w", err)
 		}
-
-		cmd := exec.CommandContext(ctx, a.engineBinary,
-			"destroy",
-			"--work-dir", workDir,
-		)
-		cmd.Env = append(os.Environ(), awsCreds.Env()...)
-		cmd.Stdout = os.Stderr
-		cmd.Stderr = os.Stderr
-
-		if err := cmd.Run(); err != nil {
-			return fmt.Errorf("ocp-engine destroy failed: %w", err)
+		if err := a.runDestroy(ctx, workDir, awsCreds); err != nil {
+			return err
 		}
-
 		os.RemoveAll(workDir)
 		a.provisions.Delete(clusterID)
 		return nil
@@ -552,16 +542,8 @@ func (a *Agent) removeByTargetProperties(ctx context.Context, target domain.Targ
 	}
 
 	// 5. Run ocp-engine destroy
-	cmd := exec.CommandContext(ctx, a.engineBinary,
-		"destroy",
-		"--work-dir", workDir,
-	)
-	cmd.Env = append(os.Environ(), awsCreds.Env()...)
-	cmd.Stdout = os.Stderr
-	cmd.Stderr = os.Stderr
-
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("ocp-engine destroy failed: %w", err)
+	if err := a.runDestroy(ctx, workDir, awsCreds); err != nil {
+		return err
 	}
 
 	// 6. Clean up vault entries
@@ -602,6 +584,21 @@ func validateCredentialModeCoupling(creds *AWSCredentials, ccostsMode bool) erro
 		return fmt.Errorf(
 			"STS temporary credentials cannot be used with mint mode (cco_sts_mode: false); " +
 				"use long-lived IAM keys or enable cco_sts_mode")
+	}
+	return nil
+}
+
+// runDestroy calls ocp-engine destroy against a work directory.
+func (a *Agent) runDestroy(ctx context.Context, workDir string, awsCreds *AWSCredentials) error {
+	cmd := exec.CommandContext(ctx, a.engineBinary,
+		"destroy",
+		"--work-dir", workDir,
+	)
+	cmd.Env = append(os.Environ(), awsCreds.Env()...)
+	cmd.Stdout = os.Stderr
+	cmd.Stderr = os.Stderr
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("ocp-engine destroy failed: %w", err)
 	}
 	return nil
 }
