@@ -2,6 +2,7 @@ package ocp
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/fleetshift/fleetshift-poc/fleetshift-server/internal/domain"
@@ -309,6 +310,109 @@ func TestBuildClusterYAML_PlatformDeepMerge(t *testing.T) {
 	}
 	if subnets[0] != "subnet-aaa" || subnets[1] != "subnet-bbb" {
 		t.Errorf("unexpected subnets: %v", subnets)
+	}
+}
+
+func TestParseClusterSpec_CCOSTSModeExplicitFalse(t *testing.T) {
+	manifests := []domain.Manifest{
+		{
+			ResourceType: ClusterResourceType,
+			Raw: json.RawMessage(`{
+				"name": "test-cluster",
+				"base_domain": "example.com",
+				"region": "us-east-1",
+				"role_arn": "arn:aws:iam::123456789012:role/test",
+				"cco_sts_mode": false
+			}`),
+		},
+	}
+
+	spec, err := ParseClusterSpec(manifests)
+	if err != nil {
+		t.Fatalf("ParseClusterSpec failed: %v", err)
+	}
+
+	if spec.EffectiveCCOSTSMode() != false {
+		t.Errorf("expected EffectiveCCOSTSMode()=false, got true")
+	}
+}
+
+func TestParseClusterSpec_CCOSTSModeDefaultTrue(t *testing.T) {
+	manifests := []domain.Manifest{
+		{
+			ResourceType: ClusterResourceType,
+			Raw: json.RawMessage(`{
+				"name": "test-cluster",
+				"base_domain": "example.com",
+				"region": "us-east-1",
+				"role_arn": "arn:aws:iam::123456789012:role/test"
+			}`),
+		},
+	}
+
+	spec, err := ParseClusterSpec(manifests)
+	if err != nil {
+		t.Fatalf("ParseClusterSpec failed: %v", err)
+	}
+
+	if spec.EffectiveCCOSTSMode() != true {
+		t.Errorf("expected EffectiveCCOSTSMode()=true (default), got false")
+	}
+}
+
+func TestBuildClusterYAML_STSMode(t *testing.T) {
+	stsTrue := true
+	spec := &ClusterSpec{
+		Name:        "test-cluster",
+		BaseDomain:  "example.com",
+		Region:      "us-east-1",
+		RoleARN:     "arn:aws:iam::123:role/r",
+		CCOSTSMode:  &stsTrue,
+	}
+
+	yamlBytes, err := BuildClusterYAML(spec, "us-east-1", "/path/to/pull-secret.json", "ssh-ed25519 AAAAC3...")
+	if err != nil {
+		t.Fatalf("BuildClusterYAML failed: %v", err)
+	}
+
+	yamlStr := string(yamlBytes)
+
+	// Verify output contains cco_sts_mode: true
+	if !strings.Contains(yamlStr, "cco_sts_mode: true") {
+		t.Errorf("expected YAML to contain 'cco_sts_mode: true', got:\n%s", yamlStr)
+	}
+
+	// Verify output contains credentialsMode: Manual
+	if !strings.Contains(yamlStr, "credentialsMode: Manual") {
+		t.Errorf("expected YAML to contain 'credentialsMode: Manual', got:\n%s", yamlStr)
+	}
+}
+
+func TestBuildClusterYAML_MintMode(t *testing.T) {
+	stsFalse := false
+	spec := &ClusterSpec{
+		Name:        "test-cluster",
+		BaseDomain:  "example.com",
+		Region:      "us-east-1",
+		RoleARN:     "arn:aws:iam::123:role/r",
+		CCOSTSMode:  &stsFalse,
+	}
+
+	yamlBytes, err := BuildClusterYAML(spec, "us-east-1", "/path/to/pull-secret.json", "ssh-ed25519 AAAAC3...")
+	if err != nil {
+		t.Fatalf("BuildClusterYAML failed: %v", err)
+	}
+
+	yamlStr := string(yamlBytes)
+
+	// Verify output does NOT contain cco_sts_mode
+	if strings.Contains(yamlStr, "cco_sts_mode") {
+		t.Errorf("expected YAML to NOT contain 'cco_sts_mode', got:\n%s", yamlStr)
+	}
+
+	// Verify output does NOT contain credentialsMode
+	if strings.Contains(yamlStr, "credentialsMode") {
+		t.Errorf("expected YAML to NOT contain 'credentialsMode', got:\n%s", yamlStr)
 	}
 }
 

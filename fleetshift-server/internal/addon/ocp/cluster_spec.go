@@ -19,6 +19,7 @@ type ClusterSpec struct {
 	RoleARN       string         `json:"role_arn"`
 	ReleaseImage  string         `json:"release_image,omitempty"`
 	InstallConfig map[string]any `json:"install_config,omitempty"`
+	CCOSTSMode    *bool          `json:"cco_sts_mode,omitempty"`
 }
 
 // ParseClusterSpec extracts the ClusterSpec from deployment manifests.
@@ -61,6 +62,15 @@ func ParseClusterSpec(manifests []domain.Manifest) (*ClusterSpec, error) {
 	return &spec, nil
 }
 
+// EffectiveCCOSTSMode returns the effective CCO STS mode setting.
+// If CCOSTSMode is nil (not set), defaults to true.
+func (s *ClusterSpec) EffectiveCCOSTSMode() bool {
+	if s.CCOSTSMode == nil {
+		return true
+	}
+	return *s.CCOSTSMode
+}
+
 // BuildClusterYAML generates ocp-engine's cluster.yaml configuration.
 // The output includes:
 // - ocp_engine section with pull_secret_file and optional release_image
@@ -85,11 +95,25 @@ func BuildClusterYAML(spec *ClusterSpec, region, pullSecretFile, sshPublicKey st
 
 	// Set base keys on top — these are authoritative and cannot be
 	// overridden by InstallConfig.
-	config["ocp_engine"] = map[string]any{
+
+	// Build ocp_engine section
+	ocpEngine := map[string]any{
 		"pull_secret_file": pullSecretFile,
 	}
+	if spec.ReleaseImage != "" {
+		ocpEngine["release_image"] = spec.ReleaseImage
+	}
+
+	config["ocp_engine"] = ocpEngine
 	config["baseDomain"] = spec.BaseDomain
-	config["credentialsMode"] = "Manual"
+
+	// Set CCO STS mode configuration conditionally
+	stsMode := spec.EffectiveCCOSTSMode()
+	if stsMode {
+		ocpEngine["cco_sts_mode"] = true
+		config["credentialsMode"] = "Manual"
+	}
+
 	config["metadata"] = map[string]any{
 		"name": spec.Name,
 	}
@@ -109,12 +133,6 @@ func BuildClusterYAML(spec *ClusterSpec, region, pullSecretFile, sshPublicKey st
 	}
 	config["platform"] = map[string]any{
 		"aws": basePlatformAWS,
-	}
-
-	// Add release_image to ocp_engine section if specified
-	if spec.ReleaseImage != "" {
-		ocpEngine := config["ocp_engine"].(map[string]any)
-		ocpEngine["release_image"] = spec.ReleaseImage
 	}
 
 	// Marshal to YAML
