@@ -1,4 +1,4 @@
-.PHONY: help build build-server build-cli build-ocp-engine test test-server test-cli test-ocp-engine generate
+.PHONY: help build build-server build-cli build-ocp-engine test test-server test-cli test-ocp-engine test-e2e generate
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | \
@@ -25,6 +25,9 @@ test-cli: ## Run CLI tests
 
 test-ocp-engine: ## Run ocp-engine tests
 	cd ocp-engine && go test ./...
+
+test-e2e: build ## Run E2E tests (requires .env config and interactive auth)
+	cd e2e && go test -tags e2e -timeout 3h -v
 
 generate: ## Generate protobuf and gRPC code
 	buf generate --path proto/fleetshift
