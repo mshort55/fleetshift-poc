@@ -186,31 +186,132 @@ Press Enter to shut down when done.
 
 ### Test failed — cluster still running
 
-The test prints a warning banner with the cluster name. To destroy:
-```bash
-# If fleetshift-server is still running:
-fleetctl deployment delete <name>
+The test prints a warning banner with the cluster name. There are three ways to destroy, from easiest to most manual:
 
-# If server is down, use ocp-engine directly:
-# 1. Create metadata.json with the infra_id
-# 2. Extract openshift-install from the release image
-# 3. Run: ocp-engine destroy --work-dir <path>
-# 4. Run: ccoctl aws delete --name=<cluster-name> --region=<region>
+**Option 1: fleetshift-server is still running**
+
+```bash
+fleetctl deployment delete <cluster-name>
+```
+
+**Option 2: Server is down — use ocp-engine**
+
+```bash
+# Set up a destroy work directory
+CLUSTER_NAME=fleetshift-e2e-XXXX
+INFRA_ID=fleetshift-e2e-XX-XXXXX   # check server log for this
+REGION=us-west-2
+WORK_DIR=/tmp/ocp-destroy-${CLUSTER_NAME}
+RELEASE_IMAGE=quay.io/openshift-release-dev/ocp-release:4.21.0-multi
+PULL_SECRET=/path/to/pull-secret.json
+
+mkdir -p $WORK_DIR
+
+# Write metadata.json
+cat > $WORK_DIR/metadata.json << EOF
+{
+  "infraID": "${INFRA_ID}",
+  "aws": {
+    "region": "${REGION}",
+    "identifier": [{"kubernetes.io/cluster/${INFRA_ID}": "owned"}]
+  }
+}
+EOF
+
+# Extract openshift-install
+oc adm release extract --command=openshift-install \
+  --to=$WORK_DIR --registry-config=$PULL_SECRET $RELEASE_IMAGE
+
+# Get AWS credentials
+export AWS_ACCESS_KEY_ID=$(aws configure get aws_access_key_id)
+export AWS_SECRET_ACCESS_KEY=$(aws configure get aws_secret_access_key)
+
+# Write cluster.yaml for ocp-engine
+cat > $WORK_DIR/cluster.yaml << EOF
+ocp_engine:
+  pull_secret_file: /dev/null
+  credentials:
+    access_key_id: $AWS_ACCESS_KEY_ID
+    secret_access_key: $AWS_SECRET_ACCESS_KEY
+baseDomain: aws-acm-cluster-virt.devcluster.openshift.com
+metadata:
+  name: ${CLUSTER_NAME}
+platform:
+  aws:
+    region: ${REGION}
+EOF
+
+# Destroy cluster infrastructure
+bin/ocp-engine destroy --work-dir $WORK_DIR
+
+# Clean up ccoctl resources (OIDC provider, IAM roles, S3 bucket)
+oc adm release extract --command=ccoctl \
+  --to=$WORK_DIR --registry-config=$PULL_SECRET $RELEASE_IMAGE
+
+$WORK_DIR/ccoctl aws delete --name=$CLUSTER_NAME --region=$REGION
+```
+
+**Option 3: Direct openshift-install (no ocp-engine)**
+
+```bash
+# Same setup as Option 2, then:
+$WORK_DIR/openshift-install destroy cluster --dir=$WORK_DIR --log-level=info
+$WORK_DIR/ccoctl aws delete --name=$CLUSTER_NAME --region=$REGION
 ```
 
 ### Check for orphaned AWS resources
 
-```bash
-# EC2 instances
-aws ec2 describe-instances --region us-west-2 \
-  --filters "Name=instance-state-name,Values=running,pending" \
-  --query 'Reservations[].Instances[].[InstanceId,Tags[?Key==`Name`].Value|[0]]' --output table | grep fleet
+Run this after any destroy to make sure nothing was left behind:
 
-# ccoctl resources (S3, OIDC provider, IAM roles)
-aws s3 ls | grep fleet
-aws iam list-open-id-connect-providers --output text | grep fleet
-aws iam list-roles --query 'Roles[].RoleName' --output text | tr '\t' '\n' | grep fleet
+```bash
+CLUSTER_NAME=fleetshift-e2e-XXXX
+INFRA_ID=fleetshift-e2e-XX-XXXXX
+REGION=us-west-2
+
+echo "=== EC2 Instances ==="
+aws ec2 describe-instances --region $REGION \
+  --filters "Name=instance-state-name,Values=running,pending,stopping,stopped" \
+  --query 'Reservations[].Instances[].[InstanceId,State.Name,Tags[?Key==`Name`].Value|[0]]' \
+  --output table 2>&1 | grep -i fleet || echo "  none"
+
+echo "=== S3 Buckets (ccoctl OIDC) ==="
+aws s3 ls | grep -i fleet || echo "  none"
+
+echo "=== IAM OIDC Providers (ccoctl) ==="
+aws iam list-open-id-connect-providers \
+  --query 'OpenIDConnectProviderList[].Arn' --output text | tr '\t' '\n' \
+  | grep -i fleet | grep -v "keycloak" || echo "  none"
+
+echo "=== IAM Roles (ccoctl per-operator) ==="
+aws iam list-roles --query 'Roles[].RoleName' --output text | tr '\t' '\n' \
+  | grep -i fleet | grep -v "OCP-Provisioner" || echo "  none"
+
+echo "=== IAM Instance Profiles ==="
+aws iam list-instance-profiles \
+  --query 'InstanceProfiles[].InstanceProfileName' --output text | tr '\t' '\n' \
+  | grep -i fleet || echo "  none"
+
+echo "=== VPCs ==="
+aws ec2 describe-vpcs --region $REGION \
+  --query 'Vpcs[].[VpcId,Tags[?Key==`Name`].Value|[0]]' --output text \
+  | grep -i fleet || echo "  none"
+
+echo "=== Elastic IPs ==="
+aws ec2 describe-addresses --region $REGION \
+  --query 'Addresses[].[AllocationId,Tags[?Key==`Name`].Value|[0]]' --output text \
+  | grep -i fleet || echo "  none"
+
+echo "=== ELBs ==="
+aws elbv2 describe-load-balancers --region $REGION \
+  --query 'LoadBalancers[].LoadBalancerName' --output text | tr '\t' '\n' \
+  | grep -i fleet || echo "  none"
+
+echo "=== Route53 Hosted Zones ==="
+aws route53 list-hosted-zones --query 'HostedZones[].Name' --output text | tr '\t' '\n' \
+  | grep -i fleet || echo "  none"
 ```
+
+**Note:** The `OCP-Provisioner` IAM role and the Keycloak OIDC provider are permanent infrastructure — don't delete those. Only delete resources with your cluster name prefix.
 
 ### Restart server with existing DB
 
