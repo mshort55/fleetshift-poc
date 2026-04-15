@@ -2,7 +2,9 @@ package ocp
 
 import (
 	"context"
+	"io"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -70,6 +72,99 @@ func TestSSOProvider_ResolvePullSecret_MissingToken(t *testing.T) {
 	expectedMsg := "auth token is required"
 	if err.Error() != expectedMsg {
 		t.Errorf("expected error message %q, got %q", expectedMsg, err.Error())
+	}
+}
+
+// roundTripFunc adapts a function into an http.RoundTripper.
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) { return f(req) }
+
+func TestSSOProvider_ResolvePullSecret_ValidResponse(t *testing.T) {
+	provider := &SSOCredentialProvider{
+		HTTPClient: &http.Client{
+			Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+				// Verify auth header was set
+				if got := req.Header.Get("Authorization"); got != "Bearer test-token" {
+					t.Errorf("Authorization = %q, want %q", got, "Bearer test-token")
+				}
+				body := `{"auths":{"registry.example.com":{"auth":"dGVzdA=="}}}`
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Body:       io.NopCloser(strings.NewReader(body)),
+				}, nil
+			}),
+		},
+	}
+
+	result, err := provider.ResolvePullSecret(context.Background(), PullSecretRequest{
+		Auth: domain.DeliveryAuth{Token: "test-token"},
+	})
+	if err != nil {
+		t.Fatalf("ResolvePullSecret: %v", err)
+	}
+	if !strings.Contains(string(result), `"auths"`) {
+		t.Errorf("result missing auths field: %s", result)
+	}
+}
+
+func TestSSOProvider_ResolvePullSecret_MalformedJSON(t *testing.T) {
+	provider := &SSOCredentialProvider{
+		HTTPClient: &http.Client{
+			Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Body:       io.NopCloser(strings.NewReader(`not json`)),
+				}, nil
+			}),
+		},
+	}
+
+	_, err := provider.ResolvePullSecret(context.Background(), PullSecretRequest{
+		Auth: domain.DeliveryAuth{Token: "test-token"},
+	})
+	if err == nil {
+		t.Fatal("expected error for malformed JSON, got nil")
+	}
+}
+
+func TestSSOProvider_ResolvePullSecret_MissingAuths(t *testing.T) {
+	provider := &SSOCredentialProvider{
+		HTTPClient: &http.Client{
+			Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Body:       io.NopCloser(strings.NewReader(`{"valid":"json"}`)),
+				}, nil
+			}),
+		},
+	}
+
+	_, err := provider.ResolvePullSecret(context.Background(), PullSecretRequest{
+		Auth: domain.DeliveryAuth{Token: "test-token"},
+	})
+	if err == nil {
+		t.Fatal("expected error for missing auths field, got nil")
+	}
+}
+
+func TestSSOProvider_ResolvePullSecret_HTTPError(t *testing.T) {
+	provider := &SSOCredentialProvider{
+		HTTPClient: &http.Client{
+			Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+				return &http.Response{
+					StatusCode: http.StatusForbidden,
+					Body:       io.NopCloser(strings.NewReader(`{"error":"forbidden"}`)),
+				}, nil
+			}),
+		},
+	}
+
+	_, err := provider.ResolvePullSecret(context.Background(), PullSecretRequest{
+		Auth: domain.DeliveryAuth{Token: "test-token"},
+	})
+	if err == nil {
+		t.Fatal("expected error for HTTP 403, got nil")
 	}
 }
 

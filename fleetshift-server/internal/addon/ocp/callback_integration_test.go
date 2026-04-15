@@ -49,10 +49,7 @@ func outgoingToken(ctx context.Context, token string) context.Context {
 }
 
 func TestCallbackIntegration_PhaseResult(t *testing.T) {
-	signer, err := NewCallbackTokenSigner()
-	if err != nil {
-		t.Fatal(err)
-	}
+	signer := mustNewSigner(t)
 	provisions := &sync.Map{}
 	clusterID := "integration-phase"
 	provisions.Store(clusterID, &provisionState{done: make(chan struct{})})
@@ -63,7 +60,7 @@ func TestCallbackIntegration_PhaseResult(t *testing.T) {
 	token, _ := signer.Sign(clusterID, 2*time.Hour)
 	ctx := outgoingToken(context.Background(), token)
 
-	_, err = client.ReportPhaseResult(ctx, &ocpv1.PhaseResultRequest{
+	_, err := client.ReportPhaseResult(ctx, &ocpv1.PhaseResultRequest{
 		ClusterId:      clusterID,
 		Phase:          "extract",
 		Status:         "complete",
@@ -76,7 +73,7 @@ func TestCallbackIntegration_PhaseResult(t *testing.T) {
 }
 
 func TestCallbackIntegration_Milestone(t *testing.T) {
-	signer, _ := NewCallbackTokenSigner()
+	signer := mustNewSigner(t)
 	provisions := &sync.Map{}
 	clusterID := "integration-milestone"
 	provisions.Store(clusterID, &provisionState{done: make(chan struct{})})
@@ -99,7 +96,7 @@ func TestCallbackIntegration_Milestone(t *testing.T) {
 }
 
 func TestCallbackIntegration_CompletionSignalsDone(t *testing.T) {
-	signer, _ := NewCallbackTokenSigner()
+	signer := mustNewSigner(t)
 	provisions := &sync.Map{}
 	clusterID := "integration-completion"
 	state := &provisionState{done: make(chan struct{})}
@@ -146,7 +143,7 @@ func TestCallbackIntegration_CompletionSignalsDone(t *testing.T) {
 }
 
 func TestCallbackIntegration_FailureSignalsDone(t *testing.T) {
-	signer, _ := NewCallbackTokenSigner()
+	signer := mustNewSigner(t)
 	provisions := &sync.Map{}
 	clusterID := "integration-failure"
 	state := &provisionState{done: make(chan struct{})}

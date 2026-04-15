@@ -53,14 +53,20 @@ func TestPrepareWorkDir(t *testing.T) {
 	}
 }
 
-func TestPrepareWorkDir_InvalidSpec(t *testing.T) {
-	// nil spec causes a panic in BuildClusterYAML (nil pointer dereference)
-	defer func() {
-		if r := recover(); r == nil {
-			t.Fatal("expected panic for nil spec")
-		}
-	}()
-	prepareWorkDir("test", nil, "us-east-1", []byte("{}"), []byte("key"))
+func TestNewAgent_DefaultCredentials(t *testing.T) {
+	t.Setenv("AWS_ACCESS_KEY_ID", "test-key")
+	t.Setenv("AWS_SECRET_ACCESS_KEY", "test-secret")
+	t.Setenv("OCP_PULL_SECRET_FILE", "/nonexistent/pull-secret.json")
+
+	a := NewAgent()
+
+	// Agent should still be created despite bad pull secret path
+	if a.credentials == nil {
+		t.Fatal("credentials should not be nil")
+	}
+	if a.tokenSigner == nil {
+		t.Fatal("tokenSigner should not be nil")
+	}
 }
 
 func TestEffectiveProvisionTimeout(t *testing.T) {

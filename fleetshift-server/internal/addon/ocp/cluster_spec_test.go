@@ -50,32 +50,25 @@ func TestParseClusterSpec(t *testing.T) {
 
 func TestParseClusterSpec_Errors(t *testing.T) {
 	tests := []struct {
-		name      string
-		manifests []domain.Manifest
+		name string
+		raw  string
 	}{
-		{
-			name: "no OCP manifest",
-			manifests: []domain.Manifest{
-				{ResourceType: "other.resource", Raw: json.RawMessage(`{"foo": "bar"}`)},
-			},
-		},
-		{
-			name: "missing name",
-			manifests: []domain.Manifest{
-				{ResourceType: ClusterResourceType, Raw: json.RawMessage(`{"base_domain": "example.com", "region": "us-east-1", "role_arn": "arn:aws:iam::123:role/r"}`)},
-			},
-		},
-		{
-			name: "missing base_domain",
-			manifests: []domain.Manifest{
-				{ResourceType: ClusterResourceType, Raw: json.RawMessage(`{"name": "test-cluster", "region": "us-east-1", "role_arn": "arn:aws:iam::123:role/r"}`)},
-			},
-		},
+		{"no OCP manifest", ""},
+		{"missing name", `{"base_domain":"d","region":"us-east-1","role_arn":"arn:aws:iam::123:role/r"}`},
+		{"missing base_domain", `{"name":"c","region":"us-east-1","role_arn":"arn:aws:iam::123:role/r"}`},
+		{"missing region", `{"name":"c","base_domain":"d","role_arn":"arn:aws:iam::123:role/r"}`},
+		{"missing role_arn", `{"name":"c","base_domain":"d","region":"us-east-1"}`},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			_, err := ParseClusterSpec(tt.manifests)
+			var manifests []domain.Manifest
+			if tt.raw == "" {
+				manifests = []domain.Manifest{{ResourceType: "other.resource", Raw: json.RawMessage(`{}`)}}
+			} else {
+				manifests = []domain.Manifest{{ResourceType: ClusterResourceType, Raw: json.RawMessage(tt.raw)}}
+			}
+			_, err := ParseClusterSpec(manifests)
 			if err == nil {
 				t.Fatal("expected error, got nil")
 			}
@@ -319,30 +312,3 @@ func TestBuildClusterYAML_PlatformDeepMerge(t *testing.T) {
 	}
 }
 
-func TestParseClusterSpec_RequiresRegionAndRoleARN(t *testing.T) {
-	tests := []struct {
-		name string
-		raw  string
-	}{
-		{
-			name: "missing region",
-			raw:  `{"name":"c","base_domain":"d","role_arn":"arn:aws:iam::123:role/r"}`,
-		},
-		{
-			name: "missing role_arn",
-			raw:  `{"name":"c","base_domain":"d","region":"us-east-1"}`,
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			manifests := []domain.Manifest{{
-				ResourceType: ClusterResourceType,
-				Raw:          json.RawMessage(tt.raw),
-			}}
-			_, err := ParseClusterSpec(manifests)
-			if err == nil {
-				t.Fatal("expected error, got nil")
-			}
-		})
-	}
-}

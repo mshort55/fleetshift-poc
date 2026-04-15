@@ -102,9 +102,14 @@ func TestCallbackServer_ReportFailure(t *testing.T) {
 	}
 }
 
-func TestCallbackServer_ReportPhaseResult(t *testing.T) {
+// TestCallbackServer_InformationalRPCs verifies that ReportPhaseResult
+// and ReportMilestone authenticate correctly and don't mutate provision
+// state. These RPCs are currently informational (ack-only). When they
+// gain behavior (e.g., retry negotiation), add assertions for the
+// response content and any state changes.
+func TestCallbackServer_InformationalRPCs(t *testing.T) {
 	server, signer, provisions := newTestCallbackServer(t)
-	clusterID := "test-cluster-789"
+	clusterID := "test-informational"
 	state := &provisionState{done: make(chan struct{})}
 	provisions.Store(clusterID, state)
 
@@ -112,48 +117,43 @@ func TestCallbackServer_ReportPhaseResult(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Sign: %v", err)
 	}
+	ctx := ctxWithToken(token)
 
-	req := &ocpv1.PhaseResultRequest{
-		ClusterId: clusterID,
-		Phase:     "infrastructure",
-		Status:    "completed",
-	}
+	t.Run("ReportPhaseResult", func(t *testing.T) {
+		ack, err := server.ReportPhaseResult(ctx, &ocpv1.PhaseResultRequest{
+			ClusterId: clusterID,
+			Phase:     "infrastructure",
+			Status:    "completed",
+		})
+		if err != nil {
+			t.Fatalf("ReportPhaseResult: %v", err)
+		}
+		if ack == nil {
+			t.Fatal("expected non-nil ACK")
+		}
+	})
 
-	ack, err := server.ReportPhaseResult(ctxWithToken(token), req)
-	if err != nil {
-		t.Fatalf("ReportPhaseResult: %v", err)
-	}
-	if ack == nil {
-		t.Fatal("expected non-nil ACK")
-	}
+	t.Run("ReportMilestone", func(t *testing.T) {
+		ack, err := server.ReportMilestone(ctx, &ocpv1.MilestoneRequest{
+			ClusterId: clusterID,
+			Event:     "control_plane_ready",
+		})
+		if err != nil {
+			t.Fatalf("ReportMilestone: %v", err)
+		}
+		if ack == nil {
+			t.Fatal("expected non-nil ACK")
+		}
+	})
 
+	// Neither RPC should have closed the done channel or set completion/failure
 	if state.completion != nil || state.failure != nil {
-		t.Error("expected state to remain unchanged")
+		t.Error("informational RPCs should not mutate provision state")
 	}
-}
-
-func TestCallbackServer_ReportMilestone(t *testing.T) {
-	server, signer, provisions := newTestCallbackServer(t)
-	clusterID := "test-cluster-101"
-	state := &provisionState{done: make(chan struct{})}
-	provisions.Store(clusterID, state)
-
-	token, err := signer.Sign(clusterID, 2*time.Hour)
-	if err != nil {
-		t.Fatalf("Sign: %v", err)
-	}
-
-	req := &ocpv1.MilestoneRequest{
-		ClusterId: clusterID,
-		Event:     "control_plane_ready",
-	}
-
-	ack, err := server.ReportMilestone(ctxWithToken(token), req)
-	if err != nil {
-		t.Fatalf("ReportMilestone: %v", err)
-	}
-	if ack == nil {
-		t.Fatal("expected non-nil ACK")
+	select {
+	case <-state.done:
+		t.Error("informational RPCs should not close done channel")
+	default:
 	}
 }
 
