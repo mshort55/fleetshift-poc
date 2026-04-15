@@ -17,19 +17,40 @@ End-to-end tests that exercise the full FleetShift platform against real infrast
 - `dbus-x11` + `gnome-keyring` (Linux headless environments only)
 - A browser accessible from your machine (for SSO logins)
 
+### Keycloak (one-time per OCP cluster)
+
+Deploy Keycloak with the FleetShift realm. Scripts are in `e2e/setup/keycloak/`:
+
+```bash
+cd e2e/setup/keycloak
+./deploy.sh                    # Deploy Keycloak + realm + test users
+./add-user.sh \                # Add your personal user
+  --username you@company.com \
+  --password yourpass \
+  --github your-github-username \
+  --roles ops,dev
+```
+
+See `e2e/setup/keycloak/README.md` for details on clients, realm config, and troubleshooting.
+
+### AWS OIDC Federation (one-time per AWS account)
+
+Register Keycloak as an IAM OIDC identity provider and create the `OCP-Provisioner` role. Script is in `e2e/setup/aws-oidc-federation/`:
+
+```bash
+# Get your Keycloak route
+KEYCLOAK_HOST=$(oc get route -n keycloak-prod -o jsonpath='{.items[0].spec.host}')
+
+# Run setup
+KEYCLOAK_HOST=$KEYCLOAK_HOST ./e2e/setup/aws-oidc-federation/setup-aws-oidc-federation.sh
+
+# To tear down:
+KEYCLOAK_HOST=$KEYCLOAK_HOST ./e2e/setup/aws-oidc-federation/setup-aws-oidc-federation.sh --teardown
+```
+
 ### AWS
 
-- AWS IAM OIDC federation configured (one-time setup):
-  ```bash
-  ./OME/OCP-Engine/setup-aws-oidc-federation.sh
-  ```
 - Route53 hosted zone for your base domain
-
-### Keycloak
-
-- Keycloak deployed with the `fleetshift` realm and clients (`fleetshift-cli`, `fleetshift-signing`)
-- Device code flow enabled on `fleetshift-cli` client
-- Your user account with `github_username` attribute set
 
 ### GitHub
 
@@ -219,4 +240,31 @@ sqlite3 /tmp/fleetshift-e2e-data/fleetshift-e2e.db \
 10_ManualInspection   — Pause for manual cluster inspection
 11_DestroyDeployment  — fleetctl deployment delete
 12_ValidateCleanup    — Verify AWS resources cleaned up
+```
+
+## Setup Directory Structure
+
+```
+e2e/setup/
+├── keycloak/                          # Keycloak deployment on OCP
+│   ├── deploy.sh                      # Deploy Keycloak + realm + test users
+│   ├── teardown.sh                    # Remove everything
+│   ├── add-user.sh                    # Add personal user with GitHub username
+│   ├── README.md                      # Detailed Keycloak setup docs
+│   ├── realm/
+│   │   └── fleetshift-realm.json      # Realm config (3 clients, 3 test users, 2 roles)
+│   └── manifests/
+│       ├── namespace.yaml             # keycloak-prod namespace
+│       ├── cert-manager-sub.yaml      # cert-manager operator
+│       ├── cluster-issuer.yaml        # Let's Encrypt ClusterIssuer
+│       ├── certificate.yaml           # Keycloak TLS certificate
+│       ├── rhbk-sub.yaml             # RHBK operator (Keycloak)
+│       ├── postgres-statefulset.yaml  # PostgreSQL database
+│       └── keycloak.yaml              # Keycloak CR
+│
+└── aws-oidc-federation/               # AWS IAM setup for STS
+    └── setup-aws-oidc-federation.sh   # Register Keycloak as IAM OIDC provider,
+                                       # create OCP-Provisioner IAM role
+                                       # Requires: KEYCLOAK_HOST env var
+                                       # Idempotent, supports --teardown
 ```
