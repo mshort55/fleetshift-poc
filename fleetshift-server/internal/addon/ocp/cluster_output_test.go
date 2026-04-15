@@ -17,6 +17,8 @@ func TestClusterOutput_Target(t *testing.T) {
 		ClusterID:     "test-cluster-uuid",
 		Region:        "us-east-1",
 		RoleARN:       "arn:aws:iam::123456789012:role/test",
+		ReleaseImage:  "quay.io/openshift-release-dev/ocp-release:4.21.0-multi",
+		CCOSTSMode:    true,
 	}
 
 	target := output.Target()
@@ -58,6 +60,14 @@ func TestClusterOutput_Target(t *testing.T) {
 	if target.Properties["role_arn"] != "arn:aws:iam::123456789012:role/test" {
 		t.Errorf("properties[role_arn] = %q; want %q",
 			target.Properties["role_arn"], "arn:aws:iam::123456789012:role/test")
+	}
+	if target.Properties["release_image"] != "quay.io/openshift-release-dev/ocp-release:4.21.0-multi" {
+		t.Errorf("properties[release_image] = %q; want %q",
+			target.Properties["release_image"], "quay.io/openshift-release-dev/ocp-release:4.21.0-multi")
+	}
+	if target.Properties["cco_sts_mode"] != "true" {
+		t.Errorf("properties[cco_sts_mode] = %q; want %q",
+			target.Properties["cco_sts_mode"], "true")
 	}
 
 	// Verify AcceptedResourceTypes
