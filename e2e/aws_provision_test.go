@@ -350,6 +350,7 @@ func startServer(t, parentT *testing.T, binDir, repoRoot string, cfg *Config) {
 		"OCP_ENGINE_BINARY="+engineBin,
 		"OCP_CREDENTIAL_MODE=sso",
 		"OCP_PULL_SECRET_FILE="+psFile,
+		"OCP_CONSOLE_CLIENT_SECRET="+cfg.ConsoleClientSecret,
 	)
 	serverLogPath := "/tmp/fleetshift-e2e-server.log"
 	serverLog, err := os.Create(serverLogPath)

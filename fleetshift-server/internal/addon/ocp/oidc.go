@@ -11,11 +11,12 @@ import (
 
 // OIDCProviderConfig holds configuration for generating OIDC authentication manifests
 type OIDCProviderConfig struct {
-	IssuerURL    string
-	Audiences    []string
-	CABundle     []byte // PEM CA cert (optional - nil uses system trust)
-	ClientSecret string // OIDC client secret (optional)
-	CLIClientID  string // Client ID for oc CLI (optional)
+	IssuerURL       string
+	Audiences       []string
+	CABundle        []byte // PEM CA cert (optional - nil uses system trust)
+	ClientSecret    string // Console OIDC client secret (optional)
+	CLIClientID     string // Public client ID for oc CLI (optional)
+	ConsoleClientID string // Confidential client ID for web console (optional)
 }
 
 // GenerateOIDCManifests generates OpenShift manifests for OIDC authentication.
@@ -79,11 +80,20 @@ spec:
       groups:
         claim: groups
         prefix: 'oidc:'
-{{- if .HasCLIClient }}
+{{- if or .HasCLIClient .HasConsoleClient }}
     oidcClients:
+{{- if .HasCLIClient }}
     - clientID: {{ .CLIClientID }}
       componentName: cli
       componentNamespace: openshift-console
+{{- end }}
+{{- if .HasConsoleClient }}
+    - clientID: {{ .ConsoleClientID }}
+      clientSecret:
+        name: ocp-console-secret
+      componentName: console
+      componentNamespace: openshift-console
+{{- end }}
 {{- end }}
 `
 
@@ -100,18 +110,20 @@ data:
 const clientSecretTemplate = `apiVersion: v1
 kind: Secret
 metadata:
-  name: fleetshift-oidc-secret
+  name: ocp-console-secret
   namespace: openshift-config
 stringData:
   clientSecret: {{ .ClientSecretQuoted }}
 `
 
 type authCRData struct {
-	IssuerURL    string
-	Audiences    []string
-	HasCABundle  bool
-	HasCLIClient bool
-	CLIClientID  string
+	IssuerURL       string
+	Audiences       []string
+	HasCABundle     bool
+	HasCLIClient    bool
+	CLIClientID     string
+	HasConsoleClient bool
+	ConsoleClientID  string
 }
 
 type caConfigMapData struct {
@@ -129,11 +141,13 @@ func generateAuthenticationCR(cfg OIDCProviderConfig) ([]byte, error) {
 	}
 
 	data := authCRData{
-		IssuerURL:    cfg.IssuerURL,
-		Audiences:    cfg.Audiences,
-		HasCABundle:  len(cfg.CABundle) > 0,
-		HasCLIClient: cfg.CLIClientID != "",
-		CLIClientID:  cfg.CLIClientID,
+		IssuerURL:        cfg.IssuerURL,
+		Audiences:        cfg.Audiences,
+		HasCABundle:      len(cfg.CABundle) > 0,
+		HasCLIClient:     cfg.CLIClientID != "",
+		CLIClientID:      cfg.CLIClientID,
+		HasConsoleClient: cfg.ConsoleClientID != "" && cfg.ClientSecret != "",
+		ConsoleClientID:  cfg.ConsoleClientID,
 	}
 
 	var buf bytes.Buffer

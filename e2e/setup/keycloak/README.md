@@ -25,9 +25,35 @@ ACME_EMAIL=you@example.com ./deploy.sh
 
 # Without Let's Encrypt (uses cluster wildcard cert):
 ./deploy.sh
+
+# With base domain for OCP console OIDC (required for AWS cluster provisioning):
+./deploy.sh --base-domain aws-acm-cluster-virt.devcluster.openshift.com
 ```
 
 The script is idempotent — safe to re-run if something fails partway through. Existing secrets are preserved on re-run.
+
+### Adding base domains for OCP console OIDC
+
+Before provisioning AWS clusters with OIDC console access, register each base domain where clusters will be created. This adds a wildcard redirect URI to the `ocp-console` Keycloak client:
+
+```bash
+# Add a base domain (idempotent, can be run anytime after deploy)
+./add-base-domain.sh --base-domain aws-acm-cluster-virt.devcluster.openshift.com
+./add-base-domain.sh --base-domain other-team.devcluster.openshift.com
+```
+
+**This is a prerequisite for provisioning AWS clusters.** Without it, the OCP console cannot authenticate users via OIDC, causing the installer to time out waiting for the console operator.
+
+### Retrieving the console client secret
+
+The `ocp-console` client secret is generated during deployment and stored in a Kubernetes secret:
+
+```bash
+oc get secret ocp-console-client-secret -n keycloak-prod \
+  -o jsonpath='{.data.clientSecret}' | base64 -d
+```
+
+Set this as `E2E_CONSOLE_CLIENT_SECRET` in your `e2e/.env` file or `OCP_CONSOLE_CLIENT_SECRET` environment variable for the fleetshift server.
 
 On completion, the script prints the Keycloak URL, admin credentials, and test user credentials.
 

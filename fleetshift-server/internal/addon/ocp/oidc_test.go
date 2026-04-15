@@ -209,7 +209,7 @@ MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA0Z8Q==
 		if !ok {
 			t.Fatal("missing or invalid metadata")
 		}
-		if secretMetadata["name"] != "fleetshift-oidc-secret" {
+		if secretMetadata["name"] != "ocp-console-secret" {
 			t.Errorf("unexpected secret name: %v", secretMetadata["name"])
 		}
 		if secretMetadata["namespace"] != "openshift-config" {

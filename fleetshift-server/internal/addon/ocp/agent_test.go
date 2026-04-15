@@ -22,7 +22,7 @@ func TestPrepareWorkDir(t *testing.T) {
 	pullSecret := []byte(`{"auths":{}}`)
 	sshPubKey := []byte("ssh-ed25519 AAAAC3test")
 
-	configPath, workDir, err := prepareWorkDir("test-cluster", spec, "us-east-1", pullSecret, sshPubKey, domain.DeliveryAuth{})
+	configPath, workDir, err := prepareWorkDir("test-cluster", spec, "us-east-1", pullSecret, sshPubKey, domain.DeliveryAuth{}, "")
 	if err != nil {
 		t.Fatalf("prepareWorkDir: %v", err)
 	}
@@ -156,7 +156,7 @@ func TestPrepareWorkDir_DeterministicPath(t *testing.T) {
 		RoleARN:    "arn:aws:iam::123:role/test",
 	}
 
-	_, workDir, err := prepareWorkDir("det-test", spec, "us-east-1", []byte(`{"auths":{}}`), []byte("ssh-ed25519 KEY"), domain.DeliveryAuth{})
+	_, workDir, err := prepareWorkDir("det-test", spec, "us-east-1", []byte(`{"auths":{}}`), []byte("ssh-ed25519 KEY"), domain.DeliveryAuth{}, "")
 	if err != nil {
 		t.Fatalf("prepareWorkDir: %v", err)
 	}
@@ -189,7 +189,7 @@ func TestPrepareWorkDir_OIDCManifests(t *testing.T) {
 		Audience: []domain.Audience{"fleetshift-cli"},
 	}
 
-	_, workDir, err := prepareWorkDir("oidc-test", spec, "us-east-1", []byte(`{"auths":{}}`), []byte("ssh-ed25519 KEY"), auth)
+	_, workDir, err := prepareWorkDir("oidc-test", spec, "us-east-1", []byte(`{"auths":{}}`), []byte("ssh-ed25519 KEY"), auth, "test-console-secret")
 	if err != nil {
 		t.Fatalf("prepareWorkDir: %v", err)
 	}
@@ -229,7 +229,7 @@ func TestPrepareWorkDir_NoOIDCWithoutCaller(t *testing.T) {
 	}
 
 	// Empty auth — no caller, no OIDC manifests should be generated
-	_, workDir, err := prepareWorkDir("no-oidc-test", spec, "us-east-1", []byte(`{"auths":{}}`), []byte("ssh-ed25519 KEY"), domain.DeliveryAuth{})
+	_, workDir, err := prepareWorkDir("no-oidc-test", spec, "us-east-1", []byte(`{"auths":{}}`), []byte("ssh-ed25519 KEY"), domain.DeliveryAuth{}, "")
 	if err != nil {
 		t.Fatalf("prepareWorkDir: %v", err)
 	}

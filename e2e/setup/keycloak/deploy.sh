@@ -5,6 +5,15 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 NAMESPACE="keycloak-prod"
 KEYCLOAK_CR_NAME="keycloak"
 ACME_EMAIL="${ACME_EMAIL:-}"
+BASE_DOMAINS=()
+
+# Parse arguments
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --base-domain) BASE_DOMAINS+=("$2"); shift 2 ;;
+    *) break ;;
+  esac
+done
 
 # --- Colors and helpers ---
 RED='\033[0;31m'
@@ -280,7 +289,47 @@ else
     info "github_username attribute registered."
 fi
 
-# --- Step 11: Print summary ---
+# --- Step 11: Configure ocp-console client secret and base domains ---
+# The ocp-console client is created by realm import with a placeholder secret.
+# Generate a real secret and store it in a Kubernetes secret for retrieval.
+
+OCP_CONSOLE_UUID=$(curl -sk \
+    "${KC_URL}/admin/realms/fleetshift/clients?clientId=ocp-console" \
+    -H "Authorization: Bearer ${ADMIN_TOKEN}" | jq -r '.[0].id')
+
+if [[ "$OCP_CONSOLE_UUID" != "null" && -n "$OCP_CONSOLE_UUID" ]]; then
+    # Generate and set a random client secret
+    CONSOLE_SECRET=$(openssl rand -hex 32)
+
+    curl -sk -o /dev/null -w '' -X POST \
+        "${KC_URL}/admin/realms/fleetshift/clients/${OCP_CONSOLE_UUID}/client-secret" \
+        -H "Authorization: Bearer ${ADMIN_TOKEN}"
+
+    # Read back the generated secret
+    CONSOLE_SECRET=$(curl -sk \
+        "${KC_URL}/admin/realms/fleetshift/clients/${OCP_CONSOLE_UUID}/client-secret" \
+        -H "Authorization: Bearer ${ADMIN_TOKEN}" | jq -r .value)
+
+    # Store in a Kubernetes secret for retrieval by the OCP agent
+    if oc get secret ocp-console-client-secret -n "${NAMESPACE}" >/dev/null 2>&1; then
+        info "ocp-console-client-secret already exists, updating..."
+        oc delete secret ocp-console-client-secret -n "${NAMESPACE}"
+    fi
+    oc create secret generic ocp-console-client-secret \
+        -n "${NAMESPACE}" \
+        --from-literal=clientSecret="${CONSOLE_SECRET}"
+    info "ocp-console client secret stored in secret/${NAMESPACE}/ocp-console-client-secret"
+
+    # Add base domain redirect URIs if provided
+    for domain in "${BASE_DOMAINS[@]}"; do
+        info "Adding base domain: ${domain}"
+        "${SCRIPT_DIR}/add-base-domain.sh" --base-domain "$domain"
+    done
+else
+    warn "ocp-console client not found in realm. Console OIDC will not be configured."
+fi
+
+# --- Step 12: Print summary ---
 ADMIN_PASSWORD=$(oc get secret "${KEYCLOAK_CR_NAME}-initial-admin" -n "${NAMESPACE}" \
     -o jsonpath='{.data.password}' | base64 -d)
 ADMIN_USERNAME=$(oc get secret "${KEYCLOAK_CR_NAME}-initial-admin" -n "${NAMESPACE}" \

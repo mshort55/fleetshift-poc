@@ -28,8 +28,9 @@ type Agent struct {
 	credentials      CredentialProvider
 	observer         AgentObserver
 	tokenSigner      *CallbackTokenSigner
-	provisionTimeout time.Duration
-	provisions       sync.Map // clusterID → *provisionState
+	provisionTimeout    time.Duration
+	consoleClientSecret string // OIDC client secret for OCP web console
+	provisions          sync.Map // clusterID → *provisionState
 	grpcServer       *grpc.Server
 }
 
@@ -75,8 +76,9 @@ func NewAgent(opts ...AgentOption) *Agent {
 		engineBinary = "ocp-engine"
 	}
 	a := &Agent{
-		engineBinary: engineBinary,
-		observer:     NoOpAgentObserver{},
+		engineBinary:        engineBinary,
+		consoleClientSecret: os.Getenv("OCP_CONSOLE_CLIENT_SECRET"),
+		observer:            NoOpAgentObserver{},
 	}
 	for _, o := range opts {
 		o(a)
@@ -194,7 +196,7 @@ func (a *Agent) Deliver(
 	}
 
 	// 7. Prepare work directory with pull secret and cluster.yaml
-	configPath, workDir, err := prepareWorkDir(clusterID, spec, region, pullSecret, sshPublicKey, auth)
+	configPath, workDir, err := prepareWorkDir(clusterID, spec, region, pullSecret, sshPublicKey, auth, a.consoleClientSecret)
 	if err != nil {
 		probe.Error(err)
 		return domain.DeliveryResult{
@@ -664,7 +666,7 @@ func provisionWorkDirPath(clusterID string) string {
 // prepareWorkDir creates a temp directory containing the pull secret and
 // cluster.yaml config. Returns the config file path and work directory.
 // The caller is responsible for cleaning up the work directory.
-func prepareWorkDir(clusterID string, spec *ClusterSpec, region string, pullSecret, sshPublicKey []byte, auth domain.DeliveryAuth) (configPath, workDir string, err error) {
+func prepareWorkDir(clusterID string, spec *ClusterSpec, region string, pullSecret, sshPublicKey []byte, auth domain.DeliveryAuth, consoleClientSecret string) (configPath, workDir string, err error) {
 	workDir = provisionWorkDirPath(clusterID)
 	if err = os.MkdirAll(workDir, 0755); err != nil {
 		return "", "", fmt.Errorf("create work directory: %w", err)
@@ -704,9 +706,14 @@ func prepareWorkDir(clusterID string, spec *ClusterSpec, region string, pullSecr
 			clientID = audiences[0]
 		}
 		oidcCfg := OIDCProviderConfig{
-			IssuerURL:   string(auth.Caller.Issuer),
-			Audiences:   audiences,
-			CLIClientID: clientID,
+			IssuerURL:       string(auth.Caller.Issuer),
+			Audiences:       audiences,
+			CLIClientID:     clientID,
+			ConsoleClientID: "ocp-console",
+			ClientSecret:    consoleClientSecret,
+		}
+		if consoleClientSecret != "" {
+			oidcCfg.Audiences = append(oidcCfg.Audiences, "ocp-console")
 		}
 		extraDir := filepath.Join(workDir, "extra-manifests")
 		if err = os.MkdirAll(extraDir, 0755); err != nil {
