@@ -394,12 +394,13 @@ func setupAuth(t *testing.T, binDir string, cfg *Config) {
 	cmd := exec.Command(fleetctl, "auth", "setup",
 		"--issuer-url", cfg.KeycloakIssuer,
 		"--client-id", cfg.KeycloakClientID,
-		"--scopes", "openid",
+		"--scopes", "openid,profile,email",
+		"--audience", cfg.KeycloakClientID,
 	)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 
-	t.Logf("Running: fleetctl auth setup --issuer-url %s --client-id %s --scopes openid",
+	t.Logf("Running: fleetctl auth setup --issuer-url %s --client-id %s",
 		cfg.KeycloakIssuer, cfg.KeycloakClientID)
 	if err := cmd.Run(); err != nil {
 		t.Fatalf("fleetctl auth setup: %v", err)
