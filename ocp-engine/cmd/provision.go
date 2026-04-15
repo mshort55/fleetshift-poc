@@ -10,6 +10,7 @@ import (
 
 	"github.com/ocp-engine/internal/artifacts"
 	"github.com/ocp-engine/internal/callback"
+	"github.com/ocp-engine/internal/ccoctl"
 	"github.com/ocp-engine/internal/config"
 	"github.com/ocp-engine/internal/installer"
 	"github.com/ocp-engine/internal/logpipeline"
@@ -102,6 +103,40 @@ func runProvision(cmd *cobra.Command, args []string) error {
 		"extract": func() error {
 			return inst.Extract(logPath)
 		},
+		"ccoctl": func() error {
+			if !cfg.Engine.CCOSTSMode {
+				return nil
+			}
+
+			clusterName := extractClusterName(cfg)
+			region := extractRegion(cfg)
+
+			// Extract ccoctl binary from release image
+			if err := installer.RunCommand("oc", ccoctl.ExtractBinaryArgs(wd.Path, cfg.Engine.PullSecretFile, releaseImage), inst.BuildEnv(), logPath); err != nil {
+				return fmt.Errorf("extract ccoctl binary: %w", err)
+			}
+
+			// Extract CredentialsRequests from release image
+			credReqDir := ccoctl.CredReqDir(wd.Path)
+			if err := os.MkdirAll(credReqDir, 0755); err != nil {
+				return fmt.Errorf("create credrequests dir: %w", err)
+			}
+			if err := installer.RunCommand("oc", ccoctl.ExtractCredReqArgs(credReqDir, cfg.Engine.PullSecretFile, releaseImage), inst.BuildEnv(), logPath); err != nil {
+				return fmt.Errorf("extract credentials requests: %w", err)
+			}
+
+			// Run ccoctl aws create-all
+			outputDir := ccoctl.OutputDir(wd.Path)
+			if err := os.MkdirAll(outputDir, 0755); err != nil {
+				return fmt.Errorf("create ccoctl output dir: %w", err)
+			}
+			ccoctlBinary := ccoctl.BinaryPath(wd.Path)
+			if err := installer.RunCommand(ccoctlBinary, ccoctl.CreateAllArgs(clusterName, region, credReqDir, outputDir), inst.BuildEnv(), logPath); err != nil {
+				return fmt.Errorf("ccoctl aws create-all: %w", err)
+			}
+
+			return nil
+		},
 		"install-config": func() error {
 			installConfigData, err := config.GenerateInstallConfig(cfg)
 			if err != nil {
@@ -113,7 +148,15 @@ func runProvision(cmd *cobra.Command, args []string) error {
 			if err := wd.BackupInstallConfig(); err != nil {
 				return fmt.Errorf("backup install-config: %w", err)
 			}
-			return inst.CreateManifests(logPath)
+			if err := inst.CreateManifests(logPath); err != nil {
+				return err
+			}
+			if cfg.Engine.CCOSTSMode {
+				if err := ccoctl.InjectManifests(ccoctl.OutputDir(wd.Path), wd.Path); err != nil {
+					return fmt.Errorf("inject ccoctl manifests: %w", err)
+				}
+			}
+			return nil
 		},
 		"ignition": func() error {
 			return inst.CreateIgnitionConfigs(logPath)
@@ -253,6 +296,16 @@ func readFullLog(path string) string {
 		return ""
 	}
 	return string(data)
+}
+
+// extractClusterName pulls the cluster name from the parsed cluster config.
+func extractClusterName(cfg *config.ClusterConfig) string {
+	metadata, ok := cfg.InstallConfig["metadata"].(map[string]any)
+	if !ok {
+		return ""
+	}
+	name, _ := metadata["name"].(string)
+	return name
 }
 
 // extractRegion pulls the AWS region from the parsed cluster config.
