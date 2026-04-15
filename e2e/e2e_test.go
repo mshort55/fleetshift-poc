@@ -38,7 +38,12 @@ var (
 )
 
 func TestE2E(t *testing.T) {
-	ensureKeyring(t)
+	// Verify keyring is accessible. On headless Linux, run this first:
+	//   eval "$(dbus-launch --sh-syntax)" && echo "" | gnome-keyring-daemon --unlock --components=secrets
+	if err := keyring.Set("fleetctl", "__e2e_probe", "ok"); err != nil {
+		t.Fatalf("Keyring unavailable: %v\n\nRun this before the test:\n  eval \"$(dbus-launch --sh-syntax)\" && echo \"\" | gnome-keyring-daemon --unlock --components=secrets\n\nThen run make test-e2e in the same shell.", err)
+	}
+	keyring.Delete("fleetctl", "__e2e_probe")
 
 	repoRoot = findRepoRoot(t)
 	binDir = filepath.Join(repoRoot, "bin")
@@ -995,79 +1000,4 @@ func validateCleanup(t *testing.T, cfg *Config) {
 
 func strPtr(s string) *string { return &s }
 
-// ---------------------------------------------------------------------------
-// Helper: ensureKeyring
-// ---------------------------------------------------------------------------
-
-// ensureKeyring makes sure a D-Bus session with an unlocked GNOME keyring
-// is available. On Linux, godbus/dbus.SessionBus() caches the D-Bus
-// connection at first use, so DBUS_SESSION_BUS_ADDRESS must be set before
-// any Go code touches D-Bus. If it's not set, we launch a fresh D-Bus
-// session + keyring daemon and re-exec the test process with the new env.
-//
-// On non-Linux platforms (macOS, Windows) this is a no-op — the OS keychain
-// works without D-Bus.
-func ensureKeyring(t *testing.T) {
-	t.Helper()
-
-	if os.Getenv("E2E_KEYRING_READY") == "1" {
-		return // already set up by a parent re-exec
-	}
-
-	// Check if keyring works as-is (e.g., desktop Linux with unlocked session).
-	if err := keyring.Set("fleetctl", "__e2e_probe", "ok"); err == nil {
-		keyring.Delete("fleetctl", "__e2e_probe")
-		return // keyring works, no setup needed
-	}
-
-	// Keyring doesn't work. Try dbus-launch + gnome-keyring-daemon and re-exec.
-	t.Log("Keyring unavailable, launching D-Bus session and re-execing...")
-
-	dbusOut, err := exec.Command("dbus-launch", "--sh-syntax").Output()
-	if err != nil {
-		t.Fatalf("dbus-launch failed (install dbus-x11): %v", err)
-	}
-
-	env := os.Environ()
-	for _, line := range strings.Split(string(dbusOut), "\n") {
-		if k, v, ok := strings.Cut(line, "="); ok {
-			v = strings.TrimRight(v, ";")
-			v = strings.Trim(v, "'")
-			env = append(env, k+"="+v)
-		}
-	}
-
-	// Unlock keyring in the new D-Bus session. Capture GNOME_KEYRING_CONTROL
-	// from its output — the daemon sets this to its socket path.
-	unlockCmd := exec.Command("gnome-keyring-daemon", "--unlock", "--components=secrets")
-	unlockCmd.Stdin = strings.NewReader("")
-	unlockCmd.Env = env
-	unlockOut, err := unlockCmd.Output()
-	if err != nil {
-		t.Fatalf("gnome-keyring-daemon unlock failed (install gnome-keyring): %v", err)
-	}
-	for _, line := range strings.Split(string(unlockOut), "\n") {
-		if k, v, ok := strings.Cut(line, "="); ok {
-			env = append(env, k+"="+v)
-		}
-	}
-
-	// Re-exec this test with the D-Bus env set and a marker to avoid infinite loop.
-	env = append(env, "E2E_KEYRING_READY=1")
-	args := os.Args
-	cmd := exec.Command(args[0], args[1:]...)
-	cmd.Env = env
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	cmd.Stdin = os.Stdin
-
-	t.Logf("Re-execing with D-Bus session...")
-	if err := cmd.Run(); err != nil {
-		if exitErr, ok := err.(*exec.ExitError); ok {
-			os.Exit(exitErr.ExitCode())
-		}
-		t.Fatalf("re-exec failed: %v", err)
-	}
-	os.Exit(0)
-}
 
