@@ -81,22 +81,22 @@ func NewAgent(opts ...AgentOption) *Agent {
 		o(a)
 	}
 
-	// Default credential provider from environment if not set via option
+	// Default credential provider: if static AWS keys are present in the
+	// environment, use passthrough. Otherwise use SSO (STS
+	// AssumeRoleWithWebIdentity from the caller's OIDC token).
 	if a.credentials == nil {
-		var pullSecret []byte
-		if ps := os.Getenv("OCP_PULL_SECRET_FILE"); ps != "" {
-			data, err := os.ReadFile(ps)
-			if err != nil {
-				slog.Warn("failed to read OCP pull secret file", "path", ps, "error", err)
-			} else {
-				pullSecret = data
+		pullSecret := loadPullSecret()
+		if os.Getenv("AWS_ACCESS_KEY_ID") != "" {
+			a.credentials = &PassthroughCredentialProvider{
+				AWSAccessKeyID:     os.Getenv("AWS_ACCESS_KEY_ID"),
+				AWSSecretAccessKey: os.Getenv("AWS_SECRET_ACCESS_KEY"),
+				AWSSessionToken:    os.Getenv("AWS_SESSION_TOKEN"),
+				PullSecret:         pullSecret,
 			}
-		}
-		a.credentials = &PassthroughCredentialProvider{
-			AWSAccessKeyID:     os.Getenv("AWS_ACCESS_KEY_ID"),
-			AWSSecretAccessKey: os.Getenv("AWS_SECRET_ACCESS_KEY"),
-			AWSSessionToken:    os.Getenv("AWS_SESSION_TOKEN"),
-			PullSecret:         pullSecret,
+		} else {
+			a.credentials = &SSOCredentialProvider{
+				PullSecret: pullSecret,
+			}
 		}
 	}
 
@@ -641,6 +641,20 @@ func prepareWorkDir(clusterID string, spec *ClusterSpec, region string, pullSecr
 	}
 
 	return configPath, workDir, nil
+}
+
+// loadPullSecret reads the pull secret from OCP_PULL_SECRET_FILE if set.
+func loadPullSecret() []byte {
+	ps := os.Getenv("OCP_PULL_SECRET_FILE")
+	if ps == "" {
+		return nil
+	}
+	data, err := os.ReadFile(ps)
+	if err != nil {
+		slog.Warn("failed to read OCP pull secret file", "path", ps, "error", err)
+		return nil
+	}
+	return data
 }
 
 // writeDestroyMetadata writes a reconstructed metadata.json to the work
