@@ -166,11 +166,32 @@ func TestE2E(t *testing.T) {
 		validateClusterOIDC(t, cfg, keycloakToken)
 	})
 
-	step("10_DestroyDeployment", func(t *testing.T) {
+	step("10_ManualInspection", func(t *testing.T) {
+		fmt.Println()
+		fmt.Println("  ================================================================")
+		fmt.Println("  CLUSTER IS READY FOR MANUAL INSPECTION")
+		fmt.Println("  ================================================================")
+		fmt.Println()
+		fmt.Printf("  Cluster: %s\n", cfg.ClusterName)
+		fmt.Printf("  Region:  %s\n", cfg.Region)
+		fmt.Println()
+		fmt.Println("  Take your time to inspect the cluster. When done,")
+		fmt.Println("  press Enter to destroy the cluster and clean up AWS resources.")
+		fmt.Println()
+		fmt.Print("  Press Enter to destroy...")
+		tty, err := os.Open("/dev/tty")
+		if err != nil {
+			t.Fatalf("cannot open /dev/tty: %v", err)
+		}
+		bufio.NewReader(tty).ReadBytes('\n')
+		tty.Close()
+	})
+
+	step("11_DestroyDeployment", func(t *testing.T) {
 		destroyDeployment(t, binDir, cfg)
 	})
 
-	step("11_ValidateCleanup", func(t *testing.T) {
+	step("12_ValidateCleanup", func(t *testing.T) {
 		validateCleanup(t, cfg)
 	})
 }
