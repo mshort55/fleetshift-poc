@@ -26,8 +26,11 @@ test-cli: ## Run CLI tests
 test-ocp-engine: ## Run ocp-engine tests
 	cd ocp-engine && go test ./...
 
-test-e2e: build ## Run E2E tests (requires .env config and interactive auth)
+test-e2e: build ## Run all E2E tests (requires .env config and interactive auth)
 	cd e2e && go test -tags e2e -timeout 3h -v
+
+test-e2e-aws: build ## Run AWS provision/destroy E2E test
+	cd e2e && go test -tags e2e -timeout 3h -v -run TestAWSProvision
 
 generate: ## Generate protobuf and gRPC code
 	buf generate --path proto/fleetshift

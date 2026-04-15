@@ -40,7 +40,7 @@ var (
 	serverLogFile string // path to server log file
 )
 
-func TestE2E(t *testing.T) {
+func TestAWSProvision(t *testing.T) {
 	// Verify keyring is accessible. On headless Linux, run this first:
 	//   eval "$(dbus-launch --sh-syntax)" && echo "" | gnome-keyring-daemon --unlock --components=secrets
 	if err := keyring.Set("fleetctl", "__e2e_probe", "ok"); err != nil {
