@@ -3,6 +3,7 @@ package ocp
 import (
 	"encoding/json"
 	"os"
+	"path/filepath"
 	"testing"
 
 	"gopkg.in/yaml.v3"
@@ -134,5 +135,33 @@ func TestValidateCredentialModeCoupling(t *testing.T) {
 				t.Errorf("validateCredentialModeCoupling() error = %v, wantError = %v", err, tt.wantError)
 			}
 		})
+	}
+}
+
+func TestProvisionWorkDirPath(t *testing.T) {
+	got := provisionWorkDirPath("my-cluster")
+	expected := filepath.Join(os.TempDir(), "ocp-provision-my-cluster")
+	if got != expected {
+		t.Errorf("provisionWorkDirPath(%q) = %q, want %q", "my-cluster", got, expected)
+	}
+}
+
+func TestPrepareWorkDir_DeterministicPath(t *testing.T) {
+	spec := &ClusterSpec{
+		Name:       "det-test",
+		BaseDomain: "example.com",
+		Region:     "us-east-1",
+		RoleARN:    "arn:aws:iam::123:role/test",
+	}
+
+	_, workDir, err := prepareWorkDir("det-test", spec, "us-east-1", []byte(`{"auths":{}}`), []byte("ssh-ed25519 KEY"))
+	if err != nil {
+		t.Fatalf("prepareWorkDir: %v", err)
+	}
+	defer os.RemoveAll(workDir)
+
+	expected := filepath.Join(os.TempDir(), "ocp-provision-det-test")
+	if workDir != expected {
+		t.Errorf("workDir = %q, want %q", workDir, expected)
 	}
 }

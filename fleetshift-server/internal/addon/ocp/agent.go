@@ -507,12 +507,17 @@ func validateCredentialModeCoupling(creds *AWSCredentials, ccostsMode bool) erro
 	return nil
 }
 
+// provisionWorkDirPath returns the deterministic work directory path for a cluster.
+func provisionWorkDirPath(clusterID string) string {
+	return filepath.Join(os.TempDir(), "ocp-provision-"+clusterID)
+}
+
 // prepareWorkDir creates a temp directory containing the pull secret and
 // cluster.yaml config. Returns the config file path and work directory.
 // The caller is responsible for cleaning up the work directory.
 func prepareWorkDir(clusterID string, spec *ClusterSpec, region string, pullSecret, sshPublicKey []byte) (configPath, workDir string, err error) {
-	workDir, err = os.MkdirTemp("", "ocp-provision-"+clusterID+"-")
-	if err != nil {
+	workDir = provisionWorkDirPath(clusterID)
+	if err = os.MkdirAll(workDir, 0755); err != nil {
 		return "", "", fmt.Errorf("create work directory: %w", err)
 	}
 	defer func() {
