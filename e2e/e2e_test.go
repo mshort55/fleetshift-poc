@@ -476,7 +476,12 @@ func enrollSigningKey(t *testing.T, binDir string) {
 	fmt.Println("    3. Paste the key and save")
 	fmt.Println()
 	fmt.Print("  Press Enter when done...")
-	bufio.NewReader(os.Stdin).ReadBytes('\n')
+	tty, err := os.Open("/dev/tty")
+	if err != nil {
+		t.Fatalf("cannot open /dev/tty for interactive prompt: %v", err)
+	}
+	bufio.NewReader(tty).ReadBytes('\n')
+	tty.Close()
 }
 
 // ---------------------------------------------------------------------------
