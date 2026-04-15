@@ -158,6 +158,17 @@ func TestE2E(t *testing.T) {
 			t.Fatalf("provision ended in state %s, expected STATE_ACTIVE", state)
 		}
 		t.Logf("Deployment reached STATE_ACTIVE")
+
+		// Try to save the work dir before the agent cleans it up.
+		// This is a race — the agent may have already deleted it.
+		srcDir := filepath.Join(os.TempDir(), "ocp-provision-"+cfg.ClusterName)
+		dstDir := "/tmp/fleetshift-e2e-workdir"
+		os.RemoveAll(dstDir)
+		if err := exec.Command("cp", "-a", srcDir, dstDir).Run(); err != nil {
+			t.Logf("Could not save work dir (may already be deleted): %v", err)
+		} else {
+			t.Logf("Work dir saved to %s", dstDir)
+		}
 	})
 
 	step("08_ValidateDeployment", func(t *testing.T) {
