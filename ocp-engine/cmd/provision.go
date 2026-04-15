@@ -108,8 +108,8 @@ func runProvision(cmd *cobra.Command, args []string) error {
 				return nil
 			}
 
-			clusterName := extractClusterName(cfg)
-			region := extractRegion(cfg)
+			clusterName := cfg.ClusterName()
+			region := cfg.Region()
 
 			// Extract ccoctl binary from release image
 			if err := installer.RunCommand("oc", ccoctl.ExtractBinaryArgs(wd.Path, cfg.Engine.PullSecretFile, releaseImage), inst.BuildEnv(), logPath); err != nil {
@@ -264,7 +264,7 @@ func runProvision(cmd *cobra.Command, args []string) error {
 
 	// Report completion via callback with artifact data
 	if cb != nil {
-		region := extractRegion(cfg)
+		region := cfg.Region()
 		apiServer, caCert := extractKubeconfigData(filepath.Join(wd.Path, "auth", "kubeconfig"))
 		kubeconfig, _ := os.ReadFile(filepath.Join(wd.Path, "auth", "kubeconfig"))
 		metadataJSON, _ := os.ReadFile(filepath.Join(wd.Path, "metadata.json"))
@@ -296,30 +296,6 @@ func readFullLog(path string) string {
 		return ""
 	}
 	return string(data)
-}
-
-// extractClusterName pulls the cluster name from the parsed cluster config.
-func extractClusterName(cfg *config.ClusterConfig) string {
-	metadata, ok := cfg.InstallConfig["metadata"].(map[string]any)
-	if !ok {
-		return ""
-	}
-	name, _ := metadata["name"].(string)
-	return name
-}
-
-// extractRegion pulls the AWS region from the parsed cluster config.
-func extractRegion(cfg *config.ClusterConfig) string {
-	platform, ok := cfg.InstallConfig["platform"].(map[string]any)
-	if !ok {
-		return ""
-	}
-	aws, ok := platform["aws"].(map[string]any)
-	if !ok {
-		return ""
-	}
-	region, _ := aws["region"].(string)
-	return region
 }
 
 // extractKubeconfigData reads a kubeconfig file and extracts the API server

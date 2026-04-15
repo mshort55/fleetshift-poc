@@ -135,6 +135,30 @@ func hasCredentials(c *AWSCredentials) bool {
 		os.Getenv("AWS_ACCESS_KEY_ID") != ""
 }
 
+// ClusterName returns the cluster name from the install-config metadata.
+func (c *ClusterConfig) ClusterName() string {
+	metadata, ok := c.InstallConfig["metadata"].(map[string]any)
+	if !ok {
+		return ""
+	}
+	name, _ := metadata["name"].(string)
+	return name
+}
+
+// Region returns the AWS region from the install-config platform.
+func (c *ClusterConfig) Region() string {
+	platform, ok := c.InstallConfig["platform"].(map[string]any)
+	if !ok {
+		return ""
+	}
+	aws, ok := platform["aws"].(map[string]any)
+	if !ok {
+		return ""
+	}
+	region, _ := aws["region"].(string)
+	return region
+}
+
 // GenerateInstallConfig produces a valid install-config.yaml by inlining
 // file contents into the pass-through install-config map.
 func GenerateInstallConfig(cfg *ClusterConfig) ([]byte, error) {

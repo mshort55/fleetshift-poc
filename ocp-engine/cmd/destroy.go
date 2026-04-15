@@ -111,8 +111,8 @@ func runDestroy(cmd *cobra.Command, args []string) error {
 	// Clean up ccoctl resources (IAM OIDC provider, roles, S3 bucket)
 	if cfg.Engine.CCOSTSMode {
 		ccoctlBinary := ccoctl.BinaryPath(wd.Path)
-		clusterName := extractDestroyClusterName(cfg)
-		region := extractDestroyRegion(cfg)
+		clusterName := cfg.ClusterName()
+		region := cfg.Region()
 
 		if _, statErr := os.Stat(ccoctlBinary); os.IsNotExist(statErr) {
 			if cfg.Engine.ReleaseImage != "" && cfg.Engine.PullSecretFile != "" {
@@ -152,24 +152,3 @@ func runDestroy(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
-func extractDestroyClusterName(cfg *config.ClusterConfig) string {
-	metadata, ok := cfg.InstallConfig["metadata"].(map[string]any)
-	if !ok {
-		return ""
-	}
-	name, _ := metadata["name"].(string)
-	return name
-}
-
-func extractDestroyRegion(cfg *config.ClusterConfig) string {
-	platform, ok := cfg.InstallConfig["platform"].(map[string]any)
-	if !ok {
-		return ""
-	}
-	aws, ok := platform["aws"].(map[string]any)
-	if !ok {
-		return ""
-	}
-	region, _ := aws["region"].(string)
-	return region
-}

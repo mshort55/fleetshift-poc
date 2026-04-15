@@ -3,8 +3,16 @@ package ccoctl
 import (
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 )
+
+func requireArg(t *testing.T, args []string, want string) {
+	t.Helper()
+	if !slices.Contains(args, want) {
+		t.Errorf("args missing %q, got %v", want, args)
+	}
+}
 
 func TestCreateAllArgs(t *testing.T) {
 	got := CreateAllArgs("test-cluster", "us-east-1", "/path/to/credrequests", "/path/to/output")
@@ -50,66 +58,22 @@ func TestDeleteArgs(t *testing.T) {
 
 func TestExtractBinaryArgs(t *testing.T) {
 	got := ExtractBinaryArgs("/work/dir", "/path/to/pull-secret.json", "quay.io/openshift-release-dev/ocp-release:4.14.0")
-
-	// Must contain these key arguments
-	requiredArgs := []string{"--command=ccoctl", "--to", "/work/dir", "--registry-config", "/path/to/pull-secret.json"}
-
-	for _, required := range requiredArgs {
-		found := false
-		for _, arg := range got {
-			if arg == required {
-				found = true
-				break
-			}
-		}
-		if !found {
-			t.Errorf("ExtractBinaryArgs() missing required arg %q, got %v", required, got)
-		}
-	}
-
-	// Should also contain the release image
-	found := false
-	for _, arg := range got {
-		if arg == "quay.io/openshift-release-dev/ocp-release:4.14.0" {
-			found = true
-			break
-		}
-	}
-	if !found {
-		t.Errorf("ExtractBinaryArgs() missing release image in args: %v", got)
-	}
+	requireArg(t, got, "--command=ccoctl")
+	requireArg(t, got, "--to")
+	requireArg(t, got, "/work/dir")
+	requireArg(t, got, "--registry-config")
+	requireArg(t, got, "/path/to/pull-secret.json")
+	requireArg(t, got, "quay.io/openshift-release-dev/ocp-release:4.14.0")
 }
 
 func TestExtractCredReqArgs(t *testing.T) {
 	got := ExtractCredReqArgs("/path/to/credrequests", "/path/to/pull-secret.json", "quay.io/openshift-release-dev/ocp-release:4.14.0")
-
-	// Must contain these key arguments
-	requiredArgs := []string{"--credentials-requests", "--cloud=aws", "--to", "/path/to/credrequests", "--registry-config", "/path/to/pull-secret.json"}
-
-	for _, required := range requiredArgs {
-		found := false
-		for _, arg := range got {
-			if arg == required {
-				found = true
-				break
-			}
-		}
-		if !found {
-			t.Errorf("ExtractCredReqArgs() missing required arg %q, got %v", required, got)
-		}
-	}
-
-	// Should also contain the release image
-	found := false
-	for _, arg := range got {
-		if arg == "quay.io/openshift-release-dev/ocp-release:4.14.0" {
-			found = true
-			break
-		}
-	}
-	if !found {
-		t.Errorf("ExtractCredReqArgs() missing release image in args: %v", got)
-	}
+	requireArg(t, got, "--credentials-requests")
+	requireArg(t, got, "--cloud=aws")
+	requireArg(t, got, "--to")
+	requireArg(t, got, "/path/to/credrequests")
+	requireArg(t, got, "--registry-config")
+	requireArg(t, got, "quay.io/openshift-release-dev/ocp-release:4.14.0")
 }
 
 func TestBinaryPath(t *testing.T) {

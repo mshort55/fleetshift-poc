@@ -103,17 +103,13 @@ func BuildClusterYAML(spec *ClusterSpec, region, pullSecretFile, sshPublicKey st
 	if spec.ReleaseImage != "" {
 		ocpEngine["release_image"] = spec.ReleaseImage
 	}
-
-	config["ocp_engine"] = ocpEngine
-	config["baseDomain"] = spec.BaseDomain
-
-	// Set CCO STS mode configuration conditionally
-	stsMode := spec.EffectiveCCOSTSMode()
-	if stsMode {
+	if spec.EffectiveCCOSTSMode() {
 		ocpEngine["cco_sts_mode"] = true
 		config["credentialsMode"] = "Manual"
 	}
+	config["ocp_engine"] = ocpEngine
 
+	config["baseDomain"] = spec.BaseDomain
 	config["metadata"] = map[string]any{
 		"name": spec.Name,
 	}
