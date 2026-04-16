@@ -14,6 +14,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -201,12 +202,7 @@ func TestAWSProvision(t *testing.T) {
 		fmt.Println("  press Enter to destroy the cluster and clean up AWS resources.")
 		fmt.Println()
 		fmt.Print("  Press Enter to destroy...")
-		tty, err := os.Open("/dev/tty")
-		if err != nil {
-			t.Fatalf("cannot open /dev/tty: %v", err)
-		}
-		bufio.NewReader(tty).ReadBytes('\n')
-		tty.Close()
+		waitForTTYEnter(t)
 	})
 
 	step("11_DestroyDeployment", func(t *testing.T) {
@@ -230,10 +226,7 @@ func TestAWSProvision(t *testing.T) {
 		fmt.Println("    fleetctl deployment get <name> -o json")
 		fmt.Println()
 		fmt.Print("  Press Enter to shut down the server and exit...")
-		if tty, err := os.Open("/dev/tty"); err == nil {
-			bufio.NewReader(tty).ReadBytes('\n')
-			tty.Close()
-		}
+		waitForTTYEnter(t)
 	}
 }
 
@@ -538,12 +531,7 @@ func enrollSigningKey(t *testing.T, binDir string) {
 	fmt.Println("    3. Paste the key and save")
 	fmt.Println()
 	fmt.Print("  Press Enter when done...")
-	tty, err := os.Open("/dev/tty")
-	if err != nil {
-		t.Fatalf("cannot open /dev/tty for interactive prompt: %v", err)
-	}
-	bufio.NewReader(tty).ReadBytes('\n')
-	tty.Close()
+	waitForTTYEnter(t)
 }
 
 // ---------------------------------------------------------------------------
@@ -681,6 +669,29 @@ func elapsed(start time.Time) string {
 	mins := int(d.Minutes())
 	secs := int(d.Seconds()) % 60
 	return fmt.Sprintf("%02d:%02d", mins, secs)
+}
+
+// waitForTTYEnter opens /dev/tty, flushes any stale input (e.g. leftover
+// Enter from prior interactive steps), and blocks until the user presses Enter.
+func waitForTTYEnter(t *testing.T) {
+	t.Helper()
+	tty, err := os.Open("/dev/tty")
+	if err != nil {
+		t.Fatalf("cannot open /dev/tty: %v", err)
+	}
+	defer tty.Close()
+
+	// Drain stale input by switching to non-blocking mode.
+	syscall.SetNonblock(int(tty.Fd()), true)
+	discard := make([]byte, 256)
+	for {
+		if _, err := tty.Read(discard); err != nil {
+			break
+		}
+	}
+	syscall.SetNonblock(int(tty.Fd()), false)
+
+	bufio.NewReader(tty).ReadBytes('\n')
 }
 
 // ---------------------------------------------------------------------------
