@@ -174,6 +174,7 @@ This prototype is closest to the provenance half of the design.
 - There is no workflow state like `PausedAuth`; verification simply accepts or rejects.
 - There is no real registry, discovery, or network fetch for trust roots.
 - There is no apply loop or drift/status reporting. The prototype stops at "is this delivery valid?".
+- `derive_constraints` in `mutation.py` accumulates prior constraints forward through derivation chains. The intended design is per-layer: each attestation's explicit constraints bind its immediate output, and trust flows through the chain because each link is independently verified. The update's constraints should govern the final delivery; the prior's were already spent. Strategy-implied constraints already follow the per-layer model (derived late from final content).
 
 ## File guide
 

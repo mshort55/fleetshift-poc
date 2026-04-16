@@ -68,7 +68,7 @@ When you can't trust the platform, where do you look?
 
 - **User-level.** A user with a signing key (an IdP-authenticated principal on a device) directly signs operations. Every delivery carries provenance traceable to a specific person and device. This is the strongest level because compromise requires both the user's IdP identity and their signing key.
 - **Tenant-level.** The tenant's IdP provides identity and authorization claims. Operations carry tenant-level identity (e.g., a user's ID token), but without a user signature the platform is trusted to faithfully represent the user's intent. This is the baseline for credential presentation.
-- **Addon-level.** Addons — scoring services, external placement authorities, capacity controllers, manifest generators — sign decisions and outputs with their own keys. The delivery agent trusts the addon's signing authority directly, not via the platform. This requires sufficient controls: key management, scope limits, and auditable enrollment of addon signing keys. See [Placement enforcement dimension 3](#placement-enforcement-and-removal-protection) for placement decisions and [Addon-generated manifests and the opaque derivation problem](#addon-generated-manifests-and-the-opaque-derivation-problem) for manifest signing.
+- **Addon-level.** Addons — scoring services, external placement authorities, capacity controllers, manifest generators — sign decisions and outputs with their own keys. The delivery agent trusts the addon's signing authority directly, not via the platform. This requires sufficient controls: key management, scope limits, and auditable enrollment of addon signing keys. See [Placement enforcement and removal protection](#placement-enforcement-and-removal-protection) for placement decisions and [Addon-generated manifests and the co-signing model](#addon-generated-manifests-and-the-co-signing-model) for manifest signing.
 
 ### Why these anchors work
 
@@ -77,6 +77,14 @@ When you can't trust the platform, where do you look?
 - Compromise is tenant- or user-scoped. If tenant T's IdP is compromised, only tenant T is affected. A platform-level root (CA, signing service) has cross-tenant blast radius.
 
 Addon-level trust is parallel. We can delegate trust to addons, not unlike delegating trust to target cluster delivery agents. Addons can have their own signing keys, managed within the addon's trust boundary. It can take a different position in the network than the directly user-facing platform API.
+
+#### Trust anchor constraints
+
+Trust anchors are not just key registries — they can carry constraints that scope what signers can authorize through them. These are CEL predicates evaluated when a signer is verified against the anchor. The predicate receives the anchor's attributes and the authenticated subject (including the content being authorized).
+
+This enables multi-tenant isolation at the verification layer. For example, a tenant-scoped trust anchor can carry a constraint like `subject.content.deployment_id startsWith anchor.attributes.tenant_prefix`, ensuring that a signer recognized by tenant A's anchor cannot authorize deployments for tenant B, even if the platform is compromised.
+
+Trust anchor constraints are identity boundaries: a user anchor and an addon anchor are independent policy enforcement points. A signer recognized by a user anchor cannot satisfy a constraint that requires an addon anchor, and vice versa. This prevents cross-anchor identity confusion. See `TrustAnchor` and `TrustAnchorConstraint` in `poc/attestation/hybrid/model.py` for the concrete model, and the tenant-scoping tests in `poc/attestation/hybrid/test_hybrid.py`.
 
 ### Residual risk
 
@@ -150,6 +158,8 @@ This is the most novel model. It relies on provenance, transport authentication,
 
 ## Provenance
 
+> The provenance model described in this section has a working prototype in `poc/attestation/hybrid/`. The prototype isolates the target-side verification core — the attestation data model, constraint evaluation, strategy-implied policy, update chains, and trust anchor verification. See `poc/attestation/hybrid/README.md` for a guide to the prototype and its mapping to this design. Where this section and the prototype cover the same ground, the prototype's concrete model is authoritative.
+
 When supported, a delivery agent independently verifies that a real user authorized the operation. This composes with all credential presentations. It tightens the scope of what a compromised platform can do, especially in the "run as platform" case.
 
 1. A request intent (and/or derived decisions like manifests or placement) is accompanied by signed proof material (attestation envelope)
@@ -172,7 +182,7 @@ Note: a JWT may still be stored as part of the key binding bundle (see below), b
 
 The user always signs. The question is *what* they sign — their intent (the input) or the platform's output (rendered manifests, placement decisions). This is a verification-level dial that applies to any state-changing operation: deployments, placement changes, label updates, pool membership.
 
-**Intent signing (default)**: user signs their request — a deployment spec, a label change, a placement override. The platform derives consequences (renders manifests, computes placement deltas) and the delivery agent verifies that those consequences are consistent with the signed intent. On manifest invalidation (e.g., config rotation), the intent hasn't changed — the signature stays valid and no re-signing is needed. The tradeoff: the platform is in the derivation trust chain. The target must trust that the platform faithfully derived the outputs from the signed intent. Field mapping rules (below) constrain what the platform can derive.
+**Intent signing (default)**: user signs their request — a deployment spec, a label change, a placement override. The platform derives consequences (renders manifests, computes placement deltas) and the delivery agent verifies that those consequences satisfy the constraints implied by the signed intent. On manifest invalidation (e.g., config rotation), the intent hasn't changed — the signature stays valid and no re-signing is needed. The tradeoff: the platform is in the derivation trust chain. The target must trust that the platform faithfully derived the outputs from the signed intent. Strategy-implied constraints and explicit output constraints (below) bound what the platform can derive.
 
 **Output signing (opt-in, higher security)**: user signs the derived outputs — rendered manifests, specific placement deltas (e.g., "add to cluster A, remove from cluster B"). The signed artifact IS the applied artifact — zero derivation trust. But every change to the outputs requires the user to re-sign — the deployment enters PausedAuth until they do. Worth it for high-stakes / low-churn operations where derivation trust is unacceptable and toil is manageable.
 
@@ -247,106 +257,207 @@ A deployment can carry multiple signatures over the same content from different 
 
 Reactive re-signing (any authorized user re-signs the current content when a key binding is approaching expiry) already falls out of the existing "updates by different users" model. Multi-signature adds proactive redundancy on top: signatures are collected at creation/update time, not just when someone re-signs later.
 
-### Updates and anti-replay
+### Updates, derivation chains, and anti-replay
 
-Deployments can be updated by different authorized users. Each update requires the editor to provide a new signature. The delivery agent verifies the new signature.
+Deployments can be updated in two ways:
 
-A compromised platform can't forge a user signature (no user signing key). Residual attacks:
+**Direct re-signing (the common case).** An authorized user modifies the deployment and signs the new state directly as a fresh `SignedInput`. The delivery agent verifies the new signature. This is simple and sufficient when the updating user can sign the full deployment content.
 
-- **Replay:** present an old signature. Defense: monotonic sequence number or nonce in the signed content. Delivery agent rejects operations with sequence <= current.
+**Derivation chains (when direct re-signing is impractical).** When updates are produced by automated processes — upgrade planners, fleet-wide patch addons — the updater may not be the original signer, and the update may apply to many deployments at once. In this case, the update is modeled as a `DerivedInput`: a new deployment version reconstructed from a prior input and a verified update attestation. See `DerivedInput` in `poc/attestation/hybrid/model.py` and `poc/attestation/hybrid/mutation.py` for the derivation and constraint inheritance logic; the fleet upgrade scenario in `poc/attestation/hybrid/test_delivery.py` is the most representative end-to-end test.
+
+A `DerivedInput` references:
+
+- A prior input (the previous version — itself a `SignedInput` or another `DerivedInput`)
+- An update attestation whose verified output carries a signed `spec_update`
+
+The `spec_update` contains:
+
+- A `derive_input_expression` (CEL) that transforms the prior input's content into the new version
+- Optional `preconditions` (CEL) that must hold on the prior content for the update to apply
+- Optional additional `output_constraints` layered on top of inherited constraints
+
+The delivery agent verifies the entire chain recursively:
+
+1. Verify the prior input (back to the root `SignedInput`)
+2. Verify the update attestation (including its own signer, trust anchor, and constraints)
+3. Check preconditions against the prior content
+4. Apply the derivation expression to produce the new deployment content
+5. Confirm the derivation didn't rewrite deployment identity
+
+**Constraint scope.** Explicit output constraints on an input bind that input's immediate output — they are not accumulated across the chain. Each attestation in the chain is independently verified: the prior's constraints govern the prior's output, the update's constraints govern the update's output (the spec_update), and the final delivery's constraints come from strategy-implied constraints (derived from the final computed content) plus any explicit constraints the update adds for the final layer. A top-level constraint might not have any idea what the bottom of the chain looks like, and that's fine — trust flows through the chain because each link is independently verified. Strategy-implied constraints are always derived late from the final computed content, so if the update changes the strategy, the new strategy's constraints apply.
+
+> **Note:** The current POC (`poc/attestation/hybrid/mutation.py:derive_constraints`) accumulates prior constraints forward unconditionally. This is a known divergence from the intended per-layer model and should be revisited.
+
+**Update attestations are themselves deployments.** An update attestation has its own input, strategies, and signer. Its placement strategy naturally gates which deployments the update applies to — the update is verified with the target deployment as the placement target. This means an upgrade planner addon can sign which deployment IDs a patch is allowed to touch.
+
+**Anti-replay.** A compromised platform can't forge a user signature (no user signing key). Residual attacks:
+
+- **Replay:** present an old signature. Defense: `expected_generation` in the signed content. The delivery agent tracks a monotonic generation per deployment and rejects operations where `expected_generation != local_generation + 1`. Generation numbers increment through derivation chains.
 - **Withholding:** refuse to deliver a validly signed operation (DoS). Observable — the user sees their deployment isn't progressing.
-- **Misdirection:** deliver a legitimately signed operation to the wrong target. Defense: the signed content includes target scope; the delivery agent checks consistency.
+- **Misdirection:** deliver a legitimately signed operation to the wrong target. Defense: the signed content includes target scope (deployment_id, placement strategy); the delivery agent checks consistency.
 
 ### Placement enforcement and removal protection
 
-If a compromised platform can trigger removal of all resources (by manipulating placement or sending unsigned deletions), the signing model hasn't bought much. The delivery agent must be able to independently verify that any placement or removal action is legitimate. The same core principle of external trust anchors applies here along several dimensions:
+If a compromised platform can trigger removal of all resources (by manipulating placement or sending unsigned deletions), the signing model hasn't bought much. The delivery agent must be able to independently verify that any placement or removal action is legitimate.
 
-**1. Removal allowance (deployment/addon property).** Whether a deployment can be removed from a cluster via placement change, or only via explicit signed deletion. This is a knob the deployment or addon declares. Pool-based placements (e.g., hosted control planes on management clusters) would typically disallow removal by placement change — once placed, the resource stays absent explicit lifecycle action. Consumer workload deployments may allow it. This prevents a blanket "remove everything" attack for sticky deployments.
+Removal is a first-class delivery action (`RemoveByDeploymentId` in `poc/attestation/hybrid/model.py`), verified through the same constraint system as puts. The placement and removal scenarios are tested in `poc/attestation/hybrid/test_delivery.py`. The signed input's placement strategy determines when removal is allowed — this is an emergent property of the strategy, not a separate flag:
 
-**2. Change provenance for placement-affecting state.** When the platform delivers a removal or rescheduling decision, it should carry the provenance of the triggering state change — not just "remove this" but "remove this because user X removed label L from you; here's the signed request." The triggering state change (label removal, pool membership update, etc.) is itself a signed action — the same signing model applies to placement-affecting operations as to deployment intents. The delivery agent verifies: the state change was signed by an authorized user, the change means the placement constraints no longer match, therefore removal is legitimate. This extends to any platform-known state that affects placement (labels, pool membership, etc.). The cluster agent doesn't just trust "the platform says remove" — it verifies the *reason* for removal, backed by a user signature on the triggering change.
+- **Predicate placement**: the strategy-implied constraint allows removal only when the predicate does *not* match the target. If the target still matches, removal is rejected. This means a deployment "sticks" to targets that match its predicate — the platform cannot remove it by simply asserting removal.
+- **Addon placement**: the strategy-implied constraint allows removal only when the target is *not* in the signed placement evidence's target list. The placement evidence must be signed by the named addon, and its `deployment_id` must match the attested deployment, preventing cross-deployment replay.
 
-**3. External placement authority.** When placement decisions come from outside the platform (scoring addons, external capacity services), they carry their own signing authority. The delivery agent can verify these independently. A cluster-side component scoring itself is one case; an external service in a separate trust boundary signing placement decisions with its own keys is another. The platform consumes these decisions but doesn't control them at the enforcement point.
+In both cases, the `deployment_id` in the removal action must match the signed input's `deployment_id`, preventing confused-deputy attacks.
 
-**4. Platform-generated artifacts bound to signed intent.** The pool membership set, the resolved target list — these are platform-generated. The signed intent includes placement constraints (label selectors, pool reference, target scope). The delivery agent independently confirms it matches: for label-based placement, the agent checks its own locally-trusted labels against the intent's constraints; for pool-based, pool membership is derived from cluster labels (self-assessable) or explicitly assigned with admin-signed provenance. The pool definition itself (membership criteria) chains back to a signed action — the delivery agent can verify that the pool's criteria were legitimately established.
+The same core principle of external trust anchors applies here along several dimensions:
+
+**1. Self-assessed placement (predicate strategy).** The signed intent includes a CEL predicate (e.g., label selectors). The delivery agent evaluates the predicate against its own locally-trusted identity. No platform involvement — the agent decides for itself whether it matches. For pool-based placement, pool membership can be derived from cluster labels (self-assessable) or explicitly assigned with admin-signed provenance.
+
+**2. External placement authority (addon strategy).** When placement decisions come from outside the platform (scoring addons, external capacity services), they carry their own signing authority as `PlacementEvidence`. The delivery agent verifies the evidence independently: the signature is valid against the named trust anchor, the `deployment_id` binds the evidence to this specific deployment, and the current target is consistent with the signed target list. The platform consumes these decisions but doesn't control them at the enforcement point.
+
+**3. Change provenance for placement-affecting state.** When the platform delivers a removal or rescheduling decision, the triggering state change (label removal, pool membership update, etc.) is itself a signed action — the same signing model applies to placement-affecting operations as to deployment intents. The delivery agent verifies: the state change was signed by an authorized user, the change means the placement constraints no longer match, therefore removal is legitimate.
+
+**4. Sticky deployments.** Pool-based placements (e.g., hosted control planes on management clusters) can use placement strategies that inherently resist removal. With predicate placement, the deployment stays as long as the target matches. With addon placement, the deployment stays as long as the signed evidence includes this target. Explicit signed deletion requires a separate signed attestation. Provider draining a management cluster is an elevated lifecycle operation with provider-level authorization.
 
 Examples of how these compose:
 
-- *Pool-based HCP placement:* removal disallowed by placement change (dimension 1). Consumer signed intent says "place in pool X." Agent verifies it's in pool X via its own labels (dimension 4). Deletion requires consumer signed deletion intent. Provider draining a management cluster is an elevated lifecycle operation with provider-level authorization.
-- *Label-based workload placement:* removal allowed by placement change (dimension 1). Platform says "remove because label changed." Agent verifies the signed label change request (dimension 2) — who signed it, was it in scope. If verified, agent accepts the removal. With output signing, the user can additionally sign the placement delta itself, giving the agent proof of the specific removal decision.
-- *Score-based rebalancing:* scoring addon signs its placement decisions independently (dimension 3). Agent trusts the addon's authority. Platform routes the decision but can't forge it.
+- *Pool-based HCP placement:* predicate strategy with pool match expression. Agent verifies it matches via its own labels. Removal requires the predicate to stop matching (e.g., the pool label is changed via a signed action) or an explicit signed deletion.
+- *Label-based workload placement:* predicate strategy with label selector. When the target's labels change (via a signed label change), the predicate may stop matching, and the strategy-implied constraint then allows removal.
+- *Score-based rebalancing:* addon placement strategy. Scoring addon signs placement decisions with updated target lists. Agent verifies the addon's signature independently. Platform routes the decision but can't forge it.
 
 ### Provenance attestation protocol and validation
 
-The delivery agent needs to verify that what's being applied matches what the user authorized. The verification protocol is uniform regardless of credential presentation or whether the separation is in time, space, or both.
+The delivery agent needs to verify that what's being applied matches what the user authorized. The verification protocol is uniform regardless of credential presentation or whether the separation is in time, space, or both. The core data model and verification logic are implemented in `poc/attestation/hybrid/model.py`, with trust store and bundle types in `poc/attestation/hybrid/verify.py`.
 
-The delivery agent performs four checks:
+Verification proceeds in three phases:
 
-1. **Signature verification** — the user signed this specific content (cryptographic). With intent signing (default), the signed content is the intent; with output signing, the signed content is the rendered output. This simultaneously proves identity and authorization.
-2. **Key binding verification** — the signing key belongs to this user, anchored to the tenant IdP via the key binding bundle. The delivery agent validates the bundle's JWT against the tenant's JWKS, confirms the subject matches the claimed user, and verifies proof of possession.
-3. **Derivation consistency** (intent signing only) — the generated manifests are structurally consistent with the signed intent. If the intent says `tenant=acme, namespace=production`, no manifest can target a different tenant or namespace. With output signing this check doesn't apply — the signed content IS the applied content.
-4. **Temporal validity** — the operation hasn't expired (`now() <= valid_until`).
+**Phase 1: Input verification.** The delivery agent verifies the signed input — the user's authorization of the deployment.
+
+1. **Signer consistency** — the signature's signer matches the key binding's signer.
+2. **Trust anchor verification** — the signer's key is recognized by the claimed trust anchor, and the anchor's constraints (if any) are satisfied. See [Trust anchor constraints](#trust-anchor-constraints).
+3. **Key binding verification** — the signing key belongs to this user, anchored to the tenant IdP via the key binding bundle. The delivery agent validates the bundle against the tenant's JWKS, confirms the subject matches the claimed user, and verifies proof of possession.
+4. **Signature verification** — the user signed this specific content (cryptographic). The signed envelope includes the deployment content, output constraints, validity bound, and optional expected generation. This simultaneously proves identity and authorization.
+5. **Temporal validity** — the operation hasn't expired (`now() <= valid_until`).
+
+For derived inputs (updates), the delivery agent recursively verifies the entire chain back to the root signed input. See [Updates, derivation chains, and anti-replay](#updates-derivation-chains-and-anti-replay).
+
+**Phase 2: Output constraint evaluation.** The delivery agent verifies that the concrete delivery action (put manifests or remove) satisfies all constraints. Constraints come from two sources:
+
+- **Strategy-implied constraints** derived from the signed input's strategy declarations. The signer's choice of strategy determines what verification looks like. See [Strategy-implied constraints](#strategy-implied-constraints).
+- **Explicit output constraints** signed by the user as part of the input envelope. These are CEL expressions evaluated at verification time over a context containing `{input, output, target, action, placement}`.
+
+Both sources are combined; all constraints must pass. This replaces a simple "derivation consistency" check with a more general model: the signed input is not just data — it is a compact declaration of how verification must work.
+
+**Phase 3: Generation check.** If the signed input includes an `expected_generation`, the delivery agent checks it against its local deployment state for replay protection.
 
 Any check failure transitions the deployment to `PausedAuth`.
 
-This is compatible with manifest invalidation. When manifests are re-generated (e.g., config rotation triggers `InvalidateManifests`), the intent hasn't changed — the same signature is still valid. New manifests must still satisfy the same field mapping rules. See "Verification level: intent signing vs. output signing" above for the tradeoffs between signing the intent vs. the output.
+This is compatible with manifest invalidation. When manifests are re-generated (e.g., config rotation triggers `InvalidateManifests`), the intent hasn't changed — the same signature is still valid. New manifests must still satisfy the same constraints. See "Verification level: intent signing vs. output signing" above for the tradeoffs between signing the intent vs. the output.
 
-**Envelope:**
+**Attestation structure:**
+
+An attestation pairs a signed input (the authorization) with a concrete delivery action (the output):
 
 ```
-create_attestation(intent, user_signature, key_binding):
-    {
-        intent: intent,
-        intent_hash: hash(intent),
-        user_signature: user_signature,
-        key_binding: key_binding,
-        created_at: now(),
-        valid_until: user_specified_expiry or default,
-        platform_signature: sign_platform_key(...)  // optional, for buffer transport
-    }
+Attestation:
+    attestation_id: string
+    input: SignedInput | DerivedInput
+    output: PutManifests | RemoveByDeploymentId
+
+SignedInput:
+    content: DeploymentContent        // deployment_id, manifest_strategy, placement_strategy
+    signature: Signature              // signer_id, public_key, content_hash, signature_bytes
+    key_binding: KeyBinding           // signer_id, public_key, trust_anchor_id, binding_proof
+    valid_until: timestamp
+    output_constraints: [Constraint]  // signed CEL predicates over {input, output, target, action, placement}
+    expected_generation: int?         // optional replay protection
+
+PutManifests:
+    manifests: [ManifestEnvelope]     // ordered typed payloads (resource_type, content)
+    signature: OutputSignature?       // optional addon signature over manifests
+    placement: PlacementEvidence?     // optional signed placement decision
+
+RemoveByDeploymentId:
+    deployment_id: string             // must match input's deployment_id
+    placement: PlacementEvidence?
 ```
+
+The signed envelope (what the user actually signs) includes the deployment content, output constraints, validity bound, and optional expected generation. This means the signer authorizes not just the deployment spec but also the rules the eventual output must satisfy.
 
 **Validation:**
 
 ```
-validate_attestation(attestation, manifest):
-    assert user_signature_valid(attestation.intent, attestation.user_signature, attestation.key_binding.public_key)
-    assert key_binding_jwt_valid(attestation.key_binding.jwt, tenant_idp_jwks)
-    assert key_binding_jwt_possession_valid(attestation.key_binding.jwt, attestation.key_binding.public_key)
-    assert key_binding_possession_valid(attestation.key_binding)
-    assert attestation.key_binding.jwt.sub == claimed_user
-    assert now() <= attestation.valid_until
-    assert manifests_consistent_with_intent(manifest, attestation.intent)  // intent signing only
-    // platform signature checked only for buffer transport
+verify_attestation(attestation, target_identity):
+    // Phase 1: input verification
+    verified_input = verify_input(attestation.input)
+
+    // Phase 2: output constraint evaluation
+    strategy_constraints = derive_strategy_constraints(verified_input.content)
+    all_constraints = strategy_constraints + verified_input.output_constraints
+    cel_context = {input, output, target: target_identity, action, placement}
+    for constraint in all_constraints:
+        assert constraint.evaluate(cel_context)
+
+    // Phase 3: generation check
+    if verified_input.expected_generation != null:
+        assert verified_input.expected_generation == local_state.generation + 1
+
     // any assertion failure → PausedAuth
+
+verify_input(signed_input: SignedInput):
+    assert signed_input.signature.signer_id == signed_input.key_binding.signer_id
+    anchor = trust_store.get(signed_input.key_binding.trust_anchor_id)
+    assert anchor.verify_signer(signer_id, public_key, subject)
+    assert key_binding_possession_valid(signed_input.key_binding)
+    assert signed_input.signature.public_key == signed_input.key_binding.public_key
+    envelope = {content, output_constraints, valid_until, expected_generation}
+    assert signed_input.signature.content_hash == hash(envelope)
+    assert signature_valid(signed_input.signature, hash(envelope))
+    assert now() <= signed_input.valid_until
+
+verify_input(derived_input: DerivedInput):
+    // recursive — see "Updates, derivation chains, and anti-replay"
+    verified_prior = verify_input(prior_input)
+    verified_update = verify_attestation(update_attestation, target={id: deployment_id})
+    derived_content = apply_update(verified_prior.content, verified_update.spec_update)
+    derived_constraints = update.output_constraints  // per-layer: update governs the final output
 ```
 
-The platform signature is optional for standard (gRPC) transport — the user's signature provides the integrity guarantee. For buffer transport, the platform signature remains valuable since there is no connection-level auth.
+The platform signature (not shown above) is optional for standard (gRPC) transport — the user's signature provides the integrity guarantee. For buffer transport, the platform signature remains valuable since there is no connection-level auth.
 
-#### Field mapping rules
+#### Strategy-implied constraints
 
-Derivation consistency (check 3) requires mapping rules: which intent fields correspond to which manifest fields. These rules are the enforcement mechanism — they determine what "consistent with the signed intent" actually means structurally.
+The signed input declares strategy types for manifests and placement (e.g., `inline`, `addon`, `predicate`). The delivery agent derives verification constraints from these strategy declarations. This is the mechanism that determines what "consistent with the signed intent" actually means — the signer's choice of strategy controls what verification looks like.
 
-Start with hardcoded rules in the delivery agent for well-known fields (TBD, but e.g. `namespace`, `tenant` label, resource types). This is code, auditable, and as trustworthy as the delivery agent binary itself. An attacker would need to replace the binary, not just modify a config.
+The delivery agent has code for each known strategy type that produces constraints. This code is auditable and as trustworthy as the delivery agent binary itself. An attacker would need to replace the binary, not just modify a config. Unknown strategy types fail closed (verification rejects). See `poc/attestation/hybrid/policy.py` for the constraint derivation logic.
 
-If configurable rules are needed later (dynamic resource types, addons), updates to those rules must be secured by a trust anchor external to the platform — e.g., a token from the platform administrator's IdP, validated the same way any trust configuration change is validated. The platform must not be able to unilaterally loosen the mapping rules on a target. The same principle as IdP trust configuration applies: the platform is a courier for rule updates, not the authority.
+**Manifest strategies:**
 
-#### Addon-generated manifests and the opaque derivation problem
+| Strategy | Implied constraint |
+|---|---|
+| `inline` | Output manifests must exactly match the manifests in the signed input. |
+| `addon` | Output manifests must be signed by the named addon via the named trust anchor. |
 
-Field mapping rules work for built-in strategies (`inline`, `template`) where the relationship between intent and output is transparent. For addon-driven manifest strategies, the derivation is opaque: the user signs "I want observability," and the addon produces Prometheus agents, Thanos components, ConfigMaps, and Secrets. The delivery agent has no structural basis for check 3 (derivation consistency) because the intent is structurally divorced from the output.
+**Placement strategies:**
 
-The solution is **addon signing**: manifest-generating addons sign their outputs, and the delivery agent verifies the addon's signature as a replacement for structural derivation consistency. This composes with the existing user signing model — the delivery agent verifies both the user's intent signature and the addon's manifest signature.
+| Strategy | Implied constraints |
+|---|---|
+| `predicate` | Put is allowed only when the CEL predicate matches the target. Removal is allowed only when the predicate does *not* match. |
+| `addon` | Placement evidence must be signed by the named addon. The action (put/remove) must be consistent with the signed target list. |
 
-**Co-signing model.** The user's signed intent names the addon authorized to generate manifests (and optionally its trust domain or key fingerprint). The delivery agent checks:
+Strategy-implied constraints and explicit output constraints (signed CEL expressions) are combined and all must pass. This means the signer can layer additional restrictions on top of the strategy-implied ones (e.g., namespace restrictions, batch size limits on placement targets).
 
-1. The user authorized this addon for this deployment (user signature, unchanged).
-2. This addon produced these specific manifests (addon signature, new — replaces derivation consistency for addon strategies).
-3. The addon identity matches what the user authorized (trust domain, key fingerprint, or registration reference).
+#### Addon-generated manifests and the co-signing model
+
+For addon-driven manifest strategies, the derivation is opaque: the user signs "I want observability," and the addon produces Prometheus agents, Thanos components, ConfigMaps, and Secrets. The delivery agent has no structural basis for matching output to input because the intent is structurally divorced from the output.
+
+The solution is the **addon strategy type**: the signed input names the addon authorized to generate manifests and the trust anchor that validates the addon's identity. The strategy-implied constraint then requires:
+
+1. The user authorized this addon for this deployment (user signature over the strategy spec, unchanged).
+2. This addon produced these specific manifests (addon signature over the output).
+3. The addon identity matches what the user authorized (signer ID and trust anchor ID in the output signature must match the strategy declaration).
 
 Without the intent naming the addon, a rogue addon could sign manifests and attach them to any deployment. The user's intent is what ties authorization to the addon's output.
 
 **Structural schema as defense-in-depth.** Addon registrations can include expected structural properties of the output: allowed GVKs, namespace patterns, label requirements. The delivery agent checks these as a second gate on top of the addon signature. This catches compromised addons (key theft) producing valid signatures on malicious manifests. The schema need not be exhaustive — just enough to catch obviously wrong output (e.g., "observability manifests should not contain ClusterRoleBindings granting `cluster-admin`"). Structural schemas are optional; some addons with highly variable output may omit them.
-
-For built-in strategies, checks 1 and the existing field mapping rules still apply. For addon strategies, checks 1–3 above replace field mapping. Both paths can layer structural constraints as defense-in-depth.
 
 ##### Addon key lifecycle
 
@@ -386,14 +497,15 @@ This means a compromised platform can invoke the addon (it can send messages thr
 
 - For the CIBA flow: how does CI authenticate to initiate the CIBA flow? It needs its own client credentials with the IdP, which is itself a stored secret. This is a narrow, well-scoped secret (can only initiate approval requests, can't issue tokens without user consent), but it exists.
 - Claims freshness with user signing: the signed intent embeds claims from signing time. If the user's permissions change after signing, the claims are stale. How should the system handle this — re-check via SCIM/CAEP, key binding TTL as a natural bound, or require re-signing on permission changes?
-- Anti-replay mechanism details: monotonic sequence numbers vs. nonces — which is simpler to implement correctly for the delivery agent?
+- Anti-replay mechanism details: the POC implements `expected_generation` as a monotonic counter. How does the delivery agent handle gaps (e.g., a skipped generation due to a failed delivery)?
 - Secure bootstrap of cluster-side label/identity state for placement enforcement. How does a cluster initially receive its labels through a non-platform authority?
 - Trust model for scoring addons and external scoring services. How does a delivery agent know to trust a particular scoring addon's signatures? (Partially addressed by the addon key lifecycle section above — the same signing and registration model applies to scoring addons, placement addons, and manifest-generating addons.)
-- Addon signing: should the intent schema enforce that addon-strategy deployments always name the addon, or can legacy/low-security deployments omit it and skip addon signature verification?
 - Addon signing: for addons with highly dynamic output (e.g., per-target customization that varies with target state), what is the right granularity for structural schemas? Per-addon-version? Per-deployment? Or purely optional?
 - Trust bundle rotation: what is the acceptable overlap window for addon CA rotation? Should the platform enforce a minimum overlap duration as a prerequisite for addon registration with by-value trust bundles?
 - Multi-signature policy: when to require vs. allow multiple signers, quorum rules for critical deployments.
 - Can different key registries be pluggable? The high-level API is the same (validate this signature for this user) but implementations differ (key binding bundles, git hosting platform endpoints, etc.).
+- Derivation chain depth: should there be a maximum chain depth to bound verification cost? What happens when a long chain makes verification expensive?
+- Real OIDC key binding: the POC models key binding as a simple proof-of-possession over a raw public key. The real model needs the JWT binding bundle described above. What are the implications for the verification bundle size and delivery agent complexity?
 
 ## Delivery architecture
 

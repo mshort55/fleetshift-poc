@@ -69,10 +69,15 @@ def derive_constraints(
 ) -> tuple[OutputConstraint, ...]:
     """Derive the explicit output constraints for a derived input.
 
-    The prior's explicit constraints carry forward unconditionally -- an
-    update patches the spec, not the security policy.  If the update
-    provides output_constraints they are additive, layered on top of the
-    prior's.
+    TODO: This currently accumulates prior constraints forward
+    unconditionally (prior + update).  The intended design is per-layer:
+    each attestation's explicit constraints bind its immediate output,
+    and trust flows through the chain because each link is independently
+    verified.  The update's output_constraints (if any) should govern
+    the final delivery output; the prior's constraints were already
+    evaluated when the prior was verified.  Strategy-implied constraints
+    are always derived late from the final computed content, so they
+    already follow the per-layer model.
 
     Strategy-implied constraints are not produced here; they are derived
     late from the final computed content at verification time.
