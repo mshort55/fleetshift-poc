@@ -158,17 +158,6 @@ func TestAWSProvision(t *testing.T) {
 			t.Fatalf("provision ended in state %s, expected STATE_ACTIVE", state)
 		}
 		t.Logf("Deployment reached STATE_ACTIVE")
-
-		// Try to save the work dir before the agent cleans it up.
-		// This is a race — the agent may have already deleted it.
-		srcDir := filepath.Join(os.TempDir(), "ocp-provision-"+cfg.ClusterName)
-		dstDir := "/tmp/fleetshift-e2e-workdir"
-		os.RemoveAll(dstDir)
-		if err := exec.Command("cp", "-a", srcDir, dstDir).Run(); err != nil {
-			t.Logf("Could not save work dir (may already be deleted): %v", err)
-		} else {
-			t.Logf("Work dir saved to %s", dstDir)
-		}
 	})
 
 	step("08_ValidateDeployment", func(t *testing.T) {
@@ -660,6 +649,16 @@ func waitForProvision(t *testing.T, binDir string, cfg *Config, timeout time.Dur
 		switch dep.State {
 		case "STATE_ACTIVE":
 			t.Logf("[%s] Deployment is active", elapsed(start))
+			// Snapshot the work dir immediately — the agent deletes it
+			// shortly after reporting success (issue 006).
+			srcDir := filepath.Join(os.TempDir(), "ocp-provision-"+cfg.ClusterName)
+			dstDir := srcDir + "_BACKUP"
+			os.RemoveAll(dstDir)
+			if err := exec.Command("cp", "-a", srcDir, dstDir).Run(); err != nil {
+				t.Logf("Could not snapshot work dir: %v", err)
+			} else {
+				t.Logf("Work dir snapshot saved to %s", dstDir)
+			}
 			return dep.State
 		case "STATE_FAILED":
 			t.Fatalf("[%s] Deployment failed", elapsed(start))

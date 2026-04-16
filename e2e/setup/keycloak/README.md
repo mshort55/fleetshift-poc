@@ -32,17 +32,16 @@ ACME_EMAIL=you@example.com ./deploy.sh
 
 The script is idempotent — safe to re-run if something fails partway through. Existing secrets are preserved on re-run.
 
-### Adding base domains for OCP console OIDC
+### Adding console redirect URIs for OCP clusters
 
-Before provisioning AWS clusters with OIDC console access, register each base domain where clusters will be created. This adds a wildcard redirect URI to the `ocp-console` Keycloak client:
+Before provisioning AWS clusters with OIDC console access, register each cluster's console redirect URI in Keycloak. Keycloak does **not** support wildcard subdomain patterns (e.g. `apps.*.example.com`), so each cluster needs an explicit entry:
 
 ```bash
-# Add a base domain (idempotent, can be run anytime after deploy)
-./add-base-domain.sh --base-domain aws-acm-cluster-virt.devcluster.openshift.com
-./add-base-domain.sh --base-domain other-team.devcluster.openshift.com
+# Add a cluster's console redirect URI (idempotent, can be run anytime after deploy)
+./add-base-domain.sh --base-domain aws-acm-cluster-virt.devcluster.openshift.com --cluster-name my-cluster
 ```
 
-**This is a prerequisite for provisioning AWS clusters.** Without it, the OCP console cannot authenticate users via OIDC, causing the installer to time out waiting for the console operator.
+**This is a prerequisite for provisioning AWS clusters.** Without it, the OCP console cannot authenticate users via OIDC (Keycloak rejects the redirect_uri).
 
 ### Retrieving the console client secret
 
@@ -139,6 +138,7 @@ The realm config at `realm/fleetshift-realm.json` is a maintained source file. E
 | `fleetshift-ui` | Public | UI authentication (standard flow) | S256 |
 | `fleetshift-cli` | Public | CLI authentication (standard flow, device auth) | S256 |
 | `fleetshift-signing` | Public | Key enrollment / attestation flow | S256 |
+| `ocp-console` | Confidential | OCP web console OIDC login | No (OCP console doesn't support PKCE) |
 
 The `fleetshift-signing` client has a `github_username` attribute mapper that includes the user's GitHub username in tokens. This is used by the attestation flow to resolve the signer's public key from the GitHub SSH key registry.
 

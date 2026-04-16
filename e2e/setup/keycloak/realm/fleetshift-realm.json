@@ -173,9 +173,7 @@
         "roles",
         "email"
       ],
-      "attributes": {
-        "pkce.code.challenge.method": "S256"
-      },
+      "attributes": {},
       "protocolMappers": [
         {
           "name": "ocp-console-audience",
