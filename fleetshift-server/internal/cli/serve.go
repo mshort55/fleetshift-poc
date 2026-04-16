@@ -31,14 +31,15 @@ import (
 	pb "github.com/fleetshift/fleetshift-poc/fleetshift-server/gen/fleetshift/v1"
 	kindaddon "github.com/fleetshift/fleetshift-poc/fleetshift-server/internal/addon/kind"
 	kubernetesaddon "github.com/fleetshift/fleetshift-poc/fleetshift-server/internal/addon/kubernetes"
+	ocpaddon "github.com/fleetshift/fleetshift-poc/fleetshift-server/internal/addon/ocp"
 	"github.com/fleetshift/fleetshift-poc/fleetshift-server/internal/application"
 	"github.com/fleetshift/fleetshift-poc/fleetshift-server/internal/domain"
 	"github.com/fleetshift/fleetshift-poc/fleetshift-server/internal/infrastructure/delivery"
 	"github.com/fleetshift/fleetshift-poc/fleetshift-server/internal/infrastructure/goworkflows"
 	"github.com/fleetshift/fleetshift-poc/fleetshift-server/internal/infrastructure/keyregistry"
 	"github.com/fleetshift/fleetshift-poc/fleetshift-server/internal/infrastructure/observability"
-	"github.com/fleetshift/fleetshift-poc/fleetshift-server/internal/infrastructure/slogutil"
 	"github.com/fleetshift/fleetshift-poc/fleetshift-server/internal/infrastructure/oidc"
+	"github.com/fleetshift/fleetshift-poc/fleetshift-server/internal/infrastructure/slogutil"
 	"github.com/fleetshift/fleetshift-poc/fleetshift-server/internal/infrastructure/sqlite"
 	transportgrpc "github.com/fleetshift/fleetshift-poc/fleetshift-server/internal/transport/grpc"
 )
@@ -125,6 +126,19 @@ func runServe(ctx context.Context, f *serveFlags) error {
 	)
 	router.Register(kindaddon.TargetType, kindAgent)
 
+	// --- OCP agent ---
+	ocpAgent := ocpaddon.NewAgent(
+		ocpaddon.WithVault(vault),
+		ocpaddon.WithObserver(ocpaddon.NewSlogAgentObserver(logger)),
+	)
+	if err := ocpAgent.Start(); err != nil {
+		return fmt.Errorf("start ocp agent: %w", err)
+	}
+	defer ocpAgent.Shutdown(ctx)
+	logger.Info("OCP addon callback server listening", "addr", ocpAgent.CallbackAddr())
+
+	router.Register(ocpaddon.TargetType, ocpAgent)
+
 	// Kubernetes agent is registered after the attestation verifier is
 	// built (see below). The router is only consulted at delivery time.
 
@@ -172,6 +186,15 @@ func runServe(ctx context.Context, f *serveFlags) error {
 		AcceptedResourceTypes: []domain.ResourceType{kindaddon.ClusterResourceType, domain.TrustBundleResourceType},
 	}); err != nil && !errors.Is(err, domain.ErrAlreadyExists) {
 		return fmt.Errorf("seed kind target: %w", err)
+	}
+
+	if err := targetSvc.Register(ctx, domain.TargetInfo{
+		ID:                    "ocp-aws",
+		Type:                  ocpaddon.TargetType,
+		Name:                  "OCP on AWS",
+		AcceptedResourceTypes: []domain.ResourceType{ocpaddon.ClusterResourceType},
+	}); err != nil && !errors.Is(err, domain.ErrAlreadyExists) {
+		return fmt.Errorf("seed ocp-aws target: %w", err)
 	}
 
 	workerCtx, workerCancel := context.WithCancel(ctx)

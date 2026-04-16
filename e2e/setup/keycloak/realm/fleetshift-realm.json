@@ -1,0 +1,251 @@
+{
+  "realm": "fleetshift",
+  "enabled": true,
+  "sslRequired": "external",
+  "registrationAllowed": false,
+  "loginWithEmailAllowed": true,
+  "duplicateEmailsAllowed": false,
+  "resetPasswordAllowed": true,
+  "editUsernameAllowed": false,
+  "bruteForceProtected": false,
+  "roles": {
+    "realm": [
+      {
+        "name": "ops",
+        "description": "Operations persona — manages clusters and infrastructure"
+      },
+      {
+        "name": "dev",
+        "description": "Developer persona — manages applications"
+      }
+    ]
+  },
+  "clients": [
+    {
+      "clientId": "fleetshift-ui",
+      "name": "FleetShift UI",
+      "enabled": true,
+      "publicClient": true,
+      "directAccessGrantsEnabled": true,
+      "standardFlowEnabled": true,
+      "implicitFlowEnabled": false,
+      "redirectUris": [
+        "http://localhost:3000/*",
+        "http://localhost:4000/*"
+      ],
+      "webOrigins": [
+        "http://localhost:3000",
+        "http://localhost:4000"
+      ],
+      "protocol": "openid-connect",
+      "defaultClientScopes": [
+        "basic",
+        "web-origins",
+        "profile",
+        "roles",
+        "email"
+      ],
+      "attributes": {
+        "pkce.code.challenge.method": "S256"
+      },
+      "protocolMappers": [
+        {
+          "name": "audience-mapper",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "consentRequired": false,
+          "config": {
+            "included.client.audience": "fleetshift-ui",
+            "id.token.claim": "false",
+            "access.token.claim": "true"
+          }
+        }
+      ]
+    },
+    {
+      "clientId": "fleetshift-cli",
+      "name": "FleetShift CLI",
+      "enabled": true,
+      "publicClient": true,
+      "directAccessGrantsEnabled": true,
+      "standardFlowEnabled": true,
+      "implicitFlowEnabled": false,
+      "redirectUris": [
+        "http://localhost:8888/callback",
+        "http://127.0.0.1/callback",
+        "http://localhost:8080/*"
+      ],
+      "webOrigins": [
+        "http://localhost:8888",
+        "http://127.0.0.1",
+        "http://localhost:8080"
+      ],
+      "protocol": "openid-connect",
+      "defaultClientScopes": [
+        "basic",
+        "profile",
+        "roles",
+        "email"
+      ],
+      "attributes": {
+        "oauth2.device.authorization.grant.enabled": "true",
+        "oidc.ciba.grant.enabled": "false",
+        "pkce.code.challenge.method": "S256"
+      },
+      "protocolMappers": [
+        {
+          "name": "audience-mapper",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "consentRequired": false,
+          "config": {
+            "included.client.audience": "fleetshift-cli",
+            "id.token.claim": "false",
+            "access.token.claim": "true"
+          }
+        }
+      ]
+    },
+    {
+      "clientId": "fleetshift-signing",
+      "name": "FleetShift Signing (Key Enrollment)",
+      "enabled": true,
+      "publicClient": true,
+      "directAccessGrantsEnabled": false,
+      "standardFlowEnabled": true,
+      "implicitFlowEnabled": false,
+      "redirectUris": [
+        "http://127.0.0.1/callback"
+      ],
+      "webOrigins": ["+"],
+      "protocol": "openid-connect",
+      "defaultClientScopes": [
+        "basic",
+        "profile",
+        "roles",
+        "email"
+      ],
+      "attributes": {
+        "pkce.code.challenge.method": "S256"
+      },
+      "protocolMappers": [
+        {
+          "name": "fleetshift-signing-audience",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "consentRequired": false,
+          "config": {
+            "included.client.audience": "fleetshift-signing",
+            "id.token.claim": "true",
+            "access.token.claim": "true"
+          }
+        },
+        {
+          "name": "github-username",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-usermodel-attribute-mapper",
+          "consentRequired": false,
+          "config": {
+            "user.attribute": "github_username",
+            "claim.name": "github_username",
+            "id.token.claim": "true",
+            "access.token.claim": "true",
+            "jsonType.label": "String"
+          }
+        }
+      ]
+    },
+    {
+      "clientId": "ocp-console",
+      "name": "OCP Web Console",
+      "enabled": true,
+      "publicClient": false,
+      "directAccessGrantsEnabled": false,
+      "standardFlowEnabled": true,
+      "implicitFlowEnabled": false,
+      "secret": "GENERATED_AT_DEPLOY_TIME",
+      "redirectUris": [],
+      "webOrigins": ["+"],
+      "protocol": "openid-connect",
+      "defaultClientScopes": [
+        "basic",
+        "profile",
+        "roles",
+        "email"
+      ],
+      "attributes": {},
+      "protocolMappers": [
+        {
+          "name": "ocp-console-audience",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "consentRequired": false,
+          "config": {
+            "included.client.audience": "ocp-console",
+            "id.token.claim": "true",
+            "access.token.claim": "true"
+          }
+        }
+      ]
+    }
+  ],
+  "users": [
+    {
+      "username": "ops",
+      "email": "ops@fleetshift.local",
+      "firstName": "Ops",
+      "lastName": "User",
+      "enabled": true,
+      "emailVerified": true,
+      "credentials": [
+        {
+          "type": "password",
+          "value": "GENERATED_AT_DEPLOY_TIME",
+          "temporary": false
+        }
+      ],
+      "realmRoles": ["ops"],
+      "attributes": {
+        "github_username": ["ops-github"]
+      }
+    },
+    {
+      "username": "dev",
+      "email": "dev@fleetshift.local",
+      "firstName": "Dev",
+      "lastName": "User",
+      "enabled": true,
+      "emailVerified": true,
+      "credentials": [
+        {
+          "type": "password",
+          "value": "GENERATED_AT_DEPLOY_TIME",
+          "temporary": false
+        }
+      ],
+      "realmRoles": ["dev"],
+      "attributes": {
+        "github_username": ["dev-github"]
+      }
+    },
+    {
+      "username": "admin",
+      "email": "admin@fleetshift.local",
+      "firstName": "Admin",
+      "lastName": "User",
+      "enabled": true,
+      "emailVerified": true,
+      "credentials": [
+        {
+          "type": "password",
+          "value": "GENERATED_AT_DEPLOY_TIME",
+          "temporary": false
+        }
+      ],
+      "realmRoles": ["ops", "dev"],
+      "attributes": {
+        "github_username": ["admin-github"]
+      }
+    }
+  ]
+}
