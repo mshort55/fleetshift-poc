@@ -176,6 +176,26 @@ func TestAWSProvision(t *testing.T) {
 	})
 
 	step("09_ValidateClusterOIDC", func(t *testing.T) {
+		// The Keycloak access token from step 02 has likely expired during
+		// the ~50 minute provisioning wait. Read the current refresh token
+		// from the keyring (fleetctl auto-refreshes during polling and may
+		// have rotated the original refresh token).
+		refreshToken, err := keyring.Get("fleetctl", "refresh_token")
+		if err != nil {
+			t.Fatalf("load refresh_token from keyring: %v", err)
+		}
+
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+
+		refreshed, err := RefreshAccessToken(ctx,
+			cfg.KeycloakIssuer, cfg.KeycloakClientID, refreshToken)
+		if err != nil {
+			t.Fatalf("refresh Keycloak token: %v", err)
+		}
+		keycloakToken = refreshed
+		t.Log("Keycloak access token refreshed")
+
 		validateClusterOIDC(t, cfg, keycloakToken)
 	})
 

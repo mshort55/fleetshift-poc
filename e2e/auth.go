@@ -222,6 +222,50 @@ func DeviceCodeLogin(ctx context.Context, issuer, clientID, scope, label string)
 	return token, nil
 }
 
+// RefreshAccessToken uses a refresh token to obtain a fresh access token from
+// the issuer's token endpoint. This is needed when the original access token
+// has expired (e.g. after a long provisioning wait).
+func RefreshAccessToken(ctx context.Context, issuer, clientID, refreshToken string) (*TokenResponse, error) {
+	doc, err := discoverOIDC(ctx, issuer)
+	if err != nil {
+		return nil, fmt.Errorf("OIDC discovery: %w", err)
+	}
+
+	data := url.Values{
+		"grant_type":    {"refresh_token"},
+		"client_id":     {clientID},
+		"refresh_token": {refreshToken},
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, doc.TokenEndpoint, strings.NewReader(data.Encode()))
+	if err != nil {
+		return nil, fmt.Errorf("creating refresh request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("refreshing token: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return nil, fmt.Errorf("reading refresh response: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("refresh endpoint returned status %d: %s", resp.StatusCode, string(body))
+	}
+
+	var token TokenResponse
+	if err := json.Unmarshal(body, &token); err != nil {
+		return nil, fmt.Errorf("decoding refresh response: %w", err)
+	}
+
+	return &token, nil
+}
+
 // FetchPullSecret uses the provided access token (from Red Hat SSO) to fetch
 // the pull secret from the OpenShift accounts API.
 func FetchPullSecret(ctx context.Context, accessToken string) ([]byte, error) {
