@@ -1,4 +1,4 @@
-.PHONY: help up down restart-% logs logs-% status
+.PHONY: help up down restart-% logs logs-% status reset-keycloak
 
 SCRIPTS_DIR := $(dir $(abspath $(lastword $(MAKEFILE_LIST))))scripts
 
@@ -27,3 +27,9 @@ logs-%: ## Tail logs from a single container (e.g., make logs-fleetshift-server)
 
 status: ## Show running FleetShift containers
 	@podman ps --filter network=fleetshift --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}"
+
+reset-keycloak: ## Wipe Keycloak state and re-import realm (generates new passwords)
+	podman stop keycloak 2>/dev/null || true
+	podman rm keycloak 2>/dev/null || true
+	podman volume rm keycloak-certs 2>/dev/null || true
+	@echo "Keycloak state wiped. Run 'make up' to restart with fresh realm and passwords."
