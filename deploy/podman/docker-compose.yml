@@ -4,6 +4,7 @@
 #   - Add "127.0.0.1 keycloak" to /etc/hosts
 #   - Build images first (see deploy/podman/README.md)
 #   - jq installed (for realm password generation)
+#   - Copy deploy/.env.template to deploy/.env (or start.sh uses template defaults)
 #
 # Usage:
 #   make up       — generate realm passwords, start stack
@@ -51,25 +52,25 @@ services:
     profiles: ["demo"]
     command: start-dev --import-realm
     environment:
-      KC_BOOTSTRAP_ADMIN_USERNAME: ${KC_BOOTSTRAP_ADMIN_USERNAME:-admin}
-      KC_BOOTSTRAP_ADMIN_PASSWORD: ${KC_BOOTSTRAP_ADMIN_PASSWORD:-admin}
+      KC_BOOTSTRAP_ADMIN_USERNAME: ${KC_BOOTSTRAP_ADMIN_USERNAME}
+      KC_BOOTSTRAP_ADMIN_PASSWORD: ${KC_BOOTSTRAP_ADMIN_PASSWORD}
       KC_HTTP_ENABLED: "true"
-      KC_HTTP_PORT: "${KC_HTTP_PORT:-8180}"
-      KC_HTTPS_PORT: "${KC_HTTPS_PORT:-8443}"
+      KC_HTTP_PORT: "${KC_HTTP_PORT}"
+      KC_HTTPS_PORT: "${KC_HTTPS_PORT}"
       KC_HTTPS_CERTIFICATE_FILE: /opt/keycloak/certs/keycloak.crt
       KC_HTTPS_CERTIFICATE_KEY_FILE: /opt/keycloak/certs/keycloak.key
       KC_HTTP_RELATIVE_PATH: /auth
-      KC_HOSTNAME: ${KC_HOSTNAME:-keycloak}
-      KC_HOSTNAME_PORT: "${KC_HTTP_PORT:-8180}"
+      KC_HOSTNAME: ${KC_HOSTNAME}
+      KC_HOSTNAME_PORT: "${KC_HTTP_PORT}"
       KC_HOSTNAME_STRICT: "false"
     ports:
-      - "${KC_HTTPS_PORT:-8443}:${KC_HTTPS_PORT:-8443}"
-      - "${KC_HTTP_PORT:-8180}:${KC_HTTP_PORT:-8180}"
+      - "${KC_HTTPS_PORT}:${KC_HTTPS_PORT}"
+      - "${KC_HTTP_PORT}:${KC_HTTP_PORT}"
     volumes:
       - keycloak-certs:/opt/keycloak/certs:ro
-      - ${REALM_JSON:-./.realm.json}:/opt/keycloak/data/import/fleetshift-realm.json:ro
+      - ${REALM_JSON}:/opt/keycloak/data/import/fleetshift-realm.json:ro
     healthcheck:
-      test: ["CMD-SHELL", "exec 3<>/dev/tcp/localhost/${KC_HTTP_PORT:-8180}"]
+      test: ["CMD-SHELL", "exec 3<>/dev/tcp/localhost/${KC_HTTP_PORT}"]
       interval: 5s
       timeout: 3s
       retries: 30
@@ -79,44 +80,44 @@ services:
 
   # ── FleetShift Server ───────────────────────────────────────────
   fleetshift-server:
-    image: ${IMAGE_REGISTRY:-quay.io/rheemshort}/fleetshift-server:${IMAGE_TAG:-0.1.0}
+    image: ${IMAGE_REGISTRY}/fleetshift-server:${IMAGE_TAG}
     command:
       - serve
-      - --http-addr=:${FLEETSHIFT_SERVER_HTTP_PORT:-8085}
-      - --grpc-addr=:${FLEETSHIFT_SERVER_GRPC_PORT:-50051}
+      - --http-addr=:${FLEETSHIFT_SERVER_HTTP_PORT}
+      - --grpc-addr=:${FLEETSHIFT_SERVER_GRPC_PORT}
       - --db=/data/fleetshift.db
-      - --log-level=${FLEETSHIFT_LOG_LEVEL:-debug}
+      - --log-level=${FLEETSHIFT_LOG_LEVEL}
       - --oidc-ca-file=/certs/ca.crt
     environment:
       CONTAINER_HOST: keycloak
-      OIDC_HTTPS_PORT: "${KC_HTTPS_PORT:-8443}"
+      OIDC_HTTPS_PORT: "${KC_HTTPS_PORT}"
       KIND_EXPERIMENTAL_DOCKER_NETWORK: fleetshift
     ports:
-      - "${FLEETSHIFT_SERVER_HTTP_PORT:-8085}:${FLEETSHIFT_SERVER_HTTP_PORT:-8085}"
-      - "${FLEETSHIFT_SERVER_GRPC_PORT:-50051}:${FLEETSHIFT_SERVER_GRPC_PORT:-50051}"
+      - "${FLEETSHIFT_SERVER_HTTP_PORT}:${FLEETSHIFT_SERVER_HTTP_PORT}"
+      - "${FLEETSHIFT_SERVER_GRPC_PORT}:${FLEETSHIFT_SERVER_GRPC_PORT}"
     volumes:
       - fleetshift-data:/data
       - keycloak-certs:/certs:ro
-      - ${PODMAN_SOCKET:-/run/user/1000/podman/podman.sock}:/var/run/docker.sock
+      - ${PODMAN_SOCKET}:/var/run/docker.sock
       - /tmp:/tmp
     healthcheck:
-      test: ["CMD", "curl", "-sf", "http://localhost:${FLEETSHIFT_SERVER_HTTP_PORT:-8085}/v1/deployments"]
+      test: ["CMD", "curl", "-sf", "http://localhost:${FLEETSHIFT_SERVER_HTTP_PORT}/v1/deployments"]
       interval: 5s
       timeout: 3s
       retries: 30
 
   # ── Init: OIDC auth registration (demo mode only) ──────────────
   auth-setup:
-    image: ${IMAGE_REGISTRY:-quay.io/rheemshort}/fleetshift-server:${IMAGE_TAG:-0.1.0}
+    image: ${IMAGE_REGISTRY}/fleetshift-server:${IMAGE_TAG}
     profiles: ["demo"]
     entrypoint: ["/bin/sh", "-c"]
     command:
       - |
         fleetctl auth setup \
-          --server fleetshift-server:${FLEETSHIFT_SERVER_GRPC_PORT:-50051} \
-          --issuer-url ${OIDC_ISSUER_URL:-http://keycloak:8180/auth/realms/fleetshift} \
-          --client-id ${OIDC_CLIENT_ID:-fleetshift-ui} \
-          --audience ${OIDC_AUDIENCE:-fleetshift-ui} \
+          --server fleetshift-server:${FLEETSHIFT_SERVER_GRPC_PORT} \
+          --issuer-url ${OIDC_ISSUER_URL} \
+          --client-id ${OIDC_CLIENT_ID} \
+          --audience ${OIDC_AUDIENCE} \
         && echo "Auth method registered." \
         || echo "Auth setup failed (may already exist) — continuing."
     depends_on:
@@ -125,7 +126,7 @@ services:
 
   # ── Mock UI Plugins ─────────────────────────────────────────────
   fleetshift-mock-ui-plugins:
-    image: ${IMAGE_REGISTRY:-quay.io/rheemshort}/fleetshift-mock-ui-plugins:${IMAGE_TAG:-0.1.0}
+    image: ${IMAGE_REGISTRY}/fleetshift-mock-ui-plugins:${IMAGE_TAG}
     command: ["npm", "run", "serve:dist", "-w", "packages/mock-ui-plugins"]
     ports:
       - "8001:8001"
@@ -134,12 +135,12 @@ services:
 
   # ── Mock Servers ────────────────────────────────────────────────
   fleetshift-mock-servers:
-    image: ${IMAGE_REGISTRY:-quay.io/rheemshort}/fleetshift-mock-servers:${IMAGE_TAG:-0.1.0}
+    image: ${IMAGE_REGISTRY}/fleetshift-mock-servers:${IMAGE_TAG}
     environment:
-      MODE: ${MODE:-live}
-      MANAGEMENT_API_TARGET: ${MANAGEMENT_API_TARGET:-http://fleetshift-server:8085}
-      KEYCLOAK_URL: ${KEYCLOAK_URL:-http://keycloak:8180/auth}
-      K8S_TLS_INSECURE: "${K8S_TLS_INSECURE:-1}"
+      MODE: ${MODE}
+      MANAGEMENT_API_TARGET: ${MANAGEMENT_API_TARGET}
+      KEYCLOAK_URL: ${KEYCLOAK_URL}
+      K8S_TLS_INSECURE: "${K8S_TLS_INSECURE}"
       NODE_EXTRA_CA_CERTS: /certs/ca.crt
     ports:
       - "4000:4000"
@@ -160,10 +161,10 @@ services:
 
   # ── GUI ─────────────────────────────────────────────────────────
   fleetshift-gui:
-    image: ${IMAGE_REGISTRY:-quay.io/rheemshort}/fleetshift-gui:${IMAGE_TAG:-0.1.0}
+    image: ${IMAGE_REGISTRY}/fleetshift-gui:${IMAGE_TAG}
     environment:
-      API_PROXY_TARGET: ${API_PROXY_TARGET:-http://fleetshift-mock-servers:4000}
-      KEYCLOAK_URL: ${KEYCLOAK_URL:-http://keycloak:8180/auth}
+      API_PROXY_TARGET: ${API_PROXY_TARGET}
+      KEYCLOAK_URL: ${KEYCLOAK_URL}
       NODE_EXTRA_CA_CERTS: /certs/ca.crt
     ports:
       - "3000:3000"
