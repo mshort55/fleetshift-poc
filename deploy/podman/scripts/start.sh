@@ -125,8 +125,9 @@ if [ "${DEMO_MODE:-true}" = "true" ]; then
   podman run --rm \
     --network "$NETWORK" \
     --name auth-setup \
+    --entrypoint /bin/sh \
     "${IMAGE_REGISTRY}/fleetshift-server:${IMAGE_TAG}" \
-    /bin/sh -c '
+    -c '
       fleetctl auth setup \
         --server fleetshift-server:'"${FLEETSHIFT_SERVER_GRPC_PORT}"' \
         --issuer-url '"${OIDC_ISSUER_URL}"' \
