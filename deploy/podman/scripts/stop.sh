@@ -1,42 +1,29 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-CONTAINERS=(
-  fleetshift-gui
-  fleetshift-mock-servers
-  fleetshift-mock-ui-plugins
-  fleetshift-server
-  keycloak
-)
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+COMPOSE_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+DEPLOY_DIR="$(cd "$COMPOSE_DIR/.." && pwd)"
 
-VOLUMES=(
-  fleetshift-data
-  fleetshift-mock-servers-db
-  keycloak-certs
-  ui-plugins-dist
-)
+# Load .env to know if demo profile is active
+if [ -f "$DEPLOY_DIR/.env" ]; then
+  set -a; source "$DEPLOY_DIR/.env"; set +a
+elif [ -f "$DEPLOY_DIR/.env.template" ]; then
+  set -a; source "$DEPLOY_DIR/.env.template"; set +a
+fi
 
-NETWORK=fleetshift
-
-echo "==> Stopping containers"
-for c in "${CONTAINERS[@]}"; do
-  if podman container exists "$c" 2>/dev/null; then
-    podman stop "$c" 2>/dev/null || true
-    podman rm "$c" 2>/dev/null || true
-    echo "    Stopped $c"
-  fi
-done
+PROFILES=""
+if [ "${DEMO_MODE:-true}" = "true" ]; then
+  PROFILES="--profile demo"
+fi
 
 if [ "${1:-}" = "--clean" ]; then
-  echo "==> Removing volumes"
-  for v in "${VOLUMES[@]}"; do
-    podman volume rm "$v" 2>/dev/null || true
-    echo "    Removed $v"
-  done
-
-  echo "==> Removing network"
-  podman network rm "$NETWORK" 2>/dev/null || true
-  echo "    Removed $NETWORK"
+  echo "==> Stopping stack and removing all data"
+  docker compose -f "$COMPOSE_DIR/docker-compose.yml" $PROFILES down -v
+  rm -f "$COMPOSE_DIR/.realm.json"
+else
+  echo "==> Stopping stack (preserving data)"
+  docker compose -f "$COMPOSE_DIR/docker-compose.yml" $PROFILES down
 fi
 
 echo "==> Done."
