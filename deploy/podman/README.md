@@ -347,7 +347,7 @@ podman logs keycloak
 
 # Keycloak takes 30-60 seconds to start. If it takes longer:
 # - Check if port 8180 or 8443 is already in use
-# - Check if the realm JSON file exists: ls ../keycloak/fleetshift-realm.json
+# - Check if the realm JSON file exists: ls ../../keycloak/fleetshift-realm.json
 ```
 
 ### FleetShift server health check hangs

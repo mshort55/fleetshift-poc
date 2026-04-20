@@ -16,7 +16,7 @@ else
 fi
 
 NETWORK=fleetshift
-REALM_JSON="${DEPLOY_DIR}/../keycloak/fleetshift-realm.json"
+REALM_TEMPLATE="${DEPLOY_DIR}/keycloak/fleetshift-realm.json"
 
 echo "==> Creating podman network: $NETWORK"
 podman network exists "$NETWORK" 2>/dev/null || podman network create "$NETWORK"
@@ -60,6 +60,25 @@ if [ "${DEMO_MODE:-true}" = "true" ]; then
       echo "TLS certs generated in /certs/"
     '
 
+  # Generate user passwords and template the realm JSON
+  echo "==> Generating realm user passwords"
+  OPS_PASSWORD=$(openssl rand -base64 32 | tr -dc 'a-zA-Z0-9' | head -c 16)
+  DEV_PASSWORD=$(openssl rand -base64 32 | tr -dc 'a-zA-Z0-9' | head -c 16)
+  ADMIN_USER_PASSWORD=$(openssl rand -base64 32 | tr -dc 'a-zA-Z0-9' | head -c 16)
+
+  REALM_JSON=$(mktemp)
+  jq \
+    --arg ops "$OPS_PASSWORD" \
+    --arg dev "$DEV_PASSWORD" \
+    --arg adm "$ADMIN_USER_PASSWORD" \
+    '.users |= map(
+        if .username == "ops" then .credentials[0].value = $ops
+        elif .username == "dev" then .credentials[0].value = $dev
+        elif .username == "admin" then .credentials[0].value = $adm
+        else .
+        end
+    )' "$REALM_TEMPLATE" > "$REALM_JSON"
+
   echo "==> Starting keycloak"
   podman run -d \
     --network "$NETWORK" \
@@ -82,11 +101,21 @@ if [ "${DEMO_MODE:-true}" = "true" ]; then
     quay.io/keycloak/keycloak:26.2 \
     start-dev --import-realm
 
+  # Clean up temp file after Keycloak has read it
+  rm -f "$REALM_JSON"
+
   echo "    Waiting for keycloak to be healthy..."
   until podman exec keycloak bash -c 'exec 3<>/dev/tcp/localhost/'"${KC_HTTP_PORT}" 2>/dev/null; do
     sleep 2
   done
   echo "    Keycloak is ready."
+
+  echo ""
+  echo "  FleetShift Realm Credentials:"
+  echo "    ops / ${OPS_PASSWORD}"
+  echo "    dev / ${DEV_PASSWORD}"
+  echo "    admin / ${ADMIN_USER_PASSWORD}"
+  echo ""
 fi
 
 # ── FleetShift Server ─────────────────────────────────────────────
