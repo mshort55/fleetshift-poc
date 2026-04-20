@@ -1,4 +1,4 @@
-.PHONY: help up down restart-% logs logs-% status reset-keycloak
+.PHONY: help up down clean restart-% logs logs-% status reset-keycloak
 
 SCRIPTS_DIR := $(dir $(abspath $(lastword $(MAKEFILE_LIST))))scripts
 
@@ -9,8 +9,11 @@ help: ## Show this help
 up: ## Start the full FleetShift stack
 	$(SCRIPTS_DIR)/start.sh
 
-down: ## Stop all containers (add --clean to remove volumes)
-	$(SCRIPTS_DIR)/stop.sh $(ARGS)
+down: ## Stop all containers, preserve data
+	$(SCRIPTS_DIR)/stop.sh
+
+clean: ## Stop all containers and remove ALL data (volumes, network)
+	$(SCRIPTS_DIR)/stop.sh --clean
 
 restart-%: ## Restart a single container (e.g., make restart-fleetshift-mock-servers)
 	podman restart $*
