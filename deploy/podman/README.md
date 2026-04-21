@@ -13,9 +13,8 @@ Deploy the full FleetShift stack using podman containers with compose.
 > echo "::1 keycloak" | sudo tee -a /etc/hosts
 > ```
 >
-> This is a one-time setup. Without it, OIDC login, GUI access to Keycloak, and
-> all authenticated CLI operations will hang. See
-> `docs/fleetshift/podman-gvproxy-ipv6-networking.md` for details.
+>> This is a one-time setup. Without it, OIDC login, GUI access to Keycloak, and
+> all authenticated CLI operations will hang.
 >
 > **Not needed on Linux** — port forwarding works on IPv4 there.
 
