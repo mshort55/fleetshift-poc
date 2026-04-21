@@ -2,12 +2,32 @@
 
 Deploy the full FleetShift stack using podman containers with compose.
 
+---
+
+> **macOS REQUIRED SETUP**
+>
+> Podman on macOS only forwards IPv6 loopback connections. You **must** add this
+> entry to `/etc/hosts` or Keycloak will be unreachable from the browser and CLI:
+>
+> ```bash
+> echo "::1 keycloak" | sudo tee -a /etc/hosts
+> ```
+>
+> This is a one-time setup. Without it, OIDC login, GUI access to Keycloak, and
+> all authenticated CLI operations will hang. See
+> `docs/fleetshift/podman-gvproxy-ipv6-networking.md` for details.
+>
+> **Not needed on Linux** — port forwarding works on IPv4 there.
+
+---
+
 ## Prerequisites
 
 - **podman** installed and running (`podman --version`)
   - macOS: `podman machine init && podman machine start`
 - **jq** installed (`jq --version`) — used for realm password generation
-- Both repos cloned (only needed for building images, not for deployment)
+- **`/etc/hosts` entry** on macOS (see above)
+- Container images built or available (see [Building Dev Images](#building-dev-images))
 
 ## Quick Start
 
@@ -19,6 +39,7 @@ make up
 
 # Credentials are printed at the end of startup output.
 # GUI: http://localhost:3000
+# Keycloak: http://keycloak:8180 (requires /etc/hosts on macOS)
 ```
 
 ## Available Commands
@@ -39,6 +60,15 @@ make reset-keycloak     Wipe Keycloak state and re-import realm with new passwor
 
 On first `make up`, the script copies `deploy/.env.template` to `deploy/.env`. Edit `.env` to customize. The `.env` file is gitignored.
 
+Key settings:
+
+| Variable | Default | Description |
+|---|---|---|
+| `DEMO_MODE` | `true` | Include local Keycloak instance |
+| `KC_HOSTNAME` | `keycloak` | Hostname Keycloak uses in all URLs (issuer, endpoints) |
+| `KC_HTTP_PORT` | `8180` | Keycloak HTTP port |
+| `FLEETSHIFT_LOG_LEVEL` | `debug` | Server log level |
+
 ### Dev User (optional)
 
 Uncomment these in `.env` to auto-create a personal Keycloak user during startup:
@@ -52,7 +82,7 @@ DEV_USER_ROLES=ops,dev
 
 The user is created idempotently — re-running `make up` updates the existing user.
 
-For ad-hoc user creation (e.g., adding extra users), use the script directly:
+For ad-hoc user creation, use the script directly:
 
 ```bash
 scripts/add-user.sh \
@@ -65,7 +95,7 @@ scripts/add-user.sh \
 
 ### Image Overrides
 
-By default, images come from `quay.io/stolostron/fleetshift-*:latest`. To use custom images (e.g., locally built dev images), uncomment and set in `.env`:
+By default, images come from `quay.io/stolostron/fleetshift-*:latest`. To use custom images, uncomment and set in `.env`:
 
 ```bash
 FLEETSHIFT_SERVER_IMAGE=quay.io/mshort/fleetshift-server:latest
@@ -79,14 +109,13 @@ FLEETSHIFT_GUI_IMAGE=quay.io/mshort/fleetshift-gui:latest
 Images are built and pushed to your personal quay.io namespace. `DEV_REGISTRY` defaults to `quay.io/<your OS username>`.
 
 ```bash
-# Server image (from fleetshift-poc repo)
+# Server image (from fleetshift-poc repo root)
 make image-build                              # tags as quay.io/$USER/fleetshift-server:latest
 make image-build DEV_REGISTRY=quay.io/mshort  # override registry
 make image-build IMAGE_TAG=0.2.0              # override tag
 make image-push                               # push to registry
 
-# UI images (from fleetshift-user-interface repo)
-cd /path/to/fleetshift-user-interface
+# UI images (from fleetshift-user-interface repo root)
 make image-build-all    # builds all three UI images
 make image-push         # pushes all three
 ```
@@ -95,18 +124,26 @@ After building, set the image overrides in `.env` and `make up`.
 
 ## CLI Setup
 
-To use `fleetctl` with the local deployment:
-
 ```bash
 # Configure CLI auth (requires stack to be running)
 make cli-setup
 
-# Log in (opens browser for OIDC flow)
+# Log in (opens browser for OIDC flow at http://keycloak:8180)
 bin/fleetctl auth login
 
 # Use it
-bin/fleetctl --server localhost:50051 deployment list
+bin/fleetctl --server localhost:50051 deployments list
 ```
+
+## Attestation Test
+
+Run the full end-to-end attestation flow (signing key enrollment, signed cluster deployment, signed ConfigMap delivery):
+
+```bash
+scripts/test-attestation.sh
+```
+
+This creates a dev user, logs in, enrolls a signing key, creates a signed kind cluster deployment, and deploys a signed ConfigMap to the managed cluster.
 
 ## Services
 
@@ -117,14 +154,14 @@ bin/fleetctl --server localhost:50051 deployment list
 | FleetShift API | http://localhost:8085 | Go backend (HTTP gateway) |
 | FleetShift gRPC | localhost:50051 | Go backend (gRPC, used by fleetctl) |
 | Plugin assets | http://localhost:8001 | Module Federation plugin bundles |
-| Keycloak (HTTP) | http://localhost:8180 | OIDC provider (demo mode) |
-| Keycloak (HTTPS) | https://localhost:8443 | OIDC provider with TLS (demo mode) |
+| Keycloak (HTTP) | http://keycloak:8180 | OIDC provider (demo mode, requires /etc/hosts on macOS) |
+| Keycloak (HTTPS) | https://keycloak:8443 | OIDC provider with TLS (demo mode) |
 
 ## Authentication
 
 Passwords are generated on each `make up` (or `make reset-keycloak`) and printed to the console.
 
-**Keycloak admin console** (`http://localhost:8180/auth/admin`): `admin` / `<generated>`
+**Keycloak admin console** (`http://keycloak:8180/auth/admin`): `admin` / `<generated>`
 
 **FleetShift realm users:**
 
@@ -135,7 +172,30 @@ Passwords are generated on each `make up` (or `make reset-keycloak`) and printed
 
 If `DEV_USER_*` is configured in `.env`, your personal user is also created.
 
+## How Networking Works
+
+All containers share a podman network called `fleetshift`. Containers resolve each other by service name via podman's built-in DNS (aardvark-dns).
+
+`KC_HOSTNAME=keycloak` means Keycloak produces all URLs with the `keycloak` hostname. This works because:
+
+- **Inside containers**: `keycloak` resolves to Keycloak's container IP via aardvark-dns
+- **On the host (macOS)**: `keycloak` resolves to `::1` via `/etc/hosts`, and podman's gvproxy forwards IPv6 loopback connections to the VM
+- **On the host (Linux)**: `keycloak` resolves to `127.0.0.1` via `/etc/hosts`, and port forwarding works directly
+
+The `/etc/hosts` entry is only needed because the browser and CLI run on the host and need to reach Keycloak at the same hostname the server uses.
+
 ## Troubleshooting
+
+### Keycloak unreachable from browser or CLI (macOS)
+
+```bash
+# Symptom: curl http://keycloak:8180/... hangs, but curl http://localhost:8180/... works
+# Cause: missing /etc/hosts entry for IPv6 loopback
+echo "::1 keycloak" | sudo tee -a /etc/hosts
+
+# Verify:
+curl -s http://keycloak:8180/auth/realms/master | head -c 50
+```
 
 ### Container won't start
 
@@ -162,6 +222,7 @@ make logs-keycloak
 Check the browser DevTools Console and Network tab. Common causes:
 
 - OIDC discovery request pending/failed — Keycloak may still be starting. Wait 30-60 seconds.
+- OIDC authority URL wrong — the GUI image must be built with `authority: "http://keycloak:8180/..."` in oidcConfig.ts. Rebuild the GUI image if needed.
 - API requests failing — check `make logs-fleetshift-mock-servers`
 
 ### FleetShift server keeps restarting
@@ -182,7 +243,6 @@ The podman socket path is auto-detected by `start.sh`. If cluster provisioning f
 # Check your socket path
 podman info --format '{{.Host.RemoteSocket.Path}}'
 
-# The path should NOT include the unix:// prefix.
 # If auto-detection fails, set it manually in .env:
 # PODMAN_SOCKET=/path/to/podman.sock
 ```
