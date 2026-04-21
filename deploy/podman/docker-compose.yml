@@ -153,7 +153,7 @@ services:
       - |
         fleetctl auth setup \
           --server fleetshift-server:${FLEETSHIFT_SERVER_GRPC_PORT} \
-          --issuer-url http://keycloak:${KC_HTTP_PORT}/auth/realms/fleetshift \
+          --issuer-url http://${KC_HOSTNAME}:${KC_HTTP_PORT}/auth/realms/fleetshift \
           --client-id ${OIDC_CLIENT_ID} \
           --audience ${OIDC_AUDIENCE} \
           --key-enrollment-client-id fleetshift-signing \
