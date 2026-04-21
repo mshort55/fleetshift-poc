@@ -1,7 +1,6 @@
 # FleetShift production-like deployment — pre-built images, no source mounts.
 #
 # Prerequisites:
-#   - Add "127.0.0.1 keycloak" to /etc/hosts
 #   - Build images first (see deploy/podman/README.md)
 #   - jq installed (for realm password generation)
 #   - Copy deploy/.env.template to deploy/.env (or start.sh uses template defaults)
@@ -31,6 +30,10 @@ services:
     profiles: ["demo"]
     command: start-dev --import-realm
     restart: unless-stopped
+    networks:
+      fleetshift:
+        aliases:
+          - keycloak.localtest.me
     environment:
       - KC_BOOTSTRAP_ADMIN_USERNAME=admin
       - KC_BOOTSTRAP_ADMIN_PASSWORD
@@ -72,7 +75,6 @@ services:
       - --log-level=${FLEETSHIFT_LOG_LEVEL}
       - --oidc-ca-file=/certs/ca.crt
     environment:
-      CONTAINER_HOST: keycloak
       OIDC_HTTPS_PORT: "${KC_HTTPS_PORT}"
       KIND_TEMP_DIR: "${KIND_TEMP_DIR:-/tmp}"
       KIND_EXPERIMENTAL_DOCKER_NETWORK: fleetshift
