@@ -63,6 +63,7 @@ services:
   fleetshift-server:
     image: ${FLEETSHIFT_SERVER_IMAGE:-quay.io/stolostron/fleetshift-server:latest}
     restart: unless-stopped
+    privileged: true
     command:
       - serve
       - --http-addr=:${FLEETSHIFT_SERVER_HTTP_PORT}
