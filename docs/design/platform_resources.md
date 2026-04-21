@@ -39,13 +39,160 @@ Managed resources are driven by the core Deployment abstraction. A managed resou
 
 > OPEN QUESTION: Can we support other targets than the addon itself? How will those targets verify the attestation? If the only target is the addon itself, then the derived "deployment" is mechanically obvious and can just directly reuse the plumbing without a configurable transformation. If the transformation itself is addon-signed, then we can verify this. But we can defer that for later.
 
-Example:
+Example: a cluster management addon registers the `clusters` managed resource type. A consumer requests a ROSA cluster. (**These examples illustrate the structural relationships between managed resources, derived deployments, and addon registration — not a specification of the actual API shape. Field names, nesting, and conventions are assumed for readability.**)
 
-TODO: Declarative Cluster managed resource example
+#### Consumer-facing managed resource
 
-TODO: Derived deployment result (manifest is maintained inline, placement target is addon, rollout is immediate)
+```json
+POST /clusters
+{
+  "name": "prod-us-east-1",
+  "spec": {
+    "provider": "rosa",
+    "version": "4.16.2",
+    "region": "us-east-1",
+    "compute_pools": [
+      {
+        "name": "workers",
+        "instance_type": "m5.2xlarge",
+        "replicas": 3,
+        "autoscaling": { "min_replicas": 3, "max_replicas": 12 }
+      }
+    ],
+    "network": {
+      "machine_cidr": "10.0.0.0/16",
+      "service_cidr": "172.30.0.0/16",
+      "pod_cidr": "10.128.0.0/14"
+    },
+    "encryption": {
+      "etcd_encryption": true,
+      "kms_key_arn": "arn:aws:kms:us-east-1:123456789012:key/mrk-abc123"
+    }
+  }
+}
+```
 
-TODO: Example addon configuration that describes this basic transformation, and can then compute the result mechanically similar to DerivedInput attestation
+The consumer's agent signs this request. The platform validates the spec against the addon-registered schema, stores the resource, and returns it with platform-managed status fields:
+
+```json
+{
+  "name": "clusters/prod-us-east-1",
+  "uid": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+  "spec": { "..." },
+  "state": "PROVISIONING",
+  "reconciling": true,
+  "status": {
+    "conditions": [
+      {
+        "type": "Provisioning",
+        "status": "True",
+        "message": "Creating ROSA cluster infrastructure"
+      }
+    ]
+  },
+  "create_time": "2026-04-21T14:30:00Z",
+  "provenance": {
+    "signature": {
+      "signer": {
+        "subject": "priya@acme.corp",
+        "issuer": "https://sso.acme.corp"
+      },
+      "content_hash": "sha256:9f86d08...",
+      "signature_bytes": "MEUCIQ..."
+    }
+  }
+}
+```
+
+The `spec` is entirely addon-defined — the platform stores it opaquely but validates it against the addon's registered schema. The `state`, `reconciling`, `status`, `provenance`, and timestamps are platform-managed, following the same patterns as Deployment (AIP-128 declarative-friendly).
+
+#### Derived deployment
+
+The platform mechanically derives a Deployment from the managed resource. Because the addon is the fulfillment target, the derivation is fixed — no configurable transformation:
+
+```json
+{
+  "name": "deployments/_managed/clusters/prod-us-east-1",
+  "manifest_strategy": {
+    "type": "MANAGED_RESOURCE",
+    "managed_resource": {
+      "resource_type": "clusters",
+      "resource_name": "clusters/prod-us-east-1"
+    }
+  },
+  "placement_strategy": {
+    "type": "STATIC",
+    "static": {
+      "targets": ["targets/cluster-mgmt-addon"]
+    }
+  },
+  "rollout_strategy": {
+    "type": "IMMEDIATE"
+  },
+  "provenance": {
+    "signature": { "..." },
+    "managed_resource_ref": "clusters/prod-us-east-1"
+  }
+}
+```
+
+- **Manifest strategy**: `MANAGED_RESOURCE` is a reference to the stored resource spec. When the platform delivers to the addon, it sends the full managed resource document. The addon interprets it — in this case, calling the ROSA API to create a HyperShift-based HostedCluster, configuring networking, setting up the KMS-backed etcd encryption, and registering the resulting cluster as a new target.
+- **Placement**: a single static target — the addon's own delivery endpoint. The addon registered this target during capability registration. Since the addon is a delivery agent for its own target type, it receives the managed resource through the standard delivery channel.
+- **Rollout**: immediate. A single managed resource means a single target means a single delivery — rollout strategy is degenerate.
+- **Provenance**: derived from the original managed resource's signature. A verifier can chain from the deployment's provenance back to the user's signed resource intent. The `managed_resource_ref` links the two, and the derivation rule is mechanically fixed (the addon is always the target), so a verifier can confirm the deployment was correctly derived without trusting the platform.
+
+This derived deployment flows through the standard orchestration pipeline: Resolve → Delta → Plan → Generate → Deliver. The only difference from a user-authored deployment is how it was created (derived from a managed resource rather than directly authored) and how its provenance chains (through the managed resource rather than directly signed).
+
+#### Addon resource type registration
+
+When the cluster management addon connects, it registers its managed resource types as part of capability registration:
+
+```json
+{
+  "capabilities": [
+    {
+      "name": "cluster-mgmt",
+      "managed_resource_types": [
+        {
+          "resource_type": "clusters",
+          "schema": {
+            "format": "JSON_SCHEMA",
+            "definition": {
+              "type": "object",
+              "required": ["provider", "version", "region"],
+              "properties": {
+                "provider": {
+                  "type": "string",
+                  "enum": ["rosa", "aro", "hypershift", "assisted-installer"]
+                },
+                "version": {
+                  "type": "string",
+                  "pattern": "^4\\.[0-9]+\\.[0-9]+$"
+                },
+                "region": { "type": "string" },
+                "compute_pools": { "..." },
+                "network": { "..." },
+                "encryption": { "..." }
+              }
+            }
+          },
+          "delivery_target": "self",
+          "status_projection": {
+            "fields": ["state", "conditions", "api_url", "console_url"]
+          }
+        }
+      ]
+    }
+  ]
+}
+```
+
+- **`resource_type`**: the API path segment. The platform exposes `POST /clusters`, `GET /clusters/{name}`, etc. using this name.
+- **`schema`**: validates consumer input before storage. Rejections happen at the API boundary, not during delivery.
+- **`delivery_target: "self"`**: the mechanical derivation rule. The derived deployment always targets this addon. This is the common case — and the only case where the derivation is fixed and the attestation chain is trivial (the addon is trusted by virtue of its registration, and the platform is a courier). The OPEN QUESTION above asks whether we should support other targets; for now, `"self"` is the only option.
+- **`status_projection`**: which fields from the addon's status reports are surfaced to the consumer. The addon may track internal details (which management cluster hosts this HCP, how many DNS records were created, provisioning step progress) — only the projected fields appear in the consumer-facing `GET /clusters/{name}` response.
+
+This registration is itself signed by the addon and stored as part of the addon's capability record. A delivery-side verifier uses it as evidence: "the addon claimed ownership of `clusters` resources with `delivery_target: self`, so a deployment derived from a `clusters` resource that targets this addon is consistent with the addon's registration."
 
 ### Attestation
 
@@ -53,7 +200,51 @@ Provenance is maintained up to the original managed resource, which is signed by
 
 Additionally, we expect addons to be able to, eventually, produce other platform objects as part of delivery. So, if you post a managed resource, it may trigger several other related resource or deployment creations, as defined by an addon. In this case, attestation is similar to addon-signed manifests. The whole resulting artifact is signed by the addon, with proof up to the user's signature on the managed resource. Note that in this case, there needs to be something we can trust that constrains the resulting artifact within the user's original resource intent. This might be evidence from the latest addon registration configuration. This tells a verifier that someone registered this addon, with this resource ownership or deployment mapping. From there a verifier can mechanically test that the original intent was to a resource owned by this addon, that the addon was an appropriate target based on its configuration (or if thats just how it always works), and that the new manifest and placement are indeed signed by the authorized addon.
 
-TODO: arch diagram showing the flow from user declarative resource input to delivery agent (addon implementing the managed resource)
+```mermaid
+sequenceDiagram
+    participant User as Consumer (Priya)
+    participant Platform as Platform API
+    participant Store as Resource Store
+    participant Pipeline as Orchestration Pipeline
+    participant Fleetlet as Addon Fleetlet
+    participant Addon as Cluster Mgmt Addon
+    participant Cloud as Cloud Provider (ROSA API)
+
+    User->>User: Sign managed resource spec
+    User->>Platform: POST /clusters (signed)
+    Platform->>Platform: Validate spec against<br/>addon-registered schema
+    Platform->>Store: Store managed resource<br/>with provenance
+
+    Platform->>Pipeline: Create derived Deployment<br/>(manifest=resource ref,<br/>placement=addon, rollout=immediate)
+
+    Note over Pipeline: Standard orchestration:<br/>Resolve → Delta → Plan → Generate → Deliver
+
+    Pipeline->>Pipeline: Resolve placement → [addon target]
+    Pipeline->>Pipeline: Generate manifest → managed resource document
+    Pipeline->>Fleetlet: Deliver (resource spec + attestation)
+    Fleetlet->>Addon: Delivery channel
+
+    Addon->>Addon: Interpret resource spec
+    Addon->>Cloud: Create ROSA HostedCluster,<br/>configure networking, KMS, etc.
+    Cloud-->>Addon: Cluster provisioning started
+
+    Addon-->>Fleetlet: Status: PROVISIONING
+    Fleetlet-->>Pipeline: Status channel
+    Pipeline-->>Store: Update managed resource status
+
+    Note over Addon, Cloud: Minutes later...
+
+    Cloud-->>Addon: Cluster ready, API URL available
+    Addon->>Platform: Register new target<br/>(the provisioned cluster)
+    Addon-->>Fleetlet: Status: READY,<br/>api_url, console_url
+    Fleetlet-->>Pipeline: Status channel
+    Pipeline-->>Store: Update managed resource status
+
+    User->>Platform: GET /clusters/prod-us-east-1
+    Platform-->>User: state: ACTIVE,<br/>api_url: https://...,<br/>console_url: https://...
+```
+
+The key property: the platform is a courier throughout. It stores the user's signed intent, mechanically derives a deployment, and delivers the resource spec to the addon through the standard pipeline. The addon — a separate process with its own identity — is the only component that interprets the spec and interacts with the cloud provider. Provenance chains from the user's signature through the managed resource to the derived deployment to the delivery attestation, without the platform ever needing to understand what a "ROSA cluster" is.
 
 ### State
 
