@@ -5,6 +5,10 @@ source "$(cd "$(dirname "$0")" && pwd)/common.sh"
 load_env
 detect_podman_socket
 
+: "${KIND_TEMP_DIR:=${HOME}/.fleetshift/tmp}"
+mkdir -p "$KIND_TEMP_DIR"
+export KIND_TEMP_DIR
+
 REALM_TEMPLATE="${DEPLOY_DIR}/keycloak/fleetshift-realm.json"
 REALM_JSON="${COMPOSE_DIR}/.realm.json"
 
