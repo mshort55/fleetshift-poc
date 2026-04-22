@@ -10,8 +10,34 @@
 #   make down     — stop stack, preserve data
 #   make clean    — stop stack, delete all data
 #
+# Profiles:
+#   prod  — Postgres backend + (optionally) Keycloak
+#   demo  — SQLite backend  + (optionally) Keycloak
+#
 # Keycloak (demo mode) is enabled via the "demo" profile.
 # To disable: DEMO_MODE=false make up
+
+# ── Shared fleetshift-server config ──────────────────────────────────
+x-fleetshift-server: &fleetshift-server
+  image: ${FLEETSHIFT_SERVER_IMAGE:-quay.io/stolostron/fleetshift-server:latest}
+  restart: unless-stopped
+  privileged: true
+  environment:
+    OIDC_HTTPS_PORT: "${KC_HTTPS_PORT}"
+    KIND_TEMP_DIR: "${KIND_TEMP_DIR:-/tmp}"
+    KIND_EXPERIMENTAL_DOCKER_NETWORK: fleetshift
+  ports:
+    - "${FLEETSHIFT_SERVER_HTTP_PORT}:${FLEETSHIFT_SERVER_HTTP_PORT}"
+    - "${FLEETSHIFT_SERVER_GRPC_PORT}:${FLEETSHIFT_SERVER_GRPC_PORT}"
+  volumes:
+    - keycloak-certs:/certs:ro
+    - ${PODMAN_SOCKET:-/dev/null}:/var/run/docker.sock
+    - ${KIND_TEMP_DIR:-/tmp}:${KIND_TEMP_DIR:-/tmp}
+  healthcheck:
+    test: ["CMD", "curl", "-sf", "http://localhost:${FLEETSHIFT_SERVER_HTTP_PORT}/v1/deployments"]
+    interval: 5s
+    timeout: 3s
+    retries: 30
 
 services:
 
@@ -57,41 +83,55 @@ services:
       keycloak-certs:
         condition: service_completed_successfully
 
-  # ── Core ────────────────────────────────────────────────────────
+  # ── Database (prod profile) ─────────────────────────────────────
 
-  fleetshift-server:
-    image: ${FLEETSHIFT_SERVER_IMAGE:-quay.io/stolostron/fleetshift-server:latest}
+  postgres:
+    image: postgres:18
+    profiles: ["prod"]
     restart: unless-stopped
-    privileged: true
-    user: "0:0"
-    command:
-      - serve
-      - --http-addr=:${FLEETSHIFT_SERVER_HTTP_PORT}
-      - --grpc-addr=:${FLEETSHIFT_SERVER_GRPC_PORT}
-      - --db=/data/fleetshift.db
-      - --log-level=${FLEETSHIFT_LOG_LEVEL}
-      - --oidc-ca-file=/certs/ca.crt
     environment:
-      OIDC_HTTPS_PORT: "${KC_HTTPS_PORT}"
-      KIND_TEMP_DIR: "${KIND_TEMP_DIR:-/tmp}"
-      KIND_EXPERIMENTAL_DOCKER_NETWORK: kind
-      CONTAINER_HOST: "unix:///var/run/docker.sock"
-    ports:
-      - "${FLEETSHIFT_SERVER_HTTP_PORT}:${FLEETSHIFT_SERVER_HTTP_PORT}"
-      - "${FLEETSHIFT_SERVER_GRPC_PORT}:${FLEETSHIFT_SERVER_GRPC_PORT}"
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
     volumes:
-      - fleetshift-data:/data
-      - keycloak-certs:/certs:ro
-      - ${PODMAN_SOCKET:-/dev/null}:/var/run/docker.sock
-      - ${KIND_TEMP_DIR:-/tmp}:${KIND_TEMP_DIR:-/tmp}
-    networks:
-      - default
-      - kind
+      - postgres-data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD", "curl", "-sf", "http://localhost:${FLEETSHIFT_SERVER_HTTP_PORT}/v1/deployments"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER}"]
       interval: 5s
       timeout: 3s
       retries: 30
+
+  # ── Core ────────────────────────────────────────────────────────
+
+  fleetshift-server:
+    <<: *fleetshift-server
+    profiles: ["prod"]
+    command:
+      - serve
+      - --database-url=postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}?sslmode=disable
+      - --http-addr=:${FLEETSHIFT_SERVER_HTTP_PORT}
+      - --grpc-addr=:${FLEETSHIFT_SERVER_GRPC_PORT}
+      - --log-level=${FLEETSHIFT_LOG_LEVEL}
+      - --oidc-ca-file=/certs/ca.crt
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  fleetshift-server-demo:
+    <<: *fleetshift-server
+    profiles: ["demo"]
+    command:
+      - serve
+      - --db=/data/fleetshift.db
+      - --http-addr=:${FLEETSHIFT_SERVER_HTTP_PORT}
+      - --grpc-addr=:${FLEETSHIFT_SERVER_GRPC_PORT}
+      - --log-level=${FLEETSHIFT_LOG_LEVEL}
+      - --oidc-ca-file=/certs/ca.crt
+    volumes:
+      - keycloak-certs:/certs:ro
+      - ${PODMAN_SOCKET:-/dev/null}:/var/run/docker.sock
+      - ${KIND_TEMP_DIR:-/tmp}:${KIND_TEMP_DIR:-/tmp}
+      - fleetshift-data:/data
     depends_on:
       keycloak-certs:
         condition: service_completed_successfully
@@ -174,6 +214,7 @@ volumes:
   fleetshift-data:
   fleetshift-mock-servers-db:
   keycloak-certs:
+  postgres-data:
   ui-plugins-dist:
 
 networks:
