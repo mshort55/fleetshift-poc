@@ -8,15 +8,12 @@ help: ## Show this help
 		awk 'BEGIN {FS = ":.*?## "}; {printf "  %-20s %s\n", $$1, $$2}'
 
 up: ## Start the FleetShift stack (PROFILE=demo|prod DB=sqlite|postgres AUTH=local|external)
-	@chmod +x $(SCRIPTS_DIR)/*.sh
 	$(SCRIPTS_DIR)/start.sh
 
 down: ## Stop all containers, preserve data
-	@chmod +x $(SCRIPTS_DIR)/*.sh
 	$(SCRIPTS_DIR)/stop.sh
 
 clean: ## Stop all containers and remove ALL data (volumes, network)
-	@chmod +x $(SCRIPTS_DIR)/*.sh
 	$(SCRIPTS_DIR)/stop.sh --clean
 
 restart-%: ## Restart a single container (e.g., make restart-fleetshift-mock-servers)
@@ -32,7 +29,6 @@ status: ## Show running FleetShift containers
 	@bash -c 'source $(SCRIPTS_DIR)/common.sh && load_env && resolve_profile && compose ps'
 
 cli-setup: ## Configure fleetctl CLI for local deployment
-	@chmod +x $(SCRIPTS_DIR)/*.sh
 	$(SCRIPTS_DIR)/cli-setup.sh
 
 reset-keycloak: ## Wipe Keycloak state and re-import realm (generates new passwords)
