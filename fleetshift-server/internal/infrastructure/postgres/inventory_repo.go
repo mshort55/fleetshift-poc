@@ -35,7 +35,7 @@ func (r *InventoryRepo) Create(ctx context.Context, item domain.InventoryItem) e
 	_, err = r.DB.ExecContext(ctx,
 		`INSERT INTO inventory_items (id, type, name, properties, labels, source_delivery_id, created_at, updated_at)
 		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
-		string(item.ID), string(item.Type), item.Name,
+		item.ID, item.Type, item.Name,
 		string(props), string(labels), srcDeliveryID,
 		item.CreatedAt.UTC().Format(time.RFC3339),
 		item.UpdatedAt.UTC().Format(time.RFC3339),
@@ -53,7 +53,7 @@ func (r *InventoryRepo) Get(ctx context.Context, id domain.InventoryItemID) (dom
 	row := r.DB.QueryRowContext(ctx,
 		`SELECT id, type, name, properties, labels, source_delivery_id, created_at, updated_at
 		 FROM inventory_items WHERE id = $1`,
-		string(id),
+		id,
 	)
 	return scanInventoryItem(row)
 }
@@ -68,7 +68,7 @@ func (r *InventoryRepo) ListByType(ctx context.Context, t domain.InventoryType) 
 	return r.queryItems(ctx,
 		`SELECT id, type, name, properties, labels, source_delivery_id, created_at, updated_at
 		 FROM inventory_items WHERE type = $1`,
-		string(t))
+		t)
 }
 
 func (r *InventoryRepo) Update(ctx context.Context, item domain.InventoryItem) error {
@@ -91,8 +91,8 @@ func (r *InventoryRepo) Update(ctx context.Context, item domain.InventoryItem) e
 		`UPDATE inventory_items
 		 SET type = $1, name = $2, properties = $3, labels = $4, source_delivery_id = $5, updated_at = $6
 		 WHERE id = $7`,
-		string(item.Type), item.Name, string(props), string(labels), srcDeliveryID,
-		item.UpdatedAt.UTC().Format(time.RFC3339), string(item.ID),
+		item.Type, item.Name, string(props), string(labels), srcDeliveryID,
+		item.UpdatedAt.UTC().Format(time.RFC3339), item.ID,
 	)
 	if err != nil {
 		return fmt.Errorf("update inventory item: %w", err)
@@ -105,7 +105,7 @@ func (r *InventoryRepo) Update(ctx context.Context, item domain.InventoryItem) e
 }
 
 func (r *InventoryRepo) Delete(ctx context.Context, id domain.InventoryItemID) error {
-	res, err := r.DB.ExecContext(ctx, `DELETE FROM inventory_items WHERE id = $1`, string(id))
+	res, err := r.DB.ExecContext(ctx, `DELETE FROM inventory_items WHERE id = $1`, id)
 	if err != nil {
 		return fmt.Errorf("delete inventory item: %w", err)
 	}

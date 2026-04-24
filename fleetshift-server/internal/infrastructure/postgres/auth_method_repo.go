@@ -27,7 +27,7 @@ func (r *AuthMethodRepo) Save(ctx context.Context, method domain.AuthMethod) err
 	_, err = r.DB.ExecContext(ctx,
 		`INSERT INTO auth_methods (id, type, config_json) VALUES ($1, $2, $3)
 		 ON CONFLICT(id) DO UPDATE SET type = excluded.type, config_json = excluded.config_json`,
-		string(method.ID), string(method.Type), string(configJSON),
+		method.ID, method.Type, string(configJSON),
 	)
 	if err != nil {
 		return fmt.Errorf("save auth method: %w", err)
@@ -38,7 +38,7 @@ func (r *AuthMethodRepo) Save(ctx context.Context, method domain.AuthMethod) err
 func (r *AuthMethodRepo) Get(ctx context.Context, id domain.AuthMethodID) (domain.AuthMethod, error) {
 	row := r.DB.QueryRowContext(ctx,
 		`SELECT id, type, config_json FROM auth_methods WHERE id = $1`,
-		string(id),
+		id,
 	)
 	return scanAuthMethod(row)
 }

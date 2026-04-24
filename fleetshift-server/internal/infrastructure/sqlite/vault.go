@@ -21,7 +21,7 @@ type VaultStore struct {
 func (v *VaultStore) Put(ctx context.Context, ref domain.SecretRef, value []byte) error {
 	_, err := v.DB.ExecContext(ctx,
 		`INSERT INTO vault_secrets (ref, val) VALUES (?, ?) ON CONFLICT(ref) DO UPDATE SET val = excluded.val`,
-		string(ref), value,
+		ref, value,
 	)
 	if err != nil {
 		return fmt.Errorf("vault put %q: %w", ref, err)
@@ -33,7 +33,7 @@ func (v *VaultStore) Get(ctx context.Context, ref domain.SecretRef) ([]byte, err
 	var val []byte
 	err := v.DB.QueryRowContext(ctx,
 		`SELECT val FROM vault_secrets WHERE ref = ?`,
-		string(ref),
+		ref,
 	).Scan(&val)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -47,7 +47,7 @@ func (v *VaultStore) Get(ctx context.Context, ref domain.SecretRef) ([]byte, err
 func (v *VaultStore) Delete(ctx context.Context, ref domain.SecretRef) error {
 	res, err := v.DB.ExecContext(ctx,
 		`DELETE FROM vault_secrets WHERE ref = ?`,
-		string(ref),
+		ref,
 	)
 	if err != nil {
 		return fmt.Errorf("vault delete %q: %w", ref, err)

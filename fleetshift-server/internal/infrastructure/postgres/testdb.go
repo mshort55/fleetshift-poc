@@ -4,9 +4,9 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"net/url"
 	"os"
 	"os/exec"
-	"strings"
 	"sync"
 	"testing"
 
@@ -107,14 +107,10 @@ func TerminateTestContainer() {
 }
 
 func replaceDBName(connStr, dbName string) string {
-	lastSlash := strings.LastIndex(connStr, "/")
-	if lastSlash < 0 {
+	u, err := url.Parse(connStr)
+	if err != nil {
 		return connStr
 	}
-	rest := connStr[lastSlash+1:]
-	qmark := strings.Index(rest, "?")
-	if qmark >= 0 {
-		return connStr[:lastSlash+1] + dbName + rest[qmark:]
-	}
-	return connStr[:lastSlash+1] + dbName
+	u.Path = "/" + dbName
+	return u.String()
 }

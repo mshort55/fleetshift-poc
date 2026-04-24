@@ -36,7 +36,7 @@ func (r *TargetRepo) Create(ctx context.Context, t domain.TargetInfo) error {
 
 	_, err = r.DB.ExecContext(ctx,
 		`INSERT INTO targets (id, type, name, state, labels, properties, inventory_item_id, accepted_resource_types) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
-		string(t.ID), string(t.Type), t.Name, string(state), string(labels), string(props), string(t.InventoryItemID), art,
+		t.ID, t.Type, t.Name, state, string(labels), string(props), t.InventoryItemID, art,
 	)
 	if err != nil {
 		if isUniqueViolation(err) {
@@ -50,7 +50,7 @@ func (r *TargetRepo) Create(ctx context.Context, t domain.TargetInfo) error {
 func (r *TargetRepo) Get(ctx context.Context, id domain.TargetID) (domain.TargetInfo, error) {
 	row := r.DB.QueryRowContext(ctx,
 		`SELECT id, type, name, state, labels, properties, inventory_item_id, accepted_resource_types FROM targets WHERE id = $1`,
-		string(id),
+		id,
 	)
 	return scanTarget(row)
 }
@@ -74,7 +74,7 @@ func (r *TargetRepo) List(ctx context.Context) ([]domain.TargetInfo, error) {
 }
 
 func (r *TargetRepo) Delete(ctx context.Context, id domain.TargetID) error {
-	res, err := r.DB.ExecContext(ctx, `DELETE FROM targets WHERE id = $1`, string(id))
+	res, err := r.DB.ExecContext(ctx, `DELETE FROM targets WHERE id = $1`, id)
 	if err != nil {
 		return fmt.Errorf("delete target: %w", err)
 	}
@@ -120,25 +120,14 @@ func marshalResourceTypes(rts []domain.ResourceType) (string, error) {
 	if len(rts) == 0 {
 		return "[]", nil
 	}
-	raw := make([]string, len(rts))
-	for i, rt := range rts {
-		raw[i] = string(rt)
-	}
-	b, err := json.Marshal(raw)
+	b, err := json.Marshal(rts)
 	return string(b), err
 }
 
 func unmarshalResourceTypes(s string) ([]domain.ResourceType, error) {
-	var raw []string
-	if err := json.Unmarshal([]byte(s), &raw); err != nil {
+	var rts []domain.ResourceType
+	if err := json.Unmarshal([]byte(s), &rts); err != nil {
 		return nil, err
 	}
-	if len(raw) == 0 {
-		return nil, nil
-	}
-	out := make([]domain.ResourceType, len(raw))
-	for i, v := range raw {
-		out[i] = domain.ResourceType(v)
-	}
-	return out, nil
+	return rts, nil
 }

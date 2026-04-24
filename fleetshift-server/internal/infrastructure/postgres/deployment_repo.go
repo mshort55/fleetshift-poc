@@ -51,7 +51,7 @@ func (r *DeploymentRepo) Create(ctx context.Context, d domain.Deployment) error 
 	_, err = r.DB.ExecContext(ctx,
 		`INSERT INTO deployments (id, uid, manifest_strategy, placement_strategy, rollout_strategy, resolved_targets, state, auth, provenance, generation, observed_generation, created_at, updated_at, etag)
 		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)`,
-		string(d.ID), d.UID, string(ms), string(ps), nullString(rs), string(rt), string(d.State), string(auth), nullString(provJSON),
+		d.ID, d.UID, string(ms), string(ps), nullString(rs), string(rt), d.State, string(auth), nullString(provJSON),
 		int64(d.Generation), int64(d.ObservedGeneration),
 		d.CreatedAt.UTC().Format(time.RFC3339), d.UpdatedAt.UTC().Format(time.RFC3339), d.Etag,
 	)
@@ -69,7 +69,7 @@ const deploymentColumns = `id, uid, manifest_strategy, placement_strategy, rollo
 func (r *DeploymentRepo) Get(ctx context.Context, id domain.DeploymentID) (domain.Deployment, error) {
 	row := r.DB.QueryRowContext(ctx,
 		`SELECT `+deploymentColumns+` FROM deployments WHERE id = $1`,
-		string(id),
+		id,
 	)
 	return scanDeployment(row)
 }
@@ -95,17 +95,35 @@ func (r *DeploymentRepo) List(ctx context.Context) ([]domain.Deployment, error) 
 }
 
 func (r *DeploymentRepo) Update(ctx context.Context, d domain.Deployment) error {
-	ms, _ := json.Marshal(d.ManifestStrategy)
-	ps, _ := json.Marshal(d.PlacementStrategy)
+	ms, err := json.Marshal(d.ManifestStrategy)
+	if err != nil {
+		return fmt.Errorf("marshal manifest strategy: %w", err)
+	}
+	ps, err := json.Marshal(d.PlacementStrategy)
+	if err != nil {
+		return fmt.Errorf("marshal placement strategy: %w", err)
+	}
 	var rs []byte
 	if d.RolloutStrategy != nil {
-		rs, _ = json.Marshal(d.RolloutStrategy)
+		rs, err = json.Marshal(d.RolloutStrategy)
+		if err != nil {
+			return fmt.Errorf("marshal rollout strategy: %w", err)
+		}
 	}
-	rt, _ := json.Marshal(d.ResolvedTargets)
-	auth, _ := json.Marshal(d.Auth)
+	rt, err := json.Marshal(d.ResolvedTargets)
+	if err != nil {
+		return fmt.Errorf("marshal resolved targets: %w", err)
+	}
+	auth, err := json.Marshal(d.Auth)
+	if err != nil {
+		return fmt.Errorf("marshal auth: %w", err)
+	}
 	var provJSON []byte
 	if d.Provenance != nil {
-		provJSON, _ = json.Marshal(d.Provenance)
+		provJSON, err = json.Marshal(d.Provenance)
+		if err != nil {
+			return fmt.Errorf("marshal provenance: %w", err)
+		}
 	}
 
 	res, err := r.DB.ExecContext(ctx,
@@ -115,9 +133,9 @@ func (r *DeploymentRepo) Update(ctx context.Context, d domain.Deployment) error 
 		     generation = $8, observed_generation = $9,
 		     updated_at = $10, etag = $11
 		 WHERE id = $12`,
-		string(ms), string(ps), nullString(rs), string(rt), string(d.State), string(auth), nullString(provJSON),
+		string(ms), string(ps), nullString(rs), string(rt), d.State, string(auth), nullString(provJSON),
 		int64(d.Generation), int64(d.ObservedGeneration),
-		d.UpdatedAt.UTC().Format(time.RFC3339), d.Etag, string(d.ID),
+		d.UpdatedAt.UTC().Format(time.RFC3339), d.Etag, d.ID,
 	)
 	if err != nil {
 		return fmt.Errorf("update deployment: %w", err)
@@ -130,7 +148,7 @@ func (r *DeploymentRepo) Update(ctx context.Context, d domain.Deployment) error 
 }
 
 func (r *DeploymentRepo) Delete(ctx context.Context, id domain.DeploymentID) error {
-	res, err := r.DB.ExecContext(ctx, `DELETE FROM deployments WHERE id = $1`, string(id))
+	res, err := r.DB.ExecContext(ctx, `DELETE FROM deployments WHERE id = $1`, id)
 	if err != nil {
 		return fmt.Errorf("delete deployment: %w", err)
 	}
@@ -161,12 +179,16 @@ func scanDeployment(s scanner) (domain.Deployment, error) {
 	d.ObservedGeneration = domain.Generation(observedGeneration)
 	d.Etag = etag
 
-	if t, err := time.Parse(time.RFC3339, createdAtStr); err == nil {
-		d.CreatedAt = t
+	t, err := time.Parse(time.RFC3339, createdAtStr)
+	if err != nil {
+		return d, fmt.Errorf("parse created_at: %w", err)
 	}
-	if t, err := time.Parse(time.RFC3339, updatedAtStr); err == nil {
-		d.UpdatedAt = t
+	d.CreatedAt = t
+	t, err = time.Parse(time.RFC3339, updatedAtStr)
+	if err != nil {
+		return d, fmt.Errorf("parse updated_at: %w", err)
 	}
+	d.UpdatedAt = t
 
 	if err := json.Unmarshal([]byte(msJSON), &d.ManifestStrategy); err != nil {
 		return d, fmt.Errorf("unmarshal manifest strategy: %w", err)

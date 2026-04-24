@@ -30,8 +30,8 @@ func (r *DeliveryRepo) Put(ctx context.Context, d domain.Delivery) error {
 		   manifests = excluded.manifests,
 		   state = excluded.state,
 		   updated_at = excluded.updated_at`,
-		string(d.ID), string(d.DeploymentID), string(d.TargetID),
-		string(manifests), string(d.State),
+		d.ID, d.DeploymentID, d.TargetID,
+		string(manifests), d.State,
 		d.CreatedAt.UTC().Format(time.RFC3339),
 		d.UpdatedAt.UTC().Format(time.RFC3339),
 	)
@@ -45,7 +45,7 @@ func (r *DeliveryRepo) Get(ctx context.Context, id domain.DeliveryID) (domain.De
 	row := r.DB.QueryRowContext(ctx,
 		`SELECT id, deployment_id, target_id, manifests, state, created_at, updated_at
 		 FROM delivery_records WHERE id = $1`,
-		string(id),
+		id,
 	)
 	return scanDelivery(row)
 }
@@ -54,7 +54,7 @@ func (r *DeliveryRepo) GetByDeploymentTarget(ctx context.Context, depID domain.D
 	row := r.DB.QueryRowContext(ctx,
 		`SELECT id, deployment_id, target_id, manifests, state, created_at, updated_at
 		 FROM delivery_records WHERE deployment_id = $1 AND target_id = $2`,
-		string(depID), string(tgtID),
+		depID, tgtID,
 	)
 	return scanDelivery(row)
 }
@@ -63,7 +63,7 @@ func (r *DeliveryRepo) ListByDeployment(ctx context.Context, depID domain.Deploy
 	rows, err := r.DB.QueryContext(ctx,
 		`SELECT id, deployment_id, target_id, manifests, state, created_at, updated_at
 		 FROM delivery_records WHERE deployment_id = $1`,
-		string(depID),
+		depID,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("list deliveries: %w", err)
@@ -84,7 +84,7 @@ func (r *DeliveryRepo) ListByDeployment(ctx context.Context, depID domain.Deploy
 func (r *DeliveryRepo) DeleteByDeployment(ctx context.Context, depID domain.DeploymentID) error {
 	_, err := r.DB.ExecContext(ctx,
 		`DELETE FROM delivery_records WHERE deployment_id = $1`,
-		string(depID),
+		depID,
 	)
 	if err != nil {
 		return fmt.Errorf("delete deliveries: %w", err)

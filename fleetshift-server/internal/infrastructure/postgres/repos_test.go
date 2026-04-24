@@ -20,51 +20,38 @@ func newStore(t *testing.T) *postgres.Store {
 	return &postgres.Store{DB: db}
 }
 
+func newTxRepo[T any](t *testing.T, accessor func(domain.Tx) T) T {
+	t.Helper()
+	store := newStore(t)
+	tx, err := store.Begin(context.Background())
+	if err != nil {
+		t.Fatalf("Begin: %v", err)
+	}
+	t.Cleanup(func() { tx.Rollback() })
+	return accessor(tx)
+}
+
 func TestTargetRepo(t *testing.T) {
 	targetrepotest.Run(t, func(t *testing.T) domain.TargetRepository {
-		store := newStore(t)
-		tx, err := store.Begin(context.Background())
-		if err != nil {
-			t.Fatalf("Begin: %v", err)
-		}
-		t.Cleanup(func() { tx.Rollback() })
-		return tx.Targets()
+		return newTxRepo(t, domain.Tx.Targets)
 	})
 }
 
 func TestDeploymentRepo(t *testing.T) {
 	deploymentrepotest.Run(t, func(t *testing.T) domain.DeploymentRepository {
-		store := newStore(t)
-		tx, err := store.Begin(context.Background())
-		if err != nil {
-			t.Fatalf("Begin: %v", err)
-		}
-		t.Cleanup(func() { tx.Rollback() })
-		return tx.Deployments()
+		return newTxRepo(t, domain.Tx.Deployments)
 	})
 }
 
 func TestDeliveryRepo(t *testing.T) {
 	deliveryrepotest.Run(t, func(t *testing.T) domain.DeliveryRepository {
-		store := newStore(t)
-		tx, err := store.Begin(context.Background())
-		if err != nil {
-			t.Fatalf("Begin: %v", err)
-		}
-		t.Cleanup(func() { tx.Rollback() })
-		return tx.Deliveries()
+		return newTxRepo(t, domain.Tx.Deliveries)
 	})
 }
 
 func TestInventoryRepo(t *testing.T) {
 	inventoryrepotest.Run(t, func(t *testing.T) domain.InventoryRepository {
-		store := newStore(t)
-		tx, err := store.Begin(context.Background())
-		if err != nil {
-			t.Fatalf("Begin: %v", err)
-		}
-		t.Cleanup(func() { tx.Rollback() })
-		return tx.Inventory()
+		return newTxRepo(t, domain.Tx.Inventory)
 	})
 }
 
