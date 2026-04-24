@@ -21,12 +21,12 @@ func (r *SignerEnrollmentRepo) Create(ctx context.Context, e domain.SignerEnroll
 		`INSERT INTO signer_enrollments
 		 (id, subject_id, issuer, identity_token, registry_subject, registry_id, created_at, expires_at)
 		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-		e.ID,
-		e.Subject,
-		e.Issuer,
-		e.IdentityToken,
-		e.RegistrySubject,
-		e.RegistryID,
+		string(e.ID),
+		string(e.Subject),
+		string(e.Issuer),
+		string(e.IdentityToken),
+		string(e.RegistrySubject),
+		string(e.RegistryID),
 		e.CreatedAt.UTC().Format(time.RFC3339),
 		e.ExpiresAt.UTC().Format(time.RFC3339),
 	)
@@ -44,7 +44,7 @@ func (r *SignerEnrollmentRepo) Get(ctx context.Context, id domain.SignerEnrollme
 		`SELECT id, subject_id, issuer, identity_token, registry_subject, registry_id,
 		        created_at, expires_at
 		 FROM signer_enrollments WHERE id = ?`,
-		id,
+		string(id),
 	)
 	return scanSignerEnrollment(row)
 }
@@ -54,7 +54,7 @@ func (r *SignerEnrollmentRepo) ListBySubject(ctx context.Context, identity domai
 		`SELECT id, subject_id, issuer, identity_token, registry_subject, registry_id,
 		        created_at, expires_at
 		 FROM signer_enrollments WHERE subject_id = ? AND issuer = ?`,
-		identity.Subject, identity.Issuer,
+		string(identity.Subject), string(identity.Issuer),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("query signer enrollments: %w", err)

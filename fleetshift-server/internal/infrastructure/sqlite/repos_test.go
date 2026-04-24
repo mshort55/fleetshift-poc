@@ -14,7 +14,7 @@ import (
 	"github.com/fleetshift/fleetshift-poc/fleetshift-server/internal/infrastructure/sqlite"
 )
 
-func newStore(t *testing.T) *sqlite.Store {
+func beginTestTx(t *testing.T) *sqlite.Store {
 	t.Helper()
 	db := sqlite.OpenTestDB(t)
 	return &sqlite.Store{DB: db}
@@ -22,7 +22,7 @@ func newStore(t *testing.T) *sqlite.Store {
 
 func TestTargetRepo(t *testing.T) {
 	targetrepotest.Run(t, func(t *testing.T) domain.TargetRepository {
-		store := newStore(t)
+		store := beginTestTx(t)
 		tx, err := store.Begin(context.Background())
 		if err != nil {
 			t.Fatalf("Begin: %v", err)
@@ -34,7 +34,7 @@ func TestTargetRepo(t *testing.T) {
 
 func TestDeploymentRepo(t *testing.T) {
 	deploymentrepotest.Run(t, func(t *testing.T) domain.DeploymentRepository {
-		store := newStore(t)
+		store := beginTestTx(t)
 		tx, err := store.Begin(context.Background())
 		if err != nil {
 			t.Fatalf("Begin: %v", err)
@@ -46,7 +46,7 @@ func TestDeploymentRepo(t *testing.T) {
 
 func TestDeliveryRepo(t *testing.T) {
 	deliveryrepotest.Run(t, func(t *testing.T) domain.DeliveryRepository {
-		store := newStore(t)
+		store := beginTestTx(t)
 		tx, err := store.Begin(context.Background())
 		if err != nil {
 			t.Fatalf("Begin: %v", err)
@@ -58,7 +58,7 @@ func TestDeliveryRepo(t *testing.T) {
 
 func TestInventoryRepo(t *testing.T) {
 	inventoryrepotest.Run(t, func(t *testing.T) domain.InventoryRepository {
-		store := newStore(t)
+		store := beginTestTx(t)
 		tx, err := store.Begin(context.Background())
 		if err != nil {
 			t.Fatalf("Begin: %v", err)
