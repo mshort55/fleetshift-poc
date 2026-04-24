@@ -13,10 +13,12 @@ x-fleetshift-server: &fleetshift-server
   image: ${FLEETSHIFT_SERVER_IMAGE:-quay.io/stolostron/fleetshift-server:latest}
   restart: unless-stopped
   privileged: true
+  user: "0:0"
   environment:
     OIDC_HTTPS_PORT: "${KC_HTTPS_PORT}"
     KIND_TEMP_DIR: "${KIND_TEMP_DIR:-/tmp}"
-    KIND_EXPERIMENTAL_DOCKER_NETWORK: fleetshift
+    KIND_EXPERIMENTAL_DOCKER_NETWORK: kind
+    CONTAINER_HOST: "unix:///var/run/docker.sock"
   ports:
     - "${FLEETSHIFT_SERVER_HTTP_PORT}:${FLEETSHIFT_SERVER_HTTP_PORT}"
     - "${FLEETSHIFT_SERVER_GRPC_PORT}:${FLEETSHIFT_SERVER_GRPC_PORT}"
@@ -24,6 +26,9 @@ x-fleetshift-server: &fleetshift-server
     - keycloak-certs:/certs:ro
     - ${PODMAN_SOCKET:-/dev/null}:/var/run/docker.sock
     - ${KIND_TEMP_DIR:-/tmp}:${KIND_TEMP_DIR:-/tmp}
+  networks:
+    - default
+    - kind
   healthcheck:
     test: ["CMD", "curl", "-sf", "http://localhost:${FLEETSHIFT_SERVER_HTTP_PORT}/v1/deployments"]
     interval: 5s
