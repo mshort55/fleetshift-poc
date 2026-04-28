@@ -15,13 +15,6 @@ services:
       retries: 30
 
   fleetshift-server:
-    command:
-      - serve
-      - --database-url=postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}?sslmode=disable
-      - --http-addr=:${FLEETSHIFT_SERVER_HTTP_PORT}
-      - --grpc-addr=:${FLEETSHIFT_SERVER_GRPC_PORT}
-      - --log-level=${FLEETSHIFT_LOG_LEVEL}
-      - --oidc-ca-file=/certs/ca.crt
     depends_on:
       postgres:
         condition: service_healthy
