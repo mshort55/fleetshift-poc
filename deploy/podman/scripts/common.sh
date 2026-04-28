@@ -20,10 +20,10 @@ load_env() {
 
 COMPOSE_FILES=()
 
-resolve_profile() {
-  local profile="${PROFILE:-demo}"
+resolve_mode() {
+  local mode="${DEPLOY_MODE:-demo}"
 
-  case "$profile" in
+  case "$mode" in
     demo)
       DB_BACKEND="${DB:-sqlite}"
       AUTH_MODE="${AUTH:-local}"
@@ -33,7 +33,7 @@ resolve_profile() {
       AUTH_MODE="${AUTH:-external}"
       ;;
     *)
-      echo "ERROR: Unknown profile '$profile'. Valid profiles: demo, prod" >&2
+      echo "ERROR: Unknown mode '$mode'. Valid modes: demo, prod" >&2
       exit 1
       ;;
   esac
@@ -60,7 +60,7 @@ resolve_profile() {
 
   case "$AUTH_MODE" in
     local)    COMPOSE_FILES+=("-f" "$COMPOSE_DIR/overrides/local-keycloak.yaml") ;;
-    external) ;;
+    external) COMPOSE_FILES+=("-f" "$COMPOSE_DIR/overrides/external-oidc.yaml") ;;
     *)
       echo "ERROR: Unknown AUTH mode '$AUTH_MODE'. Valid options: local, external" >&2
       exit 1
@@ -71,12 +71,12 @@ resolve_profile() {
     COMPOSE_FILES+=("-f" "$COMPOSE_DIR/overrides/dev.yaml")
   fi
 
-  echo "==> Profile: $profile (db=$DB_BACKEND, auth=$AUTH_MODE${DEV:+, dev=true})"
+  echo "==> Mode: $mode (db=$DB_BACKEND, auth=$AUTH_MODE${DEV:+, dev=true})"
 }
 
 compose() {
   if [ ${#COMPOSE_FILES[@]} -eq 0 ]; then
-    resolve_profile
+    resolve_mode
   fi
   podman compose "${COMPOSE_FILES[@]}" --env-file "$DEPLOY_DIR/.env" "$@"
 }
