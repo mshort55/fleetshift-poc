@@ -4,14 +4,23 @@ source "$(cd "$(dirname "$0")" && pwd)/common.sh"
 
 load_env
 detect_podman_socket
-resolve_profile
+resolve_mode
 
 : "${KIND_TEMP_DIR:=${HOME}/.fleetshift/tmp}"
 mkdir -p "$KIND_TEMP_DIR"
 export KIND_TEMP_DIR
+podman network exists kind 2>/dev/null || podman network create kind
 
 REALM_TEMPLATE="${DEPLOY_DIR}/keycloak/fleetshift-realm.json"
 REALM_JSON="${COMPOSE_DIR}/.realm.json"
+
+if [ "$AUTH_MODE" = "external" ]; then
+  if [ -z "${OIDC_ISSUER_URL:-}" ]; then
+    echo "ERROR: OIDC_ISSUER_URL is required when AUTH=external (DEPLOY_MODE=prod)." >&2
+    echo "Set it in deploy/.env or pass it as an environment variable." >&2
+    exit 1
+  fi
+fi
 
 if [ "$AUTH_MODE" = "local" ]; then
   echo "==> Generating passwords"
