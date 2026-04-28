@@ -180,7 +180,7 @@ Required environment variables in `deploy/.env`:
 
 | Variable | Description |
 |----------|-------------|
-| `OIDC_ISSUER_URL` | Full issuer URL (e.g., `https://keycloak.apps.cluster.example.com/auth/realms/fleetshift`) |
+| `OIDC_ISSUER_URL` | Full issuer URL (e.g., `https://keycloak.apps.cluster.example.com/realms/fleetshift`) |
 | `OIDC_CONSOLE_CLIENT_SECRET` | Client secret for the `ocp-console` confidential client |
 
 The external OIDC provider must use publicly trusted TLS (e.g., Let's Encrypt).
