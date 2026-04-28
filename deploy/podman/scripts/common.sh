@@ -75,6 +75,12 @@ resolve_mode() {
 }
 
 compose() {
+  if ! command -v docker-compose &>/dev/null; then
+    echo "ERROR: docker-compose is not installed." >&2
+    echo "  Install: brew install docker-compose" >&2
+    echo "  (podman-compose is not compatible — this stack requires depends_on health checks)" >&2
+    exit 1
+  fi
   if [ ${#COMPOSE_FILES[@]} -eq 0 ]; then
     resolve_mode
   fi
