@@ -49,6 +49,15 @@ resolve_profile() {
       ;;
   esac
 
+  case "$DB_BACKEND" in
+    sqlite)
+      export DB_FLAG="--db=/data/fleetshift.db"
+      ;;
+    postgres)
+      export DB_FLAG="--database-url=postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}?sslmode=disable"
+      ;;
+  esac
+
   case "$AUTH_MODE" in
     local)    COMPOSE_FILES+=("-f" "$COMPOSE_DIR/overrides/local-keycloak.yaml") ;;
     external) ;;
