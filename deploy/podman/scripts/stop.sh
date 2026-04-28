@@ -4,8 +4,13 @@ source "$(cd "$(dirname "$0")" && pwd)/common.sh"
 
 load_env
 
+# compose down never executes commands — it stops containers by name.
+# Export placeholders so compose doesn't warn about unset variables during YAML parsing.
+export DB_FLAG="unused"
+export OIDC_ISSUER_URL="${OIDC_ISSUER_URL:-unused}"
+
 # Always include all override files so compose can find every possible service,
-# regardless of which profile was used to start the stack.
+# regardless of which mode was used to start the stack.
 COMPOSE_FILES=(
   "-f" "$COMPOSE_DIR/compose.yaml"
   "-f" "$COMPOSE_DIR/overrides/sqlite.yaml"
