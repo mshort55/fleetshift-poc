@@ -19,19 +19,19 @@ End-to-end tests that exercise the full FleetShift platform against real infrast
 
 ### Keycloak (one-time per OCP cluster)
 
-Deploy Keycloak with the FleetShift realm. Scripts are in `e2e/setup/keycloak/`:
+Deploy Keycloak with the FleetShift realm. Scripts are in `deploy/keycloak/`:
 
 ```bash
-cd e2e/setup/keycloak
+cd deploy/keycloak
 ./deploy.sh                    # Deploy Keycloak + realm + test users
-../../deploy/podman/scripts/add-user.sh \   # Add your personal user
+../podman/scripts/add-user.sh \   # Add your personal user
   --username you@company.com \
   --password yourpass \
   --github your-github-username \
   --roles ops,dev
 ```
 
-See `e2e/setup/keycloak/README.md` for details on clients, realm config, and troubleshooting.
+See `deploy/keycloak/README.md` for details on clients, realm config, and troubleshooting.
 
 ### AWS OIDC Federation (one-time per AWS account)
 
