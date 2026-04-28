@@ -245,7 +245,7 @@ REALM_JSON=$(jq \
         elif .username == "admin" then .credentials[0].value = $adm
         else .
         end
-    )' "${SCRIPT_DIR}/../../../deploy/keycloak/fleetshift-realm.json")
+    )' "${SCRIPT_DIR}/fleetshift-realm.json")
 
 cat <<EOF | oc apply -n "${NAMESPACE}" -f -
 {
