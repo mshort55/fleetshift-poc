@@ -32,10 +32,8 @@ Deploy the full FleetShift stack using podman containers with compose.
 ## Quick Start
 
 ```bash
-cd deploy/podman
-
 # Start in demo mode (sqlite + local keycloak, the default)
-make up
+task deploy:up
 
 # Credentials are printed at the end of startup output.
 # GUI: http://localhost:3000
@@ -54,8 +52,8 @@ FleetShift uses named modes with per-axis overrides for flexible deployment conf
 | `prod` | PostgreSQL | External OIDC | Production-like deployments |
 
 ```bash
-make up                    # demo (default)
-make up DEPLOY_MODE=prod       # prod
+task deploy:up                    # demo (default)
+task deploy:up DEPLOY_MODE=prod       # prod
 ```
 
 ### Per-Axis Overrides
@@ -68,17 +66,17 @@ Override the DB backend or auth provider independently:
 | `AUTH` | `local`, `external` | Auth provider (`local` = bundled Keycloak) |
 
 ```bash
-make up DB=postgres AUTH=local       # postgres + local keycloak
-make up DEPLOY_MODE=prod AUTH=local      # same as above (prod defaults to postgres)
-make up DB=sqlite AUTH=external      # sqlite + external oidc
+task deploy:up DB=postgres AUTH=local       # postgres + local keycloak
+task deploy:up DEPLOY_MODE=prod AUTH=local      # same as above (prod defaults to postgres)
+task deploy:up DB=sqlite AUTH=external      # sqlite + external oidc
 ```
 
 ### Sticky Configuration
 
-Set `DEPLOY_MODE` in `deploy/.env` to avoid passing it every time:
+Set `DEPLOY_MODE` in `.env` to avoid passing it every time:
 
 ```bash
-# deploy/.env
+# .env
 DEPLOY_MODE=prod
 ```
 
@@ -86,14 +84,11 @@ Command-line always takes precedence over `.env`.
 
 ## Dev Mode
 
-`make dev` builds all container images from source and mounts source directories for hot-reload. This is the recommended way to develop the UI and backend together.
+`task deploy:dev` builds all container images from source and mounts source directories for hot-reload. This is the recommended way to develop the UI and backend together.
 
 ```bash
-# From deploy/podman/ or the repo root:
-make dev
-
-# Equivalent to:
-DEV=true make up
+# From the repo root:
+task deploy:dev
 ```
 
 What it does:
@@ -104,9 +99,9 @@ What it does:
 - **fleetshift-mock-servers** — built from the UI repo, runs `npm run dev` (nodemon) for live reload on `packages/mock-servers/src/` changes
 - **fleetshift-mock-ui-plugins** — built from the UI repo (no source mounts; plugins are pre-built)
 
-Requires `UI_DIR` in `.env` pointing to the `fleetshift-user-interface` repo (relative to `deploy/podman/`).
+Requires `UI_DIR` in `.env` pointing to the `fleetshift-user-interface` repo.
 
-After changing Go code in the server, run `make rebuild` to rebuild the image and restart.
+After changing Go code in the server, run `task deploy:rebuild` to rebuild the image and restart.
 
 ### Deployment Signing in Dev Mode
 
@@ -115,7 +110,7 @@ The dev stack uses OIDC-based signing by default: the user's signing public key 
 For signing from the UI to work, the OIDC client and audience must match the UI's Keycloak client:
 
 ```bash
-# deploy/.env
+# .env
 OIDC_CLIENT_ID=fleetshift-ui
 OIDC_AUDIENCE=fleetshift-ui
 ```
@@ -137,23 +132,23 @@ Option A (OIDC claim) is recommended for local dev. The `.env.template` defaults
 
 | Command | Description |
 |---|---|
-| `make up` | Start the FleetShift stack. Accepts `DEPLOY_MODE=`, `DB=`, `AUTH=` overrides. |
-| `make dev` | Start with local source builds + hot-reload (see [Dev Mode](#dev-mode)). |
-| `make build` | Rebuild container images without restarting. |
-| `make rebuild` | Stop, rebuild images, and restart in one shot. |
-| `make down` | Stop all containers, preserve data volumes. |
-| `make clean` | Stop all containers and remove ALL data (volumes, network, kind clusters). |
-| `make status` | Show running containers and health status. |
-| `make logs` | Tail logs from all containers. |
-| `make logs-<service>` | Tail logs from one container (e.g., `make logs-fleetshift-server`). |
-| `make restart-<service>` | Restart one container (e.g., `make restart-fleetshift-mock-servers`). |
-| `make cli-setup` | Configure `fleetctl` CLI for local OIDC auth (requires running stack). |
-| `make reset-keycloak` | Wipe Keycloak state, re-import realm with new passwords. |
-| `make help` | Show all available targets. |
+| `task deploy:up` | Start the FleetShift stack. Accepts `DEPLOY_MODE=`, `DB=`, `AUTH=` overrides. |
+| `task deploy:dev` | Start with local source builds + hot-reload (see [Dev Mode](#dev-mode)). |
+| `task deploy:build` | Rebuild container images without restarting. |
+| `task deploy:rebuild` | Stop, rebuild images, and restart in one shot. |
+| `task deploy:down` | Stop all containers, preserve data volumes. |
+| `task deploy:clean` | Stop all containers and remove ALL data (volumes, network, kind clusters). |
+| `task deploy:status` | Show running containers and health status. |
+| `task deploy:logs` | Tail logs from all containers. |
+| `task deploy:logs:<service>` | Tail logs from one container (e.g., `task deploy:logs:fleetshift-server`). |
+| `task deploy:restart:<service>` | Restart one container (e.g., `task deploy:restart:fleetshift-mock-servers`). |
+| `task deploy:cli-setup` | Configure `fleetctl` CLI for local OIDC auth (requires running stack). |
+| `task deploy:reset-keycloak` | Wipe Keycloak state, re-import realm with new passwords. |
+| `task --list` | Show all available targets. |
 
 ## Configuration
 
-On first `make up`, the script copies `deploy/.env.template` to `deploy/.env`. Edit `.env` to customize. The `.env` file is gitignored.
+Copy `.env.template` to `.env` and edit to customize. The `.env` file is gitignored.
 
 Key settings:
 
@@ -164,7 +159,7 @@ Key settings:
 | `KC_HTTP_PORT` | `8180` | Keycloak HTTP port |
 | `POSTGRES_PASSWORD` | `changeme` | PostgreSQL password (used when `DB=postgres`) |
 | `FLEETSHIFT_LOG_LEVEL` | `debug` | Server log level |
-| `UI_DIR` | `../../../fleetshift-user-interface` | Path to UI repo (relative to `deploy/podman/`, used by `make dev`) |
+| `UI_DIR` | `../fleetshift-user-interface` | Path to UI repo (used by `task deploy:dev`) |
 | `OIDC_CLIENT_ID` | `fleetshift-cli` | OIDC client ID for the auth method |
 | `KEY_ENROLLMENT_CLIENT_ID` | `fleetshift-signing` | Client ID used during signer key enrollment |
 | `PUBLIC_KEY_CLAIM_EXPR` | _(unset)_ | Token claim expression for OIDC-based key registry |
@@ -176,7 +171,7 @@ Key settings:
 When running in prod mode (`DEPLOY_MODE=prod` or `AUTH=external`), the stack connects to
 an external OIDC provider instead of running a local Keycloak instance.
 
-Required environment variables in `deploy/.env`:
+Required environment variables in `.env`:
 
 | Variable | Description |
 |----------|-------------|
@@ -199,13 +194,13 @@ DEV_USER_GITHUB=mshort55
 DEV_USER_ROLES=ops,dev
 ```
 
-The user is created idempotently — re-running `make up` updates the existing user.
+The user is created idempotently — re-running `task deploy:up` updates the existing user.
 
 For ad-hoc user creation, use the script directly:
 
 ```bash
 scripts/add-user.sh \
-  --admin-password <admin password from make up output> \
+  --admin-password <admin password from task deploy:up output> \
   --username someone@redhat.com \
   --password theirpass \
   --github their-github \
@@ -229,23 +224,23 @@ Images are built and pushed to your personal quay.io namespace. `DEV_REGISTRY` d
 
 ```bash
 # Server image (from fleetshift-poc repo root)
-make image-build                              # tags as quay.io/$USER/fleetshift-server:latest
-make image-build DEV_REGISTRY=quay.io/mshort  # override registry
-make image-build IMAGE_TAG=0.2.0              # override tag
-make image-push                               # push to registry
+task image:build                              # tags as quay.io/$USER/fleetshift-server:latest
+task image:build DEV_REGISTRY=quay.io/mshort  # override registry
+task image:build IMAGE_TAG=0.2.0              # override tag
+task image:push                               # push to registry
 
 # UI images (from fleetshift-user-interface repo root)
 make image-build-all    # builds all three UI images
 make image-push         # pushes all three
 ```
 
-After building, set the image overrides in `.env` and `make up`.
+After building, set the image overrides in `.env` and `task deploy:up`.
 
 ## CLI Setup
 
 ```bash
 # Configure CLI auth (requires stack to be running)
-make cli-setup
+task deploy:cli-setup
 
 # Log in (opens browser for OIDC flow at http://keycloak:8180)
 bin/fleetctl auth login
@@ -278,7 +273,7 @@ This creates a dev user, logs in, enrolls a signing key, creates a signed kind c
 
 ## Authentication
 
-Passwords are generated on each `make up` (or `make reset-keycloak`) and printed to the console.
+Passwords are generated on each `task deploy:up` (or `task deploy:reset-keycloak`) and printed to the console.
 
 **Keycloak admin console** (`http://keycloak:8180/auth/admin`): `admin` / `<generated>`
 
@@ -319,7 +314,7 @@ curl -s http://keycloak:8180/auth/realms/master | head -c 50
 ### Container won't start
 
 ```bash
-make logs-<service>
+task deploy:logs:<service>
 
 # Common issues:
 # - Port already in use: stop whatever is using the port, or change in .env
@@ -329,11 +324,11 @@ make logs-<service>
 ### Keycloak crash loop
 
 ```bash
-make logs-keycloak
+task deploy:logs:keycloak
 
 # Common causes:
 # - Invalid realm JSON (check deploy/keycloak/fleetshift-realm.json)
-# - TLS cert permissions (make clean fixes this)
+# - TLS cert permissions (task deploy:clean fixes this)
 ```
 
 ### GUI shows blank white screen
@@ -342,16 +337,16 @@ Check the browser DevTools Console and Network tab. Common causes:
 
 - OIDC discovery request pending/failed — Keycloak may still be starting. Wait 30-60 seconds.
 - OIDC authority URL wrong — the GUI image must be built with `authority: "http://keycloak:8180/..."` in oidcConfig.ts. Rebuild the GUI image if needed.
-- API requests failing — check `make logs-fleetshift-mock-servers`
+- API requests failing — check `task deploy:logs:fleetshift-mock-servers`
 
 ### FleetShift server keeps restarting
 
 ```bash
-make logs-fleetshift-server
+task deploy:logs:fleetshift-server
 
 # Common causes:
 # - "OIDC CA file not found" — keycloak-certs init container hasn't finished yet.
-#   Usually resolves after a few restarts. If persistent: make clean && make up
+#   Usually resolves after a few restarts. If persistent: task deploy:clean && task deploy:up
 ```
 
 ### Podman socket issues
@@ -371,8 +366,8 @@ podman info --format '{{.Host.RemoteSocket.Path}}'
 If realm changes aren't taking effect:
 
 ```bash
-make reset-keycloak
-make up
+task deploy:reset-keycloak
+task deploy:up
 ```
 
 This wipes the Keycloak database and TLS certs, re-imports the realm, and generates new passwords.
