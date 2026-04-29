@@ -84,6 +84,9 @@ oc wait --for=delete namespace/"${NAMESPACE}" --timeout=120s 2>/dev/null || true
 
 # Step 8: Optionally uninstall operators
 echo ""
+echo "Operators are shared cluster resources and slow to reinstall (~5 min each)."
+echo "Skip unless you're fully decommissioning Keycloak from this cluster."
+echo ""
 read -rp "Uninstall cert-manager operator? (y/N): " remove_cm
 if [[ "$remove_cm" =~ ^[Yy]$ ]]; then
     info "Removing cert-manager operator..."

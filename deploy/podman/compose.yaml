@@ -15,7 +15,6 @@ x-fleetshift-server: &fleetshift-server
   privileged: true
   user: "0:0"
   environment:
-    OIDC_HTTPS_PORT: "${KC_HTTPS_PORT}"
     KIND_TEMP_DIR: "${KIND_TEMP_DIR:-/tmp}"
     KIND_EXPERIMENTAL_DOCKER_NETWORK: kind
     CONTAINER_HOST: "unix:///var/run/docker.sock"
@@ -23,7 +22,6 @@ x-fleetshift-server: &fleetshift-server
     - "${FLEETSHIFT_SERVER_HTTP_PORT}:${FLEETSHIFT_SERVER_HTTP_PORT}"
     - "${FLEETSHIFT_SERVER_GRPC_PORT}:${FLEETSHIFT_SERVER_GRPC_PORT}"
   volumes:
-    - keycloak-certs:/certs:ro
     - ${PODMAN_SOCKET:-/dev/null}:/var/run/docker.sock
     - ${KIND_TEMP_DIR:-/tmp}:${KIND_TEMP_DIR:-/tmp}
   networks:
@@ -41,6 +39,12 @@ services:
 
   fleetshift-server:
     <<: *fleetshift-server
+    command:
+      - serve
+      - ${DB_FLAG}
+      - --http-addr=:${FLEETSHIFT_SERVER_HTTP_PORT}
+      - --grpc-addr=:${FLEETSHIFT_SERVER_GRPC_PORT}
+      - --log-level=${FLEETSHIFT_LOG_LEVEL}
 
   # ── Frontend ────────────────────────────────────────────────────
 
@@ -61,13 +65,11 @@ services:
       MANAGEMENT_API_TARGET: ${MANAGEMENT_API_TARGET}
       KEYCLOAK_URL: ${KEYCLOAK_URL}
       K8S_TLS_INSECURE: "${K8S_TLS_INSECURE}"
-      NODE_EXTRA_CA_CERTS: /certs/ca.crt
     ports:
       - "4000:4000"
     volumes:
       - fleetshift-mock-servers-db:/opt/app-root/src/packages/mock-servers/data
       - ui-plugins-dist:/opt/app-root/src/packages/mock-ui-plugins/dist:ro
-      - keycloak-certs:/certs:ro
     healthcheck:
       test: ["CMD-SHELL", "exec 3<>/dev/tcp/localhost/4000"]
       interval: 5s
@@ -85,17 +87,13 @@ services:
     environment:
       API_PROXY_TARGET: ${API_PROXY_TARGET}
       KEYCLOAK_URL: ${KEYCLOAK_URL}
-      NODE_EXTRA_CA_CERTS: /certs/ca.crt
     ports:
       - "3000:3000"
-    volumes:
-      - keycloak-certs:/certs:ro
     depends_on:
       fleetshift-mock-servers:
         condition: service_healthy
 
 volumes:
-  keycloak-certs:
   ui-plugins-dist:
   fleetshift-mock-servers-db:
 

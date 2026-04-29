@@ -1,0 +1,21 @@
+services:
+  auth-setup:
+    image: ${FLEETSHIFT_SERVER_IMAGE:-quay.io/stolostron/fleetshift-server:latest}
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        fleetctl auth setup \
+          --server fleetshift-server:${FLEETSHIFT_SERVER_GRPC_PORT} \
+          --issuer-url ${OIDC_ISSUER_URL} \
+          --client-id ${OIDC_CLIENT_ID} \
+          --audience ${OIDC_AUDIENCE} \
+          --key-enrollment-client-id fleetshift-signing \
+          --registry-id github.com \
+          --registry-subject-expression "claims.github_username" \
+        && echo "Auth method registered." \
+        || echo "Auth setup failed (may already exist) — continuing."
+    depends_on:
+      fleetshift-server:
+        condition: service_healthy
+    networks:
+      - default

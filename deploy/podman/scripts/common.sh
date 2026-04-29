@@ -20,10 +20,10 @@ load_env() {
 
 COMPOSE_FILES=()
 
-resolve_profile() {
-  local profile="${PROFILE:-demo}"
+resolve_mode() {
+  local mode="${DEPLOY_MODE:-demo}"
 
-  case "$profile" in
+  case "$mode" in
     demo)
       DB_BACKEND="${DB:-sqlite}"
       AUTH_MODE="${AUTH:-local}"
@@ -33,7 +33,7 @@ resolve_profile() {
       AUTH_MODE="${AUTH:-external}"
       ;;
     *)
-      echo "ERROR: Unknown profile '$profile'. Valid profiles: demo, prod" >&2
+      echo "ERROR: Unknown mode '$mode'. Valid modes: demo, prod" >&2
       exit 1
       ;;
   esac
@@ -49,9 +49,18 @@ resolve_profile() {
       ;;
   esac
 
+  case "$DB_BACKEND" in
+    sqlite)
+      export DB_FLAG="--db=/data/fleetshift.db"
+      ;;
+    postgres)
+      export DB_FLAG="--database-url=postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}?sslmode=disable"
+      ;;
+  esac
+
   case "$AUTH_MODE" in
     local)    COMPOSE_FILES+=("-f" "$COMPOSE_DIR/overrides/local-keycloak.yaml") ;;
-    external) ;;
+    external) COMPOSE_FILES+=("-f" "$COMPOSE_DIR/overrides/external-oidc.yaml") ;;
     *)
       echo "ERROR: Unknown AUTH mode '$AUTH_MODE'. Valid options: local, external" >&2
       exit 1
@@ -62,12 +71,18 @@ resolve_profile() {
     COMPOSE_FILES+=("-f" "$COMPOSE_DIR/overrides/dev.yaml")
   fi
 
-  echo "==> Profile: $profile (db=$DB_BACKEND, auth=$AUTH_MODE${DEV:+, dev=true})"
+  echo "==> Mode: $mode (db=$DB_BACKEND, auth=$AUTH_MODE${DEV:+, dev=true})"
 }
 
 compose() {
+  if ! command -v docker-compose &>/dev/null; then
+    echo "ERROR: docker-compose is not installed." >&2
+    echo "  Install: brew install docker-compose" >&2
+    echo "  (podman-compose is not compatible — this stack requires depends_on health checks)" >&2
+    exit 1
+  fi
   if [ ${#COMPOSE_FILES[@]} -eq 0 ]; then
-    resolve_profile
+    resolve_mode
   fi
   podman compose "${COMPOSE_FILES[@]}" --env-file "$DEPLOY_DIR/.env" "$@"
 }

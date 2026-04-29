@@ -2,16 +2,35 @@
 set -euo pipefail
 source "$(cd "$(dirname "$0")" && pwd)/common.sh"
 
+# Start the FleetShift stack. Called by 'make up'.
+#
+# In demo mode (AUTH=local): generates Keycloak passwords, templates the
+# realm JSON, starts the stack, then registers the github_username user
+# profile attribute and optionally creates a dev user.
+#
+# In prod mode (AUTH=external): validates OIDC_ISSUER_URL is set, then
+# starts the stack. No local Keycloak — auth-setup points at the
+# external OIDC provider.
+
 load_env
 detect_podman_socket
-resolve_profile
+resolve_mode
 
 : "${KIND_TEMP_DIR:=${HOME}/.fleetshift/tmp}"
 mkdir -p "$KIND_TEMP_DIR"
 export KIND_TEMP_DIR
+podman network exists kind 2>/dev/null || podman network create kind
 
 REALM_TEMPLATE="${DEPLOY_DIR}/keycloak/fleetshift-realm.json"
 REALM_JSON="${COMPOSE_DIR}/.realm.json"
+
+if [ "$AUTH_MODE" = "external" ]; then
+  if [ -z "${OIDC_ISSUER_URL:-}" ]; then
+    echo "ERROR: OIDC_ISSUER_URL is required when AUTH=external (DEPLOY_MODE=prod)." >&2
+    echo "Set it in deploy/.env or pass it as an environment variable." >&2
+    exit 1
+  fi
+fi
 
 if [ "$AUTH_MODE" = "local" ]; then
   echo "==> Generating passwords"
@@ -102,5 +121,9 @@ if [ "$AUTH_MODE" = "local" ]; then
   echo "    dev / ${DEV_PASSWORD}"
 fi
 echo ""
+if [ "$AUTH_MODE" = "local" ]; then
+  echo "    Run 'make cli-setup' to configure fleetctl."
+fi
 echo "    Run 'make logs' to tail container output."
 echo "    Run 'make status' to check container health."
+echo "    Run 'make help' to see all available commands."

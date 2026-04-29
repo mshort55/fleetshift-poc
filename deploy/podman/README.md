@@ -42,20 +42,20 @@ make up
 # Keycloak: http://keycloak:8180 (requires /etc/hosts on macOS)
 ```
 
-## Profiles & Overrides
+## Modes & Overrides
 
-FleetShift uses named profiles with per-axis overrides for flexible deployment configuration.
+FleetShift uses named modes with per-axis overrides for flexible deployment configuration.
 
-### Named Profiles
+### Named Modes
 
-| Profile | DB Backend | Auth Provider | Use Case |
+| Mode | DB Backend | Auth Provider | Use Case |
 |---|---|---|---|
 | `demo` (default) | SQLite | Local Keycloak | Quick demos, local dev without external dependencies |
 | `prod` | PostgreSQL | External OIDC | Production-like deployments |
 
 ```bash
 make up                    # demo (default)
-make up PROFILE=prod       # prod
+make up DEPLOY_MODE=prod       # prod
 ```
 
 ### Per-Axis Overrides
@@ -69,17 +69,17 @@ Override the DB backend or auth provider independently:
 
 ```bash
 make up DB=postgres AUTH=local       # postgres + local keycloak
-make up PROFILE=prod AUTH=local      # same as above (prod defaults to postgres)
+make up DEPLOY_MODE=prod AUTH=local      # same as above (prod defaults to postgres)
 make up DB=sqlite AUTH=external      # sqlite + external oidc
 ```
 
 ### Sticky Configuration
 
-Set `PROFILE` in `deploy/.env` to avoid passing it every time:
+Set `DEPLOY_MODE` in `deploy/.env` to avoid passing it every time:
 
 ```bash
 # deploy/.env
-PROFILE=prod
+DEPLOY_MODE=prod
 ```
 
 Command-line always takes precedence over `.env`.
@@ -137,7 +137,7 @@ Option A (OIDC claim) is recommended for local dev. The `.env.template` defaults
 
 | Command | Description |
 |---|---|
-| `make up` | Start the FleetShift stack. Accepts `PROFILE=`, `DB=`, `AUTH=` overrides. |
+| `make up` | Start the FleetShift stack. Accepts `DEPLOY_MODE=`, `DB=`, `AUTH=` overrides. |
 | `make dev` | Start with local source builds + hot-reload (see [Dev Mode](#dev-mode)). |
 | `make build` | Rebuild container images without restarting. |
 | `make rebuild` | Stop, rebuild images, and restart in one shot. |
@@ -159,7 +159,7 @@ Key settings:
 
 | Variable | Default | Description |
 |---|---|---|
-| `PROFILE` | `demo` | Named profile: `demo` or `prod` |
+| `DEPLOY_MODE` | `demo` | Named mode: `demo` or `prod` |
 | `KC_HOSTNAME` | `keycloak` | Hostname Keycloak uses in all URLs (issuer, endpoints) |
 | `KC_HTTP_PORT` | `8180` | Keycloak HTTP port |
 | `POSTGRES_PASSWORD` | `changeme` | PostgreSQL password (used when `DB=postgres`) |
@@ -170,6 +170,23 @@ Key settings:
 | `PUBLIC_KEY_CLAIM_EXPR` | _(unset)_ | Token claim expression for OIDC-based key registry |
 | `KEY_REGISTRY_ID` | `github.com` | External key registry ID (e.g., `github.com`) |
 | `KEY_REGISTRY_SUBJECT_EXPR` | _(unset)_ | Token claim expression mapping to external registry subject |
+
+### External OIDC (DEPLOY_MODE=prod)
+
+When running in prod mode (`DEPLOY_MODE=prod` or `AUTH=external`), the stack connects to
+an external OIDC provider instead of running a local Keycloak instance.
+
+Required environment variables in `deploy/.env`:
+
+| Variable | Description |
+|----------|-------------|
+| `OIDC_ISSUER_URL` | Full issuer URL (e.g., `https://keycloak.apps.cluster.example.com/realms/fleetshift`) |
+| `OIDC_CONSOLE_CLIENT_SECRET` | Client secret for the `ocp-console` confidential client |
+
+The external OIDC provider must use publicly trusted TLS (e.g., Let's Encrypt).
+Client IDs are fixed by the shared realm configuration and do not need to be set.
+
+To deploy an external Keycloak instance, see `deploy/keycloak/README.md`.
 
 ### Dev User (optional)
 
