@@ -28,6 +28,9 @@ go.work.sum
 .env
 e2e/.env
 
+# Taskfile checksum cache
+.task/
+
 # Editor/IDE
 # .idea/
 # .vscode/
