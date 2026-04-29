@@ -2,6 +2,11 @@
 set -euo pipefail
 source "$(cd "$(dirname "$0")" && pwd)/common.sh"
 
+# Stop the FleetShift stack. Called by 'make down' and 'make clean'.
+#
+#   ./stop.sh          — stop containers, preserve volumes
+#   ./stop.sh --clean  — stop containers, delete volumes, remove kind cluster
+
 load_env
 
 # compose down never executes commands — it stops containers by name.

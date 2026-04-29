@@ -2,6 +2,12 @@
 set -euo pipefail
 source "$(cd "$(dirname "$0")" && pwd)/common.sh"
 
+# Configure fleetctl CLI for the current deployment. Called by 'make cli-setup'.
+#
+# Fetches OIDC discovery and writes auth config to ~/.config/fleetshift/auth.json.
+# Uses OIDC_ISSUER_URL from .env if set (external mode), otherwise falls back
+# to the local Keycloak instance.
+
 load_env
 
 if [ -n "${OIDC_ISSUER_URL:-}" ]; then

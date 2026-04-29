@@ -2,6 +2,16 @@
 set -euo pipefail
 source "$(cd "$(dirname "$0")" && pwd)/common.sh"
 
+# Start the FleetShift stack. Called by 'make up'.
+#
+# In demo mode (AUTH=local): generates Keycloak passwords, templates the
+# realm JSON, starts the stack, then registers the github_username user
+# profile attribute and optionally creates a dev user.
+#
+# In prod mode (AUTH=external): validates OIDC_ISSUER_URL is set, then
+# starts the stack. No local Keycloak — auth-setup points at the
+# external OIDC provider.
+
 load_env
 detect_podman_socket
 resolve_mode

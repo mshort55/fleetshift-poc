@@ -1,6 +1,10 @@
 #!/bin/sh
 set -eu
 
+# Generate self-signed TLS certificates for the local Keycloak instance.
+# Runs as an init container via overrides/local-keycloak.yaml.
+# Skips if certs already exist (idempotent).
+
 if [ -f /certs/keycloak.crt ]; then
   echo "TLS certs already exist, skipping generation"
   exit 0

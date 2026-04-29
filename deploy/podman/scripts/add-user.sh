@@ -8,7 +8,7 @@ source "$(cd "$(dirname "$0")" && pwd)/common.sh"
 #   ./add-user.sh --admin-password <from make up output> \
 #     --username mshort@redhat.com --password mypass --github mshort55
 #
-# External usage (OpenShift Keycloak):
+# External usage (OpenShift Keycloak, you need to be connected to the OCP cluster via oc cli):
 #   ./add-user.sh --username mshort@redhat.com --password mypass --github mshort55
 #
 # All flags can also be set via environment variables:
