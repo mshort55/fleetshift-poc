@@ -47,7 +47,7 @@ tasks:
       - go build -o ../bin/ocp-engine .
 
   test:
-    desc: Run all tests
+    desc: Run unit tests for all modules
     deps: [test:server, test:cli, test:ocp-engine]
 
   test:server:
@@ -69,7 +69,7 @@ tasks:
       - go test ./...
 
   test:e2e:
-    desc: Run all E2E tests (requires .env config and interactive auth)
+    desc: Run end-to-end tests (requires .env and interactive auth)
     deps: [build]
     dir: e2e
     preconditions:
@@ -89,7 +89,7 @@ tasks:
       - go test -tags e2e -timeout 3h -v -run TestAWSProvision
 
   generate:
-    desc: Generate protobuf and gRPC code
+    desc: Generate protobuf and gRPC code (skips if unchanged)
     preconditions:
       - sh: command -v buf
         msg: "buf is not installed. See https://buf.build/docs/installation"
@@ -107,7 +107,7 @@ tasks:
       - podman build -t {{.DEV_REGISTRY}}/fleetshift-server:{{.IMAGE_TAG}} .
 
   image:push:
-    desc: Push the fleetshift-server container image
+    desc: Push the server image to DEV_REGISTRY
     preconditions:
       - sh: test -n "{{.DEV_REGISTRY}}"
         msg: "DEV_REGISTRY is not set. Set it in .env (e.g. DEV_REGISTRY=quay.io/yourusername)"

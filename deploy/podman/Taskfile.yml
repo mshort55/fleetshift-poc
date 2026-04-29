@@ -48,7 +48,7 @@ env:
 
 tasks:
   up:
-    desc: Start the FleetShift stack (DEPLOY_MODE=demo|prod DB=sqlite|postgres AUTH=local|external)
+    desc: Start the FleetShift stack (set DEPLOY_MODE, DB, AUTH to customize)
     preconditions:
       - sh: test -f {{.ROOT_DIR}}/.env
         msg: "No .env found. Copy .env.template to .env first."
@@ -68,14 +68,14 @@ tasks:
       - ./scripts/start.sh
 
   dev:
-    desc: Start with local source builds + hot-reload
+    desc: Start in dev mode — source mounts + hot-reload
     cmds:
       - task: up
         vars:
           DEV: "true"
 
   build:
-    desc: Rebuild container images without restarting
+    desc: Build container images without restarting services
     cmds:
       - podman compose {{.COMPOSE_FILES}} --env-file {{.ROOT_DIR}}/.env build
 
@@ -89,7 +89,7 @@ tasks:
           BUILD: "true"
 
   pull:
-    desc: Pull latest images for the current mode
+    desc: Pull latest container images
     cmds:
       - podman compose {{.COMPOSE_FILES}} --env-file {{.ROOT_DIR}}/.env pull --ignore-buildable
 
@@ -99,7 +99,7 @@ tasks:
       - ./scripts/stop.sh
 
   clean:
-    desc: Stop all containers and remove ALL data (volumes, network)
+    desc: Stop all containers and remove all data (volumes, network)
     cmds:
       - ./scripts/stop.sh --clean
 
