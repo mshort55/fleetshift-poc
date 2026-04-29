@@ -14,6 +14,7 @@ export OIDC_ISSUER_URL="${OIDC_ISSUER_URL:-unused}"
 
 # Always include all override files so compose can find every possible service,
 # regardless of which mode was used to start the stack.
+# shellcheck disable=SC2034 # used by compose() in common.sh
 COMPOSE_FILES="-f $COMPOSE_DIR/compose.yaml -f $COMPOSE_DIR/overrides/sqlite.yaml -f $COMPOSE_DIR/overrides/postgres.yaml -f $COMPOSE_DIR/overrides/local-keycloak.yaml -f $COMPOSE_DIR/overrides/external-oidc.yaml -f $COMPOSE_DIR/overrides/dev.yaml"
 
 if [ "${1:-}" = "--clean" ]; then
