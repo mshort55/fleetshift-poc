@@ -7,8 +7,12 @@ DEPLOY_DIR="$(cd "$COMPOSE_DIR/.." && pwd)"
 ROOT_DIR="$(cd "$DEPLOY_DIR/.." && pwd)"
 
 compose() {
-  if ! command -v podman &>/dev/null; then
-    echo "ERROR: podman is not installed." >&2
+  # podman compose delegates to an external provider. We require docker-compose
+  # (not podman-compose) because the stack uses depends_on health checks.
+  if ! command -v docker-compose &>/dev/null; then
+    echo "ERROR: docker-compose is not installed." >&2
+    echo "  Install: brew install docker-compose" >&2
+    echo "  (podman-compose is not compatible — this stack requires depends_on health checks)" >&2
     exit 1
   fi
   # COMPOSE_FILES is set by Taskfile as a space-separated string of -f flags.
