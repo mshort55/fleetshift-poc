@@ -14,8 +14,8 @@ source "$(cd "$(dirname "$0")" && pwd)/common.sh"
 #   6. Deploys a signed ConfigMap to the managed cluster
 #
 # Prerequisites:
-#   - Stack running (make up)
-#   - fleetctl built (make build in repo root)
+#   - Stack running (task deploy:up)
+#   - fleetctl built (task build in repo root)
 #
 # Usage:
 #   ./test-attestation.sh
@@ -41,7 +41,7 @@ die()  { printf '\033[1;31mERROR: %s\033[0m\n' "$*" >&2; exit 1; }
 
 # --- Pre-flight checks -----------------------------------------------
 
-[ -x "$FLEETCTL" ] || die "fleetctl not found at ${FLEETCTL}. Run 'make build' in the repo root."
+[ -x "$FLEETCTL" ] || die "fleetctl not found at ${FLEETCTL}. Run 'task build' in the repo root."
 
 GITHUB_USERNAME="${DEV_USER_GITHUB:-}"
 if [ -z "$GITHUB_USERNAME" ]; then
@@ -51,7 +51,7 @@ fi
 
 log "Checking FleetShift server is reachable"
 if ! curl -sf "http://localhost:${FLEETSHIFT_SERVER_HTTP_PORT:-8085}/v1/deployments" >/dev/null 2>&1; then
-  die "FleetShift server not reachable on :${FLEETSHIFT_SERVER_HTTP_PORT:-8085}. Run 'make up' first."
+  die "FleetShift server not reachable on :${FLEETSHIFT_SERVER_HTTP_PORT:-8085}. Run 'task deploy:up' first."
 fi
 echo "  Server is up."
 
@@ -62,7 +62,7 @@ else
   OIDC_CHECK_URL="http://${KC_HOSTNAME:-localhost}:${KC_HTTP_PORT:-8180}/auth/realms/fleetshift"
 fi
 if ! curl -sf "$OIDC_CHECK_URL" >/dev/null 2>&1; then
-  die "OIDC provider not reachable at ${OIDC_CHECK_URL}. Run 'make up' first."
+  die "OIDC provider not reachable at ${OIDC_CHECK_URL}. Run 'task deploy:up' first."
 fi
 echo "  OIDC provider is up at ${OIDC_CHECK_URL}"
 
