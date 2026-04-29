@@ -23,9 +23,6 @@ source "$(cd "$(dirname "$0")" && pwd)/common.sh"
 #   ./test-attestation.sh --headless --reuse-key
 # ------------------------------------------------------------------
 
-# load_env was removed from common.sh — source .env directly
-set -a; source "$ROOT_DIR/.env"; set +a
-
 HEADLESS=false
 REUSE_KEY=false
 FLEETCTL="${ROOT_DIR}/bin/fleetctl"
@@ -61,15 +58,10 @@ fi
 echo "  Server is up."
 
 log "Checking OIDC provider is reachable"
-if [ -n "${OIDC_ISSUER_URL:-}" ]; then
-  OIDC_CHECK_URL="${OIDC_ISSUER_URL}"
-else
-  OIDC_CHECK_URL="http://${KC_HOSTNAME:-localhost}:${KC_HTTP_PORT:-8180}/auth/realms/fleetshift"
+if ! curl -sf "$OIDC_URL" >/dev/null 2>&1; then
+  die "OIDC provider not reachable at ${OIDC_URL}. Run 'task deploy:up' first."
 fi
-if ! curl -sf "$OIDC_CHECK_URL" >/dev/null 2>&1; then
-  die "OIDC provider not reachable at ${OIDC_CHECK_URL}. Run 'task deploy:up' first."
-fi
-echo "  OIDC provider is up at ${OIDC_CHECK_URL}"
+echo "  OIDC provider is up at ${OIDC_URL}"
 
 # --- Headless keyring unlock ------------------------------------------
 
@@ -142,7 +134,7 @@ echo '{"name": "my-oidc-cluster"}' | "$FLEETCTL" deployment create \
     --sign
 
 log "Waiting for kind cluster to become active..."
-MAX_WAIT=120
+MAX_WAIT=30
 ELAPSED=0
 while true; do
   STATE=$("$FLEETCTL" deployment get my-oidc-cluster -ojson 2>/dev/null \
@@ -175,13 +167,33 @@ echo '{
     --target-ids k8s-my-oidc-cluster \
     --sign
 
+# --- Verify ConfigMap deployment became active -------------------------
+
+log "Waiting for signed ConfigMap deployment to become active..."
+MAX_WAIT=30
+ELAPSED=0
+while true; do
+  STATE=$("$FLEETCTL" deployment get configmap-my-oidc-cluster -ojson 2>/dev/null \
+    | jq -r '.state // empty')
+  if [ "$STATE" = "STATE_ACTIVE" ]; then
+    break
+  fi
+  sleep 5
+  ELAPSED=$((ELAPSED + 5))
+  if [ "$ELAPSED" -ge "$MAX_WAIT" ]; then
+    die "ConfigMap deployment not active within ${MAX_WAIT}s (state: ${STATE})"
+  fi
+  printf "  %ds — state: %s\n" "$ELAPSED" "${STATE:-unknown}"
+done
+log "Signed ConfigMap deployment is active"
+
 # --- Done --------------------------------------------------------------
 
-log "Attestation flow complete"
+log "Attestation flow complete — all deployments verified active"
 echo ""
-echo "  Signed deployments created:"
-echo "    - my-oidc-cluster (kind cluster)"
-echo "    - configmap-my-oidc-cluster (ConfigMap)"
+echo "  Signed deployments created and verified:"
+echo "    - my-oidc-cluster (kind cluster) — Active"
+echo "    - configmap-my-oidc-cluster (ConfigMap) — Active"
 echo ""
 echo "  Attestation chain:"
 echo "    CLI signs deployment intent (ECDSA P-256)"

@@ -1,11 +1,16 @@
 version: '3'
 
 vars:
+  ACTIVE_AUTH:
+    sh: 'grep "^AUTH=" .active-deploy 2>/dev/null | cut -d= -f2 || true'
+  ACTIVE_DB:
+    sh: 'grep "^DB=" .active-deploy 2>/dev/null | cut -d= -f2 || true'
   RESOLVED_DEPLOY_MODE: '{{if empty .DEPLOY_MODE_INPUT}}demo{{else}}{{.DEPLOY_MODE_INPUT}}{{end}}'
-  RESOLVED_DB: '{{if not (empty .DB_INPUT)}}{{.DB_INPUT}}{{else if eq .RESOLVED_DEPLOY_MODE "prod"}}postgres{{else}}sqlite{{end}}'
-  RESOLVED_AUTH: '{{if not (empty .AUTH_INPUT)}}{{.AUTH_INPUT}}{{else if eq .RESOLVED_DEPLOY_MODE "prod"}}external{{else}}local{{end}}'
+  RESOLVED_DB: '{{if not (empty .DB_INPUT)}}{{.DB_INPUT}}{{else if not (empty .ACTIVE_DB)}}{{.ACTIVE_DB}}{{else if eq .RESOLVED_DEPLOY_MODE "prod"}}postgres{{else}}sqlite{{end}}'
+  RESOLVED_AUTH: '{{if not (empty .AUTH_INPUT)}}{{.AUTH_INPUT}}{{else if not (empty .ACTIVE_AUTH)}}{{.ACTIVE_AUTH}}{{else if eq .RESOLVED_DEPLOY_MODE "prod"}}external{{else}}local{{end}}'
   DEV: '{{.DEV | default "false"}}'
   BUILD: '{{.BUILD | default "false"}}'
+  RESOLVED_OIDC_URL: '{{if eq .RESOLVED_AUTH "external"}}{{.OIDC_ISSUER_URL}}{{else}}http://{{.KC_HOSTNAME | default "localhost"}}:{{.KC_HTTP_PORT | default "8180"}}/auth/realms/fleetshift{{end}}'
   RESOLVED_DB_FLAG:
     sh: |
       if [ "{{.RESOLVED_DB}}" = "postgres" ]; then
@@ -32,6 +37,7 @@ tasks:
       COMPOSE_FILES: '{{.RESOLVED_COMPOSE_FILES}}'
       DEV: '{{.DEV}}'
       BUILD: '{{.BUILD}}'
+      OIDC_URL: '{{.RESOLVED_OIDC_URL}}'
     preconditions:
       - sh: test -f {{.ROOT_DIR}}/.env
         msg: "No .env found. Copy .env.template to .env first."
@@ -49,6 +55,7 @@ tasks:
         msg: "OIDC_ISSUER_URL is required when AUTH=external"
     cmds:
       - ./scripts/start.sh
+      - printf 'AUTH={{.RESOLVED_AUTH}}\nDB={{.RESOLVED_DB}}\n' > .active-deploy
 
   dev:
     desc: Start in dev mode — source mounts + hot-reload
@@ -82,11 +89,13 @@ tasks:
     desc: Stop all containers, preserve data
     cmds:
       - ./scripts/stop.sh
+      - rm -f .active-deploy
 
   clean:
     desc: Stop all containers and remove all data (volumes, network)
     cmds:
       - ./scripts/stop.sh --clean
+      - rm -f .active-deploy
 
   logs:
     desc: Tail logs from all FleetShift containers
@@ -117,9 +126,22 @@ tasks:
       - podman compose {{.RESOLVED_COMPOSE_FILES}} --env-file {{.ROOT_DIR}}/.env restart {{.CONTAINER}}
 
   cli-setup:
-    desc: Configure fleetctl CLI for local deployment
+    desc: Configure fleetctl CLI for the current deployment
+    env: *deploy_env
+    preconditions:
+      - sh: '{{if eq .RESOLVED_AUTH "external"}}[ "{{.OIDC_ISSUER_URL}}" != "<no value>" ] && test -n "{{.OIDC_ISSUER_URL}}"{{else}}true{{end}}'
+        msg: "OIDC_ISSUER_URL is required when AUTH=external"
     cmds:
       - ./scripts/cli-setup.sh
+
+  test-attestation:
+    desc: Run the end-to-end attestation flow
+    env: *deploy_env
+    preconditions:
+      - sh: '{{if eq .RESOLVED_AUTH "external"}}[ "{{.OIDC_ISSUER_URL}}" != "<no value>" ] && test -n "{{.OIDC_ISSUER_URL}}"{{else}}true{{end}}'
+        msg: "OIDC_ISSUER_URL is required when AUTH=external"
+    cmds:
+      - ./scripts/test-attestation.sh {{.CLI_ARGS}}
 
   reset-keycloak:
     desc: Wipe Keycloak state and re-import realm (AUTH=local only)
