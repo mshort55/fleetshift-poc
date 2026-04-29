@@ -1,0 +1,7 @@
+version: '3'
+# Placeholder - will be replaced in Task 3
+tasks:
+  placeholder:
+    desc: Placeholder task
+    cmds:
+      - echo "This will be replaced in Task 3"

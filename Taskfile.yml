@@ -1,0 +1,115 @@
+version: '3'
+
+dotenv: ['.env']
+
+includes:
+  deploy:
+    taskfile: ./deploy/podman/Taskfile.yml
+    dir: ./deploy/podman
+    aliases: [d]
+
+vars:
+  IMAGE_TAG: '{{.IMAGE_TAG | default "latest"}}'
+
+tasks:
+  default:
+    desc: Show available tasks
+    silent: true
+    cmds:
+      - task --list
+
+  build:
+    desc: Build all binaries
+    deps: [build:server, build:cli, build:ocp-engine]
+
+  build:server:
+    desc: Build the server binary
+    dir: fleetshift-server
+    sources: ['**/*.go', go.mod, go.sum]
+    generates: ['../bin/fleetshift']
+    cmds:
+      - go build -o ../bin/fleetshift ./cmd/fleetshift
+
+  build:cli:
+    desc: Build the fleetctl CLI binary
+    dir: fleetshift-cli
+    sources: ['**/*.go', go.mod, go.sum]
+    generates: ['../bin/fleetctl']
+    cmds:
+      - go build -o ../bin/fleetctl ./cmd/fleetctl
+
+  build:ocp-engine:
+    desc: Build the ocp-engine binary
+    dir: ocp-engine
+    sources: ['**/*.go', go.mod, go.sum]
+    generates: ['../bin/ocp-engine']
+    cmds:
+      - go build -o ../bin/ocp-engine .
+
+  test:
+    desc: Run all tests
+    deps: [test:server, test:cli, test:ocp-engine]
+
+  test:server:
+    desc: Run server tests
+    dir: fleetshift-server
+    cmds:
+      - go test ./...
+
+  test:cli:
+    desc: Run CLI tests
+    dir: fleetshift-cli
+    cmds:
+      - go test ./...
+
+  test:ocp-engine:
+    desc: Run ocp-engine tests
+    dir: ocp-engine
+    cmds:
+      - go test ./...
+
+  test:e2e:
+    desc: Run all E2E tests (requires .env config and interactive auth)
+    deps: [build]
+    dir: e2e
+    preconditions:
+      - sh: test -f {{.ROOT_DIR}}/.env
+        msg: "No .env found. E2E tests require environment configuration."
+    cmds:
+      - go test -tags e2e -timeout 3h -v
+
+  test:e2e-aws:
+    desc: Run AWS provision/destroy E2E test
+    deps: [build]
+    dir: e2e
+    preconditions:
+      - sh: test -f {{.ROOT_DIR}}/.env
+        msg: "No .env found. E2E tests require environment configuration."
+    cmds:
+      - go test -tags e2e -timeout 3h -v -run TestAWSProvision
+
+  generate:
+    desc: Generate protobuf and gRPC code
+    preconditions:
+      - sh: command -v buf
+        msg: "buf is not installed. See https://buf.build/docs/installation"
+    sources: ['proto/**/*.proto', buf.yaml, buf.gen.yaml, buf.gen.ocp.yaml]
+    cmds:
+      - buf generate --path proto/fleetshift
+      - buf generate --template buf.gen.ocp.yaml --path proto/ocp/v1
+
+  image:build:
+    desc: Build the fleetshift-server container image
+    preconditions:
+      - sh: test -n "{{.DEV_REGISTRY}}"
+        msg: "DEV_REGISTRY is not set. Set it in .env (e.g. DEV_REGISTRY=quay.io/yourusername)"
+    cmds:
+      - podman build -t {{.DEV_REGISTRY}}/fleetshift-server:{{.IMAGE_TAG}} .
+
+  image:push:
+    desc: Push the fleetshift-server container image
+    preconditions:
+      - sh: test -n "{{.DEV_REGISTRY}}"
+        msg: "DEV_REGISTRY is not set. Set it in .env (e.g. DEV_REGISTRY=quay.io/yourusername)"
+    cmds:
+      - podman push {{.DEV_REGISTRY}}/fleetshift-server:{{.IMAGE_TAG}}
