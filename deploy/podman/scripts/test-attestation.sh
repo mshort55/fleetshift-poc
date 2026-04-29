@@ -55,12 +55,16 @@ if ! curl -sf "http://localhost:${FLEETSHIFT_SERVER_HTTP_PORT:-8085}/v1/deployme
 fi
 echo "  Server is up."
 
-KC_URL="http://${KC_HOSTNAME:-localhost}:${KC_HTTP_PORT:-8180}/auth"
-log "Checking Keycloak is reachable"
-if ! curl -sf "$KC_URL/realms/fleetshift" >/dev/null 2>&1; then
-  die "Keycloak not reachable at ${KC_URL}. Run 'make up' first."
+log "Checking OIDC provider is reachable"
+if [ -n "${OIDC_ISSUER_URL:-}" ]; then
+  OIDC_CHECK_URL="${OIDC_ISSUER_URL}"
+else
+  OIDC_CHECK_URL="http://${KC_HOSTNAME:-localhost}:${KC_HTTP_PORT:-8180}/auth/realms/fleetshift"
 fi
-echo "  Keycloak is up."
+if ! curl -sf "$OIDC_CHECK_URL" >/dev/null 2>&1; then
+  die "OIDC provider not reachable at ${OIDC_CHECK_URL}. Run 'make up' first."
+fi
+echo "  OIDC provider is up at ${OIDC_CHECK_URL}"
 
 # --- Headless keyring unlock ------------------------------------------
 
