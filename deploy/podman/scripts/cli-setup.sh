@@ -4,12 +4,16 @@ source "$(cd "$(dirname "$0")" && pwd)/common.sh"
 
 load_env
 
-ISSUER_URL="http://${KC_HOSTNAME:-localhost}:${KC_HTTP_PORT:-8180}/auth/realms/fleetshift"
+if [ -n "${OIDC_ISSUER_URL:-}" ]; then
+  ISSUER_URL="${OIDC_ISSUER_URL}"
+else
+  ISSUER_URL="http://${KC_HOSTNAME:-localhost}:${KC_HTTP_PORT:-8180}/auth/realms/fleetshift"
+fi
 DISCOVERY_URL="${ISSUER_URL}/.well-known/openid-configuration"
 
 echo "==> Fetching OIDC discovery from ${DISCOVERY_URL}"
 DISCOVERY=$(curl -sf "$DISCOVERY_URL") || {
-  echo "ERROR: Could not reach Keycloak at ${DISCOVERY_URL}" >&2
+  echo "ERROR: Could not reach OIDC provider at ${DISCOVERY_URL}" >&2
   echo "Is the stack running? Try 'make up' first." >&2
   exit 1
 }
