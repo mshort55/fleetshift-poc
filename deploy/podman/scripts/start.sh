@@ -111,5 +111,9 @@ if [ "$AUTH_MODE" = "local" ]; then
   echo "    dev / ${DEV_PASSWORD}"
 fi
 echo ""
+if [ "$AUTH_MODE" = "local" ]; then
+  echo "    Run 'make cli-setup' to configure fleetctl."
+fi
 echo "    Run 'make logs' to tail container output."
 echo "    Run 'make status' to check container health."
+echo "    Run 'make help' to see all available commands."
