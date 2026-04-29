@@ -2,7 +2,7 @@
 set -euo pipefail
 source "$(cd "$(dirname "$0")" && pwd)/common.sh"
 
-# Start the FleetShift stack. Called by 'make up'.
+# Start the FleetShift stack. Called by 'task deploy:up'.
 #
 # In demo mode (AUTH=local): generates Keycloak passwords, templates the
 # realm JSON, starts the stack, then registers the github_username user
@@ -12,9 +12,11 @@ source "$(cd "$(dirname "$0")" && pwd)/common.sh"
 # starts the stack. No local Keycloak — auth-setup points at the
 # external OIDC provider.
 
-load_env
+# Env vars (DEPLOY_MODE, DB, AUTH, DB_FLAG, COMPOSE_FILES) are set by Taskfile.
+# AUTH_MODE is derived from AUTH for backwards compatibility within this script.
+AUTH_MODE="$AUTH"
+DB_BACKEND="$DB"
 detect_podman_socket
-resolve_mode
 
 : "${KIND_TEMP_DIR:=${HOME}/.fleetshift/tmp}"
 mkdir -p "$KIND_TEMP_DIR"
@@ -122,8 +124,8 @@ if [ "$AUTH_MODE" = "local" ]; then
 fi
 echo ""
 if [ "$AUTH_MODE" = "local" ]; then
-  echo "    Run 'make cli-setup' to configure fleetctl."
+  echo "    Run 'task deploy:cli-setup' to configure fleetctl."
 fi
-echo "    Run 'make logs' to tail container output."
-echo "    Run 'make status' to check container health."
-echo "    Run 'make help' to see all available commands."
+echo "    Run 'task deploy:logs' to tail container output."
+echo "    Run 'task deploy:status' to check container health."
+echo "    Run 'task --list' to see all available commands."
