@@ -1,7 +1,142 @@
 version: '3'
-# Placeholder - will be replaced in Task 3
+
+vars:
+  DEPLOY_MODE: '{{.DEPLOY_MODE | default "demo"}}'
+  DB:
+    sh: |
+      if [ "{{.DB}}" != "<no value>" ] && [ -n "{{.DB}}" ]; then
+        echo "{{.DB}}"
+      elif [ "{{.DEPLOY_MODE}}" = "prod" ]; then
+        echo "postgres"
+      else
+        echo "sqlite"
+      fi
+  AUTH:
+    sh: |
+      if [ "{{.AUTH}}" != "<no value>" ] && [ -n "{{.AUTH}}" ]; then
+        echo "{{.AUTH}}"
+      elif [ "{{.DEPLOY_MODE}}" = "prod" ]; then
+        echo "external"
+      else
+        echo "local"
+      fi
+  DEV: '{{.DEV | default "false"}}'
+  DB_FLAG:
+    sh: |
+      if [ "{{.DB}}" = "postgres" ]; then
+        echo "--database-url=postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}?sslmode=disable"
+      else
+        echo "--db=/data/fleetshift.db"
+      fi
+  COMPOSE_FILES:
+    sh: |
+      FILES="-f compose.yaml -f overrides/{{.DB}}.yaml -f overrides/{{if eq .AUTH "local"}}local-keycloak{{else}}external-oidc{{end}}.yaml"
+      if [ "{{.DEV}}" = "true" ]; then
+        FILES="$FILES -f overrides/dev.yaml"
+      fi
+      echo "$FILES"
+
+env:
+  DEPLOY_MODE: '{{.DEPLOY_MODE}}'
+  DB: '{{.DB}}'
+  AUTH: '{{.AUTH}}'
+  DB_FLAG: '{{.DB_FLAG}}'
+  COMPOSE_FILES: '{{.COMPOSE_FILES}}'
+  DEV: '{{.DEV}}'
+
 tasks:
-  placeholder:
-    desc: Placeholder task
+  up:
+    desc: Start the FleetShift stack (DEPLOY_MODE=demo|prod DB=sqlite|postgres AUTH=local|external)
+    preconditions:
+      - sh: test -f {{.ROOT_DIR}}/.env
+        msg: "No .env found. Copy .env.template to .env first."
+      - sh: command -v podman
+        msg: "podman is not installed."
+      - sh: echo "{{.DEPLOY_MODE}}" | grep -qE '^(demo|prod)$'
+        msg: "DEPLOY_MODE must be demo or prod, got: {{.DEPLOY_MODE}}"
+      - sh: echo "{{.DB}}" | grep -qE '^(sqlite|postgres)$'
+        msg: "DB must be sqlite or postgres, got: {{.DB}}"
+      - sh: echo "{{.AUTH}}" | grep -qE '^(local|external)$'
+        msg: "AUTH must be local or external, got: {{.AUTH}}"
+      - sh: '{{if eq .AUTH "external"}}test -n "{{.OIDC_ISSUER_URL}}"{{else}}true{{end}}'
+        msg: "OIDC_ISSUER_URL is required when AUTH=external"
     cmds:
-      - echo "This will be replaced in Task 3"
+      - ./scripts/start.sh
+
+  dev:
+    desc: Start with local source builds + hot-reload
+    cmds:
+      - task: up
+        vars:
+          DEV: "true"
+
+  build:
+    desc: Rebuild container images without restarting
+    cmds:
+      - podman compose {{.COMPOSE_FILES}} --env-file {{.ROOT_DIR}}/.env build
+
+  rebuild:
+    desc: Stop, rebuild images, and restart
+    cmds:
+      - ./scripts/stop.sh
+      - task: up
+        vars:
+          DEV: '{{.DEV}}'
+    env:
+      BUILD: "true"
+
+  pull:
+    desc: Pull latest images for the current mode
+    cmds:
+      - podman compose {{.COMPOSE_FILES}} --env-file {{.ROOT_DIR}}/.env pull --ignore-buildable
+
+  down:
+    desc: Stop all containers, preserve data
+    cmds:
+      - ./scripts/stop.sh
+
+  clean:
+    desc: Stop all containers and remove ALL data (volumes, network)
+    cmds:
+      - ./scripts/stop.sh --clean
+
+  logs:
+    desc: Tail logs from all FleetShift containers
+    cmds:
+      - podman compose {{.COMPOSE_FILES}} --env-file {{.ROOT_DIR}}/.env logs -f
+
+  'logs:*':
+    desc: "Tail logs from a specific container (e.g. task deploy:logs:fleetshift-server)"
+    vars:
+      CONTAINER: '{{index .MATCH 0}}'
+    cmds:
+      - podman compose {{.COMPOSE_FILES}} --env-file {{.ROOT_DIR}}/.env logs -f {{.CONTAINER}}
+
+  status:
+    desc: Show running FleetShift containers
+    cmds:
+      - podman compose {{.COMPOSE_FILES}} --env-file {{.ROOT_DIR}}/.env ps
+
+  'restart:*':
+    desc: "Restart a specific container (e.g. task deploy:restart:keycloak)"
+    vars:
+      CONTAINER: '{{index .MATCH 0}}'
+    cmds:
+      - podman compose {{.COMPOSE_FILES}} --env-file {{.ROOT_DIR}}/.env restart {{.CONTAINER}}
+
+  cli-setup:
+    desc: Configure fleetctl CLI for local deployment
+    cmds:
+      - ./scripts/cli-setup.sh
+
+  reset-keycloak:
+    desc: Wipe Keycloak state and re-import realm (AUTH=local only)
+    preconditions:
+      - sh: '[ "{{.AUTH}}" = "local" ]'
+        msg: "reset-keycloak only works with AUTH=local (no local Keycloak with external auth)"
+    cmds:
+      - podman compose {{.COMPOSE_FILES}} --env-file {{.ROOT_DIR}}/.env stop keycloak
+      - podman compose {{.COMPOSE_FILES}} --env-file {{.ROOT_DIR}}/.env rm -f keycloak
+      - podman volume rm fleetshift_keycloak-certs 2>/dev/null || podman volume rm keycloak-certs 2>/dev/null || true
+      - rm -f .realm.json
+      - echo "Keycloak state wiped. Run 'task deploy:up' to restart with fresh realm and passwords."
