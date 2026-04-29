@@ -7,6 +7,10 @@ includes:
     taskfile: ./deploy/podman/Taskfile.yml
     dir: ./deploy/podman
     aliases: [d]
+    vars:
+      DEPLOY_MODE_INPUT: '{{.DEPLOY_MODE | default ""}}'
+      DB_INPUT: '{{.DB | default ""}}'
+      AUTH_INPUT: '{{.AUTH | default ""}}'
 
 vars:
   IMAGE_TAG: '{{.IMAGE_TAG | default "latest"}}'
