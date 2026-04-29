@@ -128,23 +128,9 @@ The key registry mode is controlled by these `.env` variables:
 
 Option A (OIDC claim) is recommended for local dev. The `.env.template` defaults to Option B (GitHub) for shared environments.
 
-## Available Commands
+## Commands
 
-| Command | Description |
-|---|---|
-| `task deploy:up` | Start the FleetShift stack. Accepts `DEPLOY_MODE=`, `DB=`, `AUTH=` overrides. |
-| `task deploy:dev` | Start with local source builds + hot-reload (see [Dev Mode](#dev-mode)). |
-| `task deploy:build` | Rebuild container images without restarting. |
-| `task deploy:rebuild` | Stop, rebuild images, and restart in one shot. |
-| `task deploy:down` | Stop all containers, preserve data volumes. |
-| `task deploy:clean` | Stop all containers and remove ALL data (volumes, network, kind clusters). |
-| `task deploy:status` | Show running containers and health status. |
-| `task deploy:logs` | Tail logs from all containers. |
-| `task deploy:logs:<service>` | Tail logs from one container (e.g., `task deploy:logs:fleetshift-server`). |
-| `task deploy:restart:<service>` | Restart one container (e.g., `task deploy:restart:fleetshift-mock-servers`). |
-| `task deploy:cli-setup` | Configure `fleetctl` CLI for local OIDC auth (requires running stack). |
-| `task deploy:reset-keycloak` | Wipe Keycloak state, re-import realm with new passwords. |
-| `task --list` | Show all available targets. |
+Run `task --list` for the full task reference, or see the [root README](../../README.md) for an overview of all tasks.
 
 ## Configuration
 
