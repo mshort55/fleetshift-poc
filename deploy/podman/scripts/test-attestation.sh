@@ -28,7 +28,7 @@ set -a; source "$ROOT_DIR/.env"; set +a
 
 HEADLESS=false
 REUSE_KEY=false
-FLEETCTL="${DEPLOY_DIR}/../bin/fleetctl"
+FLEETCTL="${ROOT_DIR}/bin/fleetctl"
 
 for arg in "$@"; do
   case "$arg" in
@@ -42,7 +42,11 @@ die()  { printf '\033[1;31mERROR: %s\033[0m\n' "$*" >&2; exit 1; }
 
 # --- Pre-flight checks -----------------------------------------------
 
-[ -x "$FLEETCTL" ] || die "fleetctl not found at ${FLEETCTL}. Run 'task build' in the repo root."
+if [ ! -f "$FLEETCTL" ]; then
+  die "fleetctl not found at ${FLEETCTL}. Run 'task build' in the repo root."
+elif [ ! -x "$FLEETCTL" ]; then
+  die "fleetctl at ${FLEETCTL} is not executable. Run: chmod +x ${FLEETCTL}"
+fi
 
 GITHUB_USERNAME="${DEV_USER_GITHUB:-}"
 if [ -z "$GITHUB_USERNAME" ]; then
