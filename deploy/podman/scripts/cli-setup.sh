@@ -8,7 +8,10 @@ source "$(cd "$(dirname "$0")" && pwd)/common.sh"
 # Uses OIDC_ISSUER_URL from .env if set (external mode), otherwise falls back
 # to the local Keycloak instance.
 
-load_env
+# Env vars are set by Taskfile. For standalone usage, source .env manually.
+if [ -z "${DEPLOY_MODE:-}" ]; then
+  set -a; source "$ROOT_DIR/.env"; set +a
+fi
 
 if [ -n "${OIDC_ISSUER_URL:-}" ]; then
   ISSUER_URL="${OIDC_ISSUER_URL}"

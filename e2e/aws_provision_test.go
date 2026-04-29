@@ -44,7 +44,7 @@ func TestAWSProvision(t *testing.T) {
 	// Verify keyring is accessible. On headless Linux, run this first:
 	//   eval "$(dbus-launch --sh-syntax)" && echo "" | gnome-keyring-daemon --unlock --components=secrets
 	if err := keyring.Set("fleetctl", "__e2e_probe", "ok"); err != nil {
-		t.Fatalf("Keyring unavailable: %v\n\nRun this before the test:\n  eval \"$(dbus-launch --sh-syntax)\" && echo \"\" | gnome-keyring-daemon --unlock --components=secrets\n\nThen run make test-e2e in the same shell.", err)
+		t.Fatalf("Keyring unavailable: %v\n\nRun this before the test:\n  eval \"$(dbus-launch --sh-syntax)\" && echo \"\" | gnome-keyring-daemon --unlock --components=secrets\n\nThen run task test:e2e in the same shell.", err)
 	}
 	keyring.Delete("fleetctl", "__e2e_probe")
 
@@ -246,14 +246,14 @@ func findRepoRoot(t *testing.T) string {
 		dir = filepath.Dir(dir)
 	}
 
-	// Walk up looking for the Makefile that indicates the repo root.
+	// Walk up looking for the Taskfile.yml that indicates the repo root.
 	for {
-		if _, err := os.Stat(filepath.Join(dir, "Makefile")); err == nil {
+		if _, err := os.Stat(filepath.Join(dir, "Taskfile.yml")); err == nil {
 			return dir
 		}
 		parent := filepath.Dir(dir)
 		if parent == dir {
-			t.Fatalf("could not find repo root (no Makefile found)")
+			t.Fatalf("could not find repo root (no Taskfile.yml found)")
 		}
 		dir = parent
 	}

@@ -23,7 +23,8 @@ source "$(cd "$(dirname "$0")" && pwd)/common.sh"
 #   ./test-attestation.sh --headless --reuse-key
 # ------------------------------------------------------------------
 
-load_env
+# load_env was removed from common.sh — source .env directly
+set -a; source "$ROOT_DIR/.env"; set +a
 
 HEADLESS=false
 REUSE_KEY=false

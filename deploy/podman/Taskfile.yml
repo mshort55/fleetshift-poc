@@ -21,6 +21,7 @@ vars:
         echo "local"
       fi
   DEV: '{{.DEV | default "false"}}'
+  BUILD: '{{.BUILD | default "false"}}'
   DB_FLAG:
     sh: |
       if [ "{{.DB}}" = "postgres" ]; then
@@ -43,6 +44,7 @@ env:
   DB_FLAG: '{{.DB_FLAG}}'
   COMPOSE_FILES: '{{.COMPOSE_FILES}}'
   DEV: '{{.DEV}}'
+  BUILD: '{{.BUILD}}'
 
 tasks:
   up:
@@ -58,7 +60,7 @@ tasks:
         msg: "DB must be sqlite or postgres, got: {{.DB}}"
       - sh: echo "{{.AUTH}}" | grep -qE '^(local|external)$'
         msg: "AUTH must be local or external, got: {{.AUTH}}"
-      - sh: '{{if eq .AUTH "external"}}test -n "{{.OIDC_ISSUER_URL}}"{{else}}true{{end}}'
+      - sh: '{{if eq .AUTH "external"}}[ "{{.OIDC_ISSUER_URL}}" != "<no value>" ] && test -n "{{.OIDC_ISSUER_URL}}"{{else}}true{{end}}'
         msg: "OIDC_ISSUER_URL is required when AUTH=external"
     cmds:
       - ./scripts/start.sh
@@ -82,8 +84,7 @@ tasks:
       - task: up
         vars:
           DEV: '{{.DEV}}'
-    env:
-      BUILD: "true"
+          BUILD: "true"
 
   pull:
     desc: Pull latest images for the current mode

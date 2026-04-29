@@ -29,7 +29,7 @@ REALM_JSON="${COMPOSE_DIR}/.realm.json"
 if [ "$AUTH_MODE" = "external" ]; then
   if [ -z "${OIDC_ISSUER_URL:-}" ]; then
     echo "ERROR: OIDC_ISSUER_URL is required when AUTH=external (DEPLOY_MODE=prod)." >&2
-    echo "Set it in deploy/.env or pass it as an environment variable." >&2
+    echo "Set it in .env (at the project root) or pass it as an environment variable." >&2
     exit 1
   fi
 fi

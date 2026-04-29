@@ -59,7 +59,7 @@ if [[ -n "$ADMIN_URL" && -n "$ADMIN_PASSWORD" ]]; then
     KC_URL="$ADMIN_URL"
 elif [[ -n "$ADMIN_PASSWORD" ]]; then
     # Password provided but no URL — use local deployment
-    load_env
+    set -a; source "$ROOT_DIR/.env"; set +a
     KC_URL="http://${KC_HOSTNAME:-localhost}:${KC_HTTP_PORT:-8180}/auth"
 else
     # No credentials — discover from OpenShift

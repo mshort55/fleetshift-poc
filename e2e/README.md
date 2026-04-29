@@ -6,7 +6,7 @@ End-to-end tests that exercise the full FleetShift platform against real infrast
 
 | Test | Command | Duration | What it tests |
 |------|---------|----------|---------------|
-| `TestAWSProvision` | `make test-e2e-aws` | ~60 min | Full OCP cluster lifecycle on AWS with CCO STS mode |
+| `TestAWSProvision` | `task test:e2e-aws` | ~60 min | Full OCP cluster lifecycle on AWS with CCO STS mode |
 
 ## Prerequisites
 
@@ -72,19 +72,19 @@ Unlock the keyring first, then run in the same shell:
 
 ```bash
 eval "$(dbus-launch --sh-syntax)" && echo "" | gnome-keyring-daemon --unlock --components=secrets
-make test-e2e-aws
+task test:e2e-aws
 ```
 
 ### Desktop (macOS, Linux with desktop)
 
 ```bash
-make test-e2e-aws
+task test:e2e-aws
 ```
 
 ### Run all E2E tests
 
 ```bash
-make test-e2e
+task test:e2e
 ```
 
 ## Interactive Steps
