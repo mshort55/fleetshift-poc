@@ -5,10 +5,12 @@ vars:
     sh: 'grep "^AUTH=" .active-deploy 2>/dev/null | cut -d= -f2 || true'
   ACTIVE_DB:
     sh: 'grep "^DB=" .active-deploy 2>/dev/null | cut -d= -f2 || true'
+  ACTIVE_DEV:
+    sh: 'grep "^DEV=" .active-deploy 2>/dev/null | cut -d= -f2 || true'
   RESOLVED_DEPLOY_MODE: '{{if empty .DEPLOY_MODE_INPUT}}demo{{else}}{{.DEPLOY_MODE_INPUT}}{{end}}'
   RESOLVED_DB: '{{if not (empty .DB_INPUT)}}{{.DB_INPUT}}{{else if not (empty .ACTIVE_DB)}}{{.ACTIVE_DB}}{{else if eq .RESOLVED_DEPLOY_MODE "prod"}}postgres{{else}}sqlite{{end}}'
   RESOLVED_AUTH: '{{if not (empty .AUTH_INPUT)}}{{.AUTH_INPUT}}{{else if not (empty .ACTIVE_AUTH)}}{{.ACTIVE_AUTH}}{{else if eq .RESOLVED_DEPLOY_MODE "prod"}}external{{else}}local{{end}}'
-  DEV: '{{.DEV | default "false"}}'
+  DEV: '{{if not (empty .DEV_INPUT)}}{{.DEV_INPUT}}{{else if not (empty .ACTIVE_DEV)}}{{.ACTIVE_DEV}}{{else}}false{{end}}'
   BUILD: '{{.BUILD | default "false"}}'
   RESOLVED_OIDC_URL: '{{if eq .RESOLVED_AUTH "external"}}{{.OIDC_ISSUER_URL}}{{else}}http://{{.KC_HOSTNAME | default "localhost"}}:{{.KC_HTTP_PORT | default "8180"}}/auth/realms/fleetshift{{end}}'
   RESOLVED_DB_FLAG:
@@ -18,13 +20,7 @@ vars:
       else
         echo "--db=/data/fleetshift.db"
       fi
-  RESOLVED_COMPOSE_FILES:
-    sh: |
-      FILES="-f compose.yaml -f overrides/{{.RESOLVED_DB}}.yaml -f overrides/{{if eq .RESOLVED_AUTH "local"}}local-keycloak{{else}}external-oidc{{end}}.yaml"
-      if [ "{{.DEV}}" = "true" ]; then
-        FILES="$FILES -f overrides/dev.yaml"
-      fi
-      echo "$FILES"
+  RESOLVED_COMPOSE_FILES: '-f compose.yaml -f overrides/{{.RESOLVED_DB}}.yaml -f overrides/{{if eq .RESOLVED_AUTH "local"}}local-keycloak{{else}}external-oidc{{end}}.yaml'
 
 tasks:
   up:
@@ -34,7 +30,7 @@ tasks:
       DB: '{{.RESOLVED_DB}}'
       AUTH: '{{.RESOLVED_AUTH}}'
       DB_FLAG: '{{.RESOLVED_DB_FLAG}}'
-      COMPOSE_FILES: '{{.RESOLVED_COMPOSE_FILES}}'
+      COMPOSE_FILES: '{{.RESOLVED_COMPOSE_FILES}}{{if eq .DEV "true"}} -f overrides/dev.yaml{{end}}'
       DEV: '{{.DEV}}'
       BUILD: '{{.BUILD}}'
       OIDC_URL: '{{.RESOLVED_OIDC_URL}}'
@@ -55,7 +51,7 @@ tasks:
         msg: "OIDC_ISSUER_URL is required when AUTH=external"
     cmds:
       - ./scripts/start.sh
-      - printf 'AUTH={{.RESOLVED_AUTH}}\nDB={{.RESOLVED_DB}}\n' > .active-deploy
+      - printf 'AUTH={{.RESOLVED_AUTH}}\nDB={{.RESOLVED_DB}}\nDEV={{.DEV}}\n' > .active-deploy
 
   dev:
     desc: Start in dev mode — source mounts + hot-reload
@@ -68,7 +64,7 @@ tasks:
     desc: Build container images without restarting services
     env: *deploy_env
     cmds:
-      - podman compose {{.RESOLVED_COMPOSE_FILES}} --env-file {{.ROOT_DIR}}/.env build
+      - podman compose $COMPOSE_FILES --env-file {{.ROOT_DIR}}/.env build
 
   rebuild:
     desc: Stop, rebuild images, and restart
@@ -83,7 +79,7 @@ tasks:
     desc: Pull latest container images
     env: *deploy_env
     cmds:
-      - podman compose {{.RESOLVED_COMPOSE_FILES}} --env-file {{.ROOT_DIR}}/.env pull --ignore-buildable
+      - podman compose $COMPOSE_FILES --env-file {{.ROOT_DIR}}/.env pull --ignore-buildable
 
   down:
     desc: Stop all containers, preserve data
@@ -101,7 +97,7 @@ tasks:
     desc: Tail logs from all FleetShift containers
     env: *deploy_env
     cmds:
-      - podman compose {{.RESOLVED_COMPOSE_FILES}} --env-file {{.ROOT_DIR}}/.env logs -f
+      - podman compose $COMPOSE_FILES --env-file {{.ROOT_DIR}}/.env logs -f
 
   'logs:*':
     desc: "Tail logs from a specific container (e.g. task deploy:logs:fleetshift-server)"
@@ -109,13 +105,13 @@ tasks:
     vars:
       CONTAINER: '{{index .MATCH 0}}'
     cmds:
-      - podman compose {{.RESOLVED_COMPOSE_FILES}} --env-file {{.ROOT_DIR}}/.env logs -f {{.CONTAINER}}
+      - podman compose $COMPOSE_FILES --env-file {{.ROOT_DIR}}/.env logs -f {{.CONTAINER}}
 
   status:
     desc: Show running FleetShift containers
     env: *deploy_env
     cmds:
-      - podman compose {{.RESOLVED_COMPOSE_FILES}} --env-file {{.ROOT_DIR}}/.env ps
+      - podman compose $COMPOSE_FILES --env-file {{.ROOT_DIR}}/.env ps
 
   'restart:*':
     desc: "Restart a specific container (e.g. task deploy:restart:keycloak)"
@@ -123,7 +119,7 @@ tasks:
     vars:
       CONTAINER: '{{index .MATCH 0}}'
     cmds:
-      - podman compose {{.RESOLVED_COMPOSE_FILES}} --env-file {{.ROOT_DIR}}/.env restart {{.CONTAINER}}
+      - podman compose $COMPOSE_FILES --env-file {{.ROOT_DIR}}/.env restart {{.CONTAINER}}
 
   cli-setup:
     desc: Configure fleetctl CLI for the current deployment
@@ -150,8 +146,8 @@ tasks:
       - sh: '[ "{{.RESOLVED_AUTH}}" = "local" ]'
         msg: "reset-keycloak only works with AUTH=local (no local Keycloak with external auth)"
     cmds:
-      - podman compose {{.RESOLVED_COMPOSE_FILES}} --env-file {{.ROOT_DIR}}/.env stop keycloak
-      - podman compose {{.RESOLVED_COMPOSE_FILES}} --env-file {{.ROOT_DIR}}/.env rm -f keycloak
+      - podman compose $COMPOSE_FILES --env-file {{.ROOT_DIR}}/.env stop keycloak
+      - podman compose $COMPOSE_FILES --env-file {{.ROOT_DIR}}/.env rm -f keycloak
       - podman volume rm fleetshift_keycloak-certs 2>/dev/null || podman volume rm keycloak-certs 2>/dev/null || true
       - rm -f .realm.json
       - echo "Keycloak state wiped. Run 'task deploy:up' to restart with fresh realm and passwords."

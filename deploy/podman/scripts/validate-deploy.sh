@@ -507,24 +507,56 @@ if should_run 9; then
 fi
 
 # ──────────────────────────────────────────────────────────────
-# PHASE 10: Dev mode
+# PHASE 10: Dev mode — source builds + hot-reload
 # ──────────────────────────────────────────────────────────────
 
 if should_run 10; then
-  phase_header 10 "Dev mode"
+  phase_header 10 "Dev mode — source builds + hot-reload"
   ensure_down
 
-  echo "10a. Starting in dev mode..."
-  task d:dev
-  echo ""
+  # Dev mode builds UI containers from $UI_DIR (the fleetshift-user-interface repo)
+  UI_DIR_VALUE=$(grep '^UI_DIR=' .env 2>/dev/null | cut -d= -f2 || true)
+  UI_DIR_ABS=""
+  if [ -n "$UI_DIR_VALUE" ]; then
+    UI_DIR_ABS=$(cd deploy/podman && realpath "$UI_DIR_VALUE" 2>/dev/null || true)
+  fi
 
-  echo "10b. State file written with demo defaults"
-  assert_file_contains "$STATE_FILE" "^AUTH=local$" "state: AUTH=local"
-  assert_file_contains "$STATE_FILE" "^DB=sqlite$" "state: DB=sqlite"
+  if [ -z "$UI_DIR_ABS" ] || [ ! -d "$UI_DIR_ABS" ]; then
+    skip "10: UI_DIR not found (${UI_DIR_VALUE:-unset}) — dev mode requires the UI repo"
+  else
+    echo "10a. Starting in dev mode (builds from source)..."
+    task d:dev
+    echo ""
 
-  echo ""
-  echo "10c. Stopping stack"
-  task d:down
+    echo "10b. State file persists DEV=true"
+    assert_file_contains "$STATE_FILE" "^AUTH=local$" "state: AUTH=local"
+    assert_file_contains "$STATE_FILE" "^DB=sqlite$" "state: DB=sqlite"
+    assert_file_contains "$STATE_FILE" "^DEV=true$" "state: DEV=true"
+
+    echo ""
+    echo "10c. Server image built locally (not pulled from registry)"
+    SERVER_IMAGE=$(podman inspect podman-fleetshift-server-1 --format '{{.Image}}' 2>/dev/null || true)
+    if [ -z "$SERVER_IMAGE" ]; then
+      fail "could not inspect fleetshift-server container"
+    else
+      DIGEST_COUNT=$(podman image inspect "$SERVER_IMAGE" | jq '.[0].RepoDigests // [] | length')
+      if [ "$DIGEST_COUNT" -eq 0 ]; then
+        pass "server image has no remote repo digests (built locally)"
+      else
+        fail "server image has $DIGEST_COUNT repo digests (appears pulled from registry)"
+      fi
+    fi
+
+    echo ""
+    echo "10d. Follow-up status works via state file (no args)"
+    OUTPUT=$(task d:status 2>&1)
+    assert_output_contains "$OUTPUT" "fleetshift-server" "status shows server container"
+
+    echo ""
+    echo "10e. Stopping stack"
+    task d:down
+    assert_file_missing "$STATE_FILE" "state file removed by d:down"
+  fi
 fi
 
 # ──────────────────────────────────────────────────────────────
