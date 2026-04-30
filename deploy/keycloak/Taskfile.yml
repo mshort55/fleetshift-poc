@@ -1,0 +1,69 @@
+version: '3'
+
+tasks:
+  deploy:
+    desc: Deploy Keycloak to OpenShift (cert-manager, RHBK, PostgreSQL, realm import)
+    preconditions:
+      - sh: command -v oc
+        msg: "'oc' CLI not found."
+      - sh: command -v jq
+        msg: "'jq' not found."
+      - sh: timeout 5 oc whoami &>/dev/null
+        msg: "Not logged in to OpenShift. Run 'oc login' first."
+    requires:
+      vars: [ACME_EMAIL]
+    vars:
+      BASE_DOMAIN: '{{.BASE_DOMAIN | default ""}}'
+      FRESH_CERT: '{{.FRESH_CERT | default ""}}'
+    cmds:
+      - >-
+        ./scripts/deploy.sh
+        --acme-email {{.ACME_EMAIL}}
+        {{if .BASE_DOMAIN}}--base-domain {{.BASE_DOMAIN}}{{end}}
+        {{if eq .FRESH_CERT "true"}}--fresh-cert{{end}}
+
+  teardown:
+    desc: Tear down Keycloak deployment from OpenShift (interactive)
+    interactive: true
+    preconditions:
+      - sh: command -v oc
+        msg: "'oc' CLI not found."
+      - sh: timeout 5 oc whoami &>/dev/null
+        msg: "Not logged in to OpenShift. Run 'oc login' first."
+      - sh: oc get namespace keycloak-prod &>/dev/null
+        msg: "Namespace 'keycloak-prod' not found — Keycloak does not appear to be deployed on this cluster."
+    cmds:
+      - ./scripts/teardown.sh
+
+  add-base-domain:
+    desc: Add a cluster's console redirect URI to the ocp-console Keycloak client
+    preconditions:
+      - sh: command -v oc
+        msg: "'oc' CLI not found."
+      - sh: timeout 5 oc whoami &>/dev/null
+        msg: "Not logged in to OpenShift. Run 'oc login' first."
+      - sh: oc get namespace keycloak-prod &>/dev/null
+        msg: "Namespace 'keycloak-prod' not found — Keycloak does not appear to be deployed on this cluster."
+    requires:
+      vars: [BASE_DOMAIN, CLUSTER_NAME]
+    cmds:
+      - ./scripts/add-base-domain.sh --base-domain {{.BASE_DOMAIN}} --cluster-name {{.CLUSTER_NAME}}
+
+  add-user:
+    desc: Add or update a user in the FleetShift Keycloak realm
+    preconditions:
+      - sh: command -v jq
+        msg: "'jq' not found."
+    requires:
+      vars: [USERNAME, PASSWORD, GITHUB]
+    vars:
+      ROLES: '{{.ROLES | default ""}}'
+      ADMIN_PASSWORD: '{{.ADMIN_PASSWORD | default ""}}'
+    cmds:
+      - >-
+        ./scripts/add-user.sh
+        --username {{.USERNAME}}
+        --password {{.PASSWORD}}
+        --github {{.GITHUB}}
+        {{if .ADMIN_PASSWORD}}--admin-password {{.ADMIN_PASSWORD}}{{end}}
+        {{if .ROLES}}--roles {{.ROLES}}{{end}}

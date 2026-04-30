@@ -1,11 +1,13 @@
 #!/usr/bin/env bash
 set -euo pipefail
-source "$(cd "$(dirname "$0")" && pwd)/common.sh"
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+ROOT_DIR="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 
 # Add a user to the fleetshift realm with a specific GitHub username.
 #
 # Local usage (podman deployment):
-#   ./add-user.sh --admin-password <from make up output> \
+#   ./add-user.sh --admin-password <from task deploy:up output> \
 #     --username mshort@redhat.com --password mypass --github mshort55
 #
 # External usage (OpenShift Keycloak, you need to be connected to the OCP cluster via oc cli):
@@ -59,7 +61,7 @@ if [[ -n "$ADMIN_URL" && -n "$ADMIN_PASSWORD" ]]; then
     KC_URL="$ADMIN_URL"
 elif [[ -n "$ADMIN_PASSWORD" ]]; then
     # Password provided but no URL — use local deployment
-    load_env
+    set -a; source "$ROOT_DIR/.env"; set +a
     KC_URL="http://${KC_HOSTNAME:-localhost}:${KC_HTTP_PORT:-8180}/auth"
 else
     # No credentials — discover from OpenShift

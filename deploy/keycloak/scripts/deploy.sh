@@ -18,6 +18,7 @@ set -euo pipefail
 # ------------------------------------------------------------------
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+KEYCLOAK_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 NAMESPACE="keycloak-prod"
 KEYCLOAK_CR_NAME="keycloak"
 ACME_EMAIL=""
@@ -76,14 +77,14 @@ info "Keycloak will be available at: https://${KEYCLOAK_HOST}"
 
 # --- Step 2: Create namespace ---
 info "Creating namespace ${NAMESPACE}..."
-oc apply -f "${SCRIPT_DIR}/manifests/namespace.yaml"
+oc apply -f "${KEYCLOAK_DIR}/manifests/namespace.yaml"
 
 # --- Step 3: Install cert-manager operator ---
 info "Installing cert-manager operator..."
 if oc get subscription openshift-cert-manager-operator -n cert-manager-operator &>/dev/null; then
     info "cert-manager operator subscription already exists, skipping..."
 else
-    oc apply -f "${SCRIPT_DIR}/manifests/cert-manager-sub.yaml"
+    oc apply -f "${KEYCLOAK_DIR}/manifests/cert-manager-sub.yaml"
 fi
 
 info "Waiting for cert-manager operator to be ready..."
@@ -131,10 +132,10 @@ fi
 
 if [[ "$CERT_READY" != "true" && -n "$ACME_EMAIL" ]]; then
     info "No backup found. Requesting certificate from Let's Encrypt..."
-    sed "s|ACME_EMAIL|${ACME_EMAIL}|g" "${SCRIPT_DIR}/manifests/cluster-issuer.yaml" \
+    sed "s|ACME_EMAIL|${ACME_EMAIL}|g" "${KEYCLOAK_DIR}/manifests/cluster-issuer.yaml" \
         | oc apply -f -
 
-    sed "s|KEYCLOAK_HOST|${KEYCLOAK_HOST}|g" "${SCRIPT_DIR}/manifests/certificate.yaml" \
+    sed "s|KEYCLOAK_HOST|${KEYCLOAK_HOST}|g" "${KEYCLOAK_DIR}/manifests/certificate.yaml" \
         | oc apply -n "${NAMESPACE}" -f -
 
     info "Waiting for TLS certificate to be issued (up to 3 minutes)..."
@@ -182,7 +183,7 @@ info "Installing RHBK operator..."
 if oc get subscription rhbk-operator -n rhbk-operator &>/dev/null; then
     info "RHBK operator subscription already exists, skipping..."
 else
-    oc apply -f "${SCRIPT_DIR}/manifests/rhbk-sub.yaml"
+    oc apply -f "${KEYCLOAK_DIR}/manifests/rhbk-sub.yaml"
 fi
 
 info "Waiting for RHBK operator to be ready..."
@@ -218,14 +219,14 @@ ADMIN_USER_PASSWORD=$(openssl rand -base64 32 | tr -dc 'a-zA-Z0-9' | head -c 16)
 
 # --- Step 7: Deploy PostgreSQL ---
 info "Deploying PostgreSQL..."
-oc apply -f "${SCRIPT_DIR}/manifests/postgres-statefulset.yaml" -n "${NAMESPACE}"
+oc apply -f "${KEYCLOAK_DIR}/manifests/postgres-statefulset.yaml" -n "${NAMESPACE}"
 
 info "Waiting for PostgreSQL to be ready..."
 oc wait --for=condition=Ready pod/postgres-0 -n "${NAMESPACE}" --timeout=180s
 
 # --- Step 8: Deploy Keycloak ---
 info "Deploying Keycloak..."
-sed "s|KEYCLOAK_HOST|${KEYCLOAK_HOST}|g" "${SCRIPT_DIR}/manifests/keycloak.yaml" \
+sed "s|KEYCLOAK_HOST|${KEYCLOAK_HOST}|g" "${KEYCLOAK_DIR}/manifests/keycloak.yaml" \
     | oc apply -n "${NAMESPACE}" -f -
 
 info "Waiting for Keycloak to be ready (this may take a few minutes)..."
@@ -245,7 +246,7 @@ REALM_JSON=$(jq \
         elif .username == "admin" then .credentials[0].value = $adm
         else .
         end
-    )' "${SCRIPT_DIR}/fleetshift-realm.json")
+    )' "${KEYCLOAK_DIR}/fleetshift-realm.json")
 
 cat <<EOF | oc apply -n "${NAMESPACE}" -f -
 {

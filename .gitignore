@@ -28,6 +28,10 @@ go.work.sum
 .env
 e2e/.env
 
+# Taskfile checksum cache and deployment state
+.task/
+deploy/podman/.active-deploy
+
 # Editor/IDE
 # .idea/
 # .vscode/
