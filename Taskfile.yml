@@ -12,6 +12,10 @@ includes:
       DB_INPUT: '{{.DB | default ""}}'
       AUTH_INPUT: '{{.AUTH | default ""}}'
       DEV_INPUT: '{{.DEV | default ""}}'
+  keycloak:
+    taskfile: ./deploy/keycloak/Taskfile.yml
+    dir: ./deploy/keycloak
+    aliases: [kc]
 
 vars:
   IMAGE_TAG: '{{.IMAGE_TAG | default "latest"}}'
