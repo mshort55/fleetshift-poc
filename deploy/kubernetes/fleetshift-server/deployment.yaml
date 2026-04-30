@@ -31,7 +31,7 @@ spec:
           image: quay.io/stolostron/fleetshift-server:latest
           args:
             - serve
-            - --database-url=postgres://$(POSTGRES_USER):$(POSTGRES_PASSWORD)@postgres:5432/$(POSTGRES_DB)?sslmode=disable
+            - --database-url-file=/run/secrets/database-url
             - --http-addr=:8085
             - --grpc-addr=:50051
             - --log-level=info
@@ -40,8 +40,6 @@ spec:
             - --oidc-ui-authority=$(OIDC_ISSUER_URL)
             - --oidc-ui-client-id=$(OIDC_UI_CLIENT_ID)
           envFrom:
-            - secretRef:
-                name: postgres-credentials
             - configMapRef:
                 name: fleetshift-server-config
           ports:
@@ -56,6 +54,9 @@ spec:
             initialDelaySeconds: 10
             periodSeconds: 5
           volumeMounts:
+            - name: db-credentials
+              mountPath: /run/secrets
+              readOnly: true
             - name: web-assets
               mountPath: /srv/web
               readOnly: true
@@ -64,5 +65,12 @@ spec:
               cpu: 100m
               memory: 128Mi
       volumes:
+        - name: db-credentials
+          secret:
+            secretName: postgres-credentials
+            items:
+              - key: DATABASE_URL
+                path: database-url
+            defaultMode: 0400
         - name: web-assets
           emptyDir: {}
