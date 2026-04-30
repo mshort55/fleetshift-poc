@@ -18,10 +18,17 @@ spec:
           image: postgres:18
           ports:
             - containerPort: 5432
-          envFrom:
-            - secretRef:
-                name: postgres-credentials
+          env:
+            - name: POSTGRES_USER_FILE
+              value: /run/secrets/postgres-user
+            - name: POSTGRES_PASSWORD_FILE
+              value: /run/secrets/postgres-password
+            - name: POSTGRES_DB_FILE
+              value: /run/secrets/postgres-db
           volumeMounts:
+            - name: pg-credentials
+              mountPath: /run/secrets
+              readOnly: true
             - name: postgres-data
               mountPath: /var/lib/postgresql/data
               subPath: pgdata
@@ -35,6 +42,17 @@ spec:
               cpu: 100m
               memory: 256Mi
       volumes:
+        - name: pg-credentials
+          secret:
+            secretName: postgres-credentials
+            items:
+              - key: POSTGRES_USER
+                path: postgres-user
+              - key: POSTGRES_PASSWORD
+                path: postgres-password
+              - key: POSTGRES_DB
+                path: postgres-db
+            defaultMode: 0400
         - name: postgres-data
           persistentVolumeClaim:
             claimName: postgres-data
