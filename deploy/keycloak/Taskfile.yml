@@ -17,7 +17,7 @@ tasks:
       FRESH_CERT: '{{.FRESH_CERT | default ""}}'
     cmds:
       - >-
-        ./deploy.sh
+        ./scripts/deploy.sh
         --acme-email {{.ACME_EMAIL}}
         {{if .BASE_DOMAIN}}--base-domain {{.BASE_DOMAIN}}{{end}}
         {{if eq .FRESH_CERT "true"}}--fresh-cert{{end}}
@@ -33,7 +33,7 @@ tasks:
       - sh: oc get namespace keycloak-prod &>/dev/null
         msg: "Namespace 'keycloak-prod' not found — Keycloak does not appear to be deployed on this cluster."
     cmds:
-      - ./teardown.sh
+      - ./scripts/teardown.sh
 
   add-base-domain:
     desc: Add a cluster's console redirect URI to the ocp-console Keycloak client
@@ -47,4 +47,23 @@ tasks:
     requires:
       vars: [BASE_DOMAIN, CLUSTER_NAME]
     cmds:
-      - ./add-base-domain.sh --base-domain {{.BASE_DOMAIN}} --cluster-name {{.CLUSTER_NAME}}
+      - ./scripts/add-base-domain.sh --base-domain {{.BASE_DOMAIN}} --cluster-name {{.CLUSTER_NAME}}
+
+  add-user:
+    desc: Add or update a user in the FleetShift Keycloak realm
+    preconditions:
+      - sh: command -v jq
+        msg: "'jq' not found."
+    requires:
+      vars: [USERNAME, PASSWORD, GITHUB]
+    vars:
+      ROLES: '{{.ROLES | default ""}}'
+      ADMIN_PASSWORD: '{{.ADMIN_PASSWORD | default ""}}'
+    cmds:
+      - >-
+        ./scripts/add-user.sh
+        --username {{.USERNAME}}
+        --password {{.PASSWORD}}
+        --github {{.GITHUB}}
+        {{if .ADMIN_PASSWORD}}--admin-password {{.ADMIN_PASSWORD}}{{end}}
+        {{if .ROLES}}--roles {{.ROLES}}{{end}}

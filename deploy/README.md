@@ -137,6 +137,16 @@ oc get secret ocp-console-client-secret -n keycloak-prod \
 
 Set this as `OIDC_CONSOLE_CLIENT_SECRET` in `.env` for the local podman stack, or `OCP_CONSOLE_CLIENT_SECRET` for the fleetshift server.
 
+### Add Users
+
+```bash
+# OpenShift Keycloak (auto-discovers credentials via oc):
+task kc:add-user USERNAME=you@example.com PASSWORD=mypass GITHUB=ghuser ROLES=ops,dev
+
+# Local podman Keycloak (pass admin password from deploy:up output):
+task kc:add-user USERNAME=you@example.com PASSWORD=mypass GITHUB=ghuser ROLES=ops,dev ADMIN_PASSWORD=<from-output>
+```
+
 ### Teardown
 
 ```bash

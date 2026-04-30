@@ -22,13 +22,12 @@ End-to-end tests that exercise the full FleetShift platform against real infrast
 Deploy Keycloak with the FleetShift realm. Scripts are in `deploy/keycloak/`:
 
 ```bash
-cd deploy/keycloak
-./deploy.sh                    # Deploy Keycloak + realm + test users
-../podman/scripts/add-user.sh \   # Add your personal user
-  --username you@company.com \
-  --password yourpass \
-  --github your-github-username \
-  --roles ops,dev
+task kc:deploy ACME_EMAIL=you@example.com   # Deploy Keycloak + realm + test users
+task kc:add-user \                          # Add your personal user
+  USERNAME=you@company.com \
+  PASSWORD=yourpass \
+  GITHUB=your-github-username \
+  ROLES=ops,dev
 ```
 
 See `deploy/keycloak/README.md` for details on clients, realm config, and troubleshooting.
@@ -368,12 +367,12 @@ sqlite3 /tmp/fleetshift-e2e-data/fleetshift-e2e.db \
 ```
 e2e/setup/
 ├── keycloak/                          # Keycloak deployment on OCP
-│   ├── deploy.sh                      # Deploy Keycloak + realm + test users
-│   ├── teardown.sh                    # Remove everything
-│   │                                  # (add-user.sh moved to deploy/podman/scripts/)
-│   ├── README.md                      # Detailed Keycloak setup docs
-│   ├── realm/
-│   │   └── fleetshift-realm.json      # Realm config (3 clients, 3 test users, 2 roles)
+│   ├── scripts/
+│   │   ├── deploy.sh                  # Deploy Keycloak + realm + test users
+│   │   ├── teardown.sh                # Remove everything
+│   │   ├── add-base-domain.sh         # Add cluster console redirect URI
+│   │   └── add-user.sh               # Add/update realm user
+│   ├── fleetshift-realm.json          # Realm config (3 clients, 3 test users, 2 roles)
 │   └── manifests/
 │       ├── namespace.yaml             # keycloak-prod namespace
 │       ├── cert-manager-sub.yaml      # cert-manager operator

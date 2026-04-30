@@ -97,7 +97,7 @@ fi
 
 if [ -n "${DEV_USER_USERNAME:-}" ] && [ "$AUTH_MODE" = "local" ]; then
   echo "==> Creating dev user: ${DEV_USER_USERNAME}"
-  "$SCRIPT_DIR/add-user.sh" \
+  "$DEPLOY_DIR/keycloak/scripts/add-user.sh" \
     --admin-password "$KC_BOOTSTRAP_ADMIN_PASSWORD" \
     --username "$DEV_USER_USERNAME" \
     --password "${DEV_USER_PASSWORD:-changeme}" \
