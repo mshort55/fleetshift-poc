@@ -1,6 +1,6 @@
 services:
   auth-setup:
-    image: ${FLEETSHIFT_SERVER_IMAGE:-quay.io/stolostron/fleetshift-server:latest}
+    image: ${FLEETSHIFT_SERVER_IMAGE:-quay.io/stolostron/fleetshift-server-local:latest}
     entrypoint: ["/bin/sh", "-c"]
     command:
       - |
