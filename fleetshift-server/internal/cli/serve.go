@@ -62,6 +62,7 @@ type serveFlags struct {
 	webDir           string
 	oidcUIAuthority  string
 	oidcUIClientID   string
+	addons           string
 }
 
 func newServeCmd() *cobra.Command {
@@ -84,6 +85,7 @@ func newServeCmd() *cobra.Command {
 	cmd.Flags().StringVar(&f.webDir, "web-dir", "", "directory containing frontend assets to serve (empty = API only)")
 	cmd.Flags().StringVar(&f.oidcUIAuthority, "oidc-ui-authority", os.Getenv("OIDC_ISSUER_URL"), "OIDC authority URL for the frontend UI")
 	cmd.Flags().StringVar(&f.oidcUIClientID, "oidc-ui-client-id", envOrDefault("OIDC_UI_CLIENT_ID", "fleetshift-ui"), "OIDC client ID for the frontend UI")
+	cmd.Flags().StringVar(&f.addons, "addons", "kind,ocp,kubernetes", "comma-separated list of addons to enable (default: all)")
 	return cmd
 }
 
@@ -140,38 +142,40 @@ func runServe(ctx context.Context, f *serveFlags) error {
 		}
 	}
 
-	kindOpts := []kindaddon.AgentOption{
-		kindaddon.WithObserver(kindaddon.NewSlogAgentObserver(logger)),
+	enabledAddons := parseAddons(f.addons)
+
+	if enabledAddons["kind"] {
+		kindOpts := []kindaddon.AgentOption{
+			kindaddon.WithObserver(kindaddon.NewSlogAgentObserver(logger)),
+		}
+		if tempDir := os.Getenv("KIND_TEMP_DIR"); tempDir != "" {
+			kindOpts = append(kindOpts, kindaddon.WithTempDir(tempDir))
+			logger.Info("kind agent: using temp dir " + tempDir)
+		}
+		if oidcCABundle != nil {
+			kindOpts = append(kindOpts, kindaddon.WithOIDCCABundle(oidcCABundle))
+		}
+		if containerHost := os.Getenv("CONTAINER_HOST"); containerHost != "" {
+			kindOpts = append(kindOpts, kindaddon.WithContainerHost(containerHost))
+			logger.Info("kind agent: rewriting localhost OIDC issuer URLs to " + containerHost)
+		}
+		if httpsPort := os.Getenv("OIDC_HTTPS_PORT"); httpsPort != "" {
+			kindOpts = append(kindOpts, kindaddon.WithOIDCHTTPSPort(httpsPort))
+			logger.Info("kind agent: upgrading HTTP OIDC issuer URLs to HTTPS on port " + httpsPort)
+		}
+		kindAgent := kindaddon.NewAgent(
+			func(logger kindlog.Logger) kindaddon.ClusterProvider {
+				var opts []cluster.ProviderOption
+				if logger != nil {
+					opts = append(opts, cluster.ProviderWithLogger(logger))
+				}
+				return cluster.NewProvider(opts...)
+			},
+			kindOpts...,
+		)
+		router.Register(kindaddon.TargetType, kindAgent)
+		logger.Info("addon enabled", "addon", "kind")
 	}
-	if tempDir := os.Getenv("KIND_TEMP_DIR"); tempDir != "" {
-		kindOpts = append(kindOpts, kindaddon.WithTempDir(tempDir))
-		logger.Info("kind agent: using temp dir " + tempDir)
-	}
-	if oidcCABundle != nil {
-		kindOpts = append(kindOpts, kindaddon.WithOIDCCABundle(oidcCABundle))
-	}
-	if containerHost := os.Getenv("CONTAINER_HOST"); containerHost != "" {
-		kindOpts = append(kindOpts, kindaddon.WithContainerHost(containerHost))
-		logger.Info("kind agent: rewriting localhost OIDC issuer URLs to " + containerHost)
-	}
-	if httpsPort := os.Getenv("OIDC_HTTPS_PORT"); httpsPort != "" {
-		kindOpts = append(kindOpts, kindaddon.WithOIDCHTTPSPort(httpsPort))
-		logger.Info("kind agent: upgrading HTTP OIDC issuer URLs to HTTPS on port " + httpsPort)
-	}
-	kindAgent := kindaddon.NewAgent(
-		// Guard nil: Remove() calls providerFactory(nil) because there is
-		// no DeliverySignaler during deletion. Passing nil to
-		// ProviderWithLogger causes a panic inside kind's provider.
-		func(logger kindlog.Logger) kindaddon.ClusterProvider {
-			var opts []cluster.ProviderOption
-			if logger != nil {
-				opts = append(opts, cluster.ProviderWithLogger(logger))
-			}
-			return cluster.NewProvider(opts...)
-		},
-		kindOpts...,
-	)
-	router.Register(kindaddon.TargetType, kindAgent)
 
 	// --- OCP agent ---
 	ocpAgent := ocpaddon.NewAgent(
@@ -247,13 +251,15 @@ func runServe(ctx context.Context, f *serveFlags) error {
 	// --- seed default targets ---
 
 	targetSvc := &application.TargetService{Store: store}
-	if err := targetSvc.Register(ctx, domain.TargetInfo{
-		ID:                    "kind-local",
-		Type:                  kindaddon.TargetType,
-		Name:                  "Local Kind Provider",
-		AcceptedResourceTypes: []domain.ResourceType{kindaddon.ClusterResourceType, domain.TrustBundleResourceType},
-	}); err != nil && !errors.Is(err, domain.ErrAlreadyExists) {
-		return fmt.Errorf("seed kind target: %w", err)
+	if enabledAddons["kind"] {
+		if err := targetSvc.Register(ctx, domain.TargetInfo{
+			ID:                    "kind-local",
+			Type:                  kindaddon.TargetType,
+			Name:                  "Local Kind Provider",
+			AcceptedResourceTypes: []domain.ResourceType{kindaddon.ClusterResourceType, domain.TrustBundleResourceType},
+		}); err != nil && !errors.Is(err, domain.ErrAlreadyExists) {
+			return fmt.Errorf("seed kind target: %w", err)
+		}
 	}
 
 	if err := targetSvc.Register(ctx, domain.TargetInfo{
@@ -302,10 +308,12 @@ func runServe(ctx context.Context, f *serveFlags) error {
 		AuthMethods:      authMethodRepo,
 		Discovery:        discoveryClient,
 		CreateDeployment: createWf,
-		TrustBundlePlacement: domain.PlacementStrategySpec{
+	}
+	if enabledAddons["kind"] {
+		provSpec.TrustBundlePlacement = domain.PlacementStrategySpec{
 			Type:    domain.PlacementStrategyStatic,
 			Targets: []domain.TargetID{"kind-local"},
-		},
+		}
 	}
 	provWf, err := reg.RegisterProvisionIdP(provSpec)
 	if err != nil {
@@ -558,6 +566,20 @@ func envOrDefault(key, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+func parseAddons(spec string) map[string]bool {
+	addons := make(map[string]bool)
+	if spec == "" {
+		return addons
+	}
+	for _, a := range strings.Split(spec, ",") {
+		a = strings.TrimSpace(a)
+		if a != "" {
+			addons[a] = true
+		}
+	}
+	return addons
 }
 
 // parseDatabaseURL extracts host, port, user, password, and dbname from a
