@@ -24,6 +24,7 @@ x-fleetshift-server: &fleetshift-server
   volumes:
     - ${PODMAN_SOCKET:-/dev/null}:/var/run/docker.sock
     - ${KIND_TEMP_DIR:-/tmp}:${KIND_TEMP_DIR:-/tmp}
+    - web-assets:/srv/web:ro
   networks:
     - default
     - kind
@@ -34,6 +35,13 @@ x-fleetshift-server: &fleetshift-server
     retries: 30
 
 services:
+
+  # ── Frontend assets (init container) ────────────────────────────
+
+  web-builder:
+    image: ${FLEETSHIFT_WEB_IMAGE:-quay.io/stolostron/fleetshift-web:latest}
+    volumes:
+      - web-assets:/output
 
   # ── Core ────────────────────────────────────────────────────────
 
@@ -48,6 +56,12 @@ services:
       - --web-dir=${FLEETSHIFT_WEB_DIR:-/srv/web}
       - --oidc-ui-authority=${OIDC_UI_AUTHORITY:-${OIDC_ISSUER_URL}}
       - --oidc-ui-client-id=${OIDC_UI_CLIENT_ID:-fleetshift-ui}
+    depends_on:
+      web-builder:
+        condition: service_completed_successfully
+
+volumes:
+  web-assets:
 
 networks:
   default:

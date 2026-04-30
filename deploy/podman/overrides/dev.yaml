@@ -8,19 +8,15 @@
 
 services:
 
-  # ── Frontend builder (init container) ─────────────────────────
-  # Builds all frontend assets inside a container and copies them
-  # to a shared volume. No host node/npm required.
+  # ── Frontend builder — build from source instead of prebuilt image ──
 
   web-builder:
     build:
       context: ${UI_DIR:-../../../fleetshift-user-interface}
       dockerfile: Dockerfile.web
     privileged: true
-    volumes:
-      - web-assets:/output
 
-  # ── Backend ────────────────────────────────────────────────────
+  # ── Backend — build from source ────────────────────────────────
 
   fleetshift-server:
     build:
@@ -29,10 +25,3 @@ services:
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - /tmp:/tmp
-      - web-assets:/srv/web:ro
-    depends_on:
-      web-builder:
-        condition: service_completed_successfully
-
-volumes:
-  web-assets:
