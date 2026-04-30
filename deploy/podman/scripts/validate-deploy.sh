@@ -230,7 +230,10 @@ if should_run 1; then
 
   echo ""
   echo "1e. logs works (no args) — checking for 3 seconds"
-  timeout 3 task d:logs 2>&1 || true
+  task d:logs &
+  LOGS_PID=$!
+  sleep 3
+  kill "$LOGS_PID" 2>/dev/null && wait "$LOGS_PID" 2>/dev/null || true
   pass "logs streamed without error"
 
   echo ""
