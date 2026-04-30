@@ -1,0 +1,68 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: fleetshift-server
+  annotations:
+    image.openshift.io/triggers: >-
+      [
+        {"from":{"kind":"ImageStreamTag","name":"fleetshift-server:latest"},
+         "fieldPath":"spec.template.spec.containers[?(@.name==\"fleetshift-server\")].image"},
+        {"from":{"kind":"ImageStreamTag","name":"fleetshift-web:latest"},
+         "fieldPath":"spec.template.spec.initContainers[?(@.name==\"web-builder\")].image"}
+      ]
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: fleetshift-server
+  template:
+    metadata:
+      labels:
+        app: fleetshift-server
+    spec:
+      initContainers:
+        - name: web-builder
+          image: quay.io/stolostron/fleetshift-web:latest
+          volumeMounts:
+            - name: web-assets
+              mountPath: /output
+      containers:
+        - name: fleetshift-server
+          image: quay.io/stolostron/fleetshift-server:latest
+          args:
+            - serve
+            - --database-url=postgres://$(POSTGRES_USER):$(POSTGRES_PASSWORD)@postgres:5432/$(POSTGRES_DB)?sslmode=disable
+            - --http-addr=:8085
+            - --grpc-addr=:50051
+            - --log-level=info
+            - --addons=ocp,kubernetes
+            - --web-dir=/srv/web
+            - --oidc-ui-authority=$(OIDC_ISSUER_URL)
+            - --oidc-ui-client-id=$(OIDC_UI_CLIENT_ID)
+          envFrom:
+            - secretRef:
+                name: postgres-credentials
+            - configMapRef:
+                name: fleetshift-server-config
+          ports:
+            - name: http
+              containerPort: 8085
+            - name: grpc
+              containerPort: 50051
+          readinessProbe:
+            httpGet:
+              path: /v1/deployments
+              port: 8085
+            initialDelaySeconds: 10
+            periodSeconds: 5
+          volumeMounts:
+            - name: web-assets
+              mountPath: /srv/web
+              readOnly: true
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+      volumes:
+        - name: web-assets
+          emptyDir: {}

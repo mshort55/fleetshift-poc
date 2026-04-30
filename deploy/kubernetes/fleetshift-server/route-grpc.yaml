@@ -1,0 +1,13 @@
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: fleetshift-grpc
+spec:
+  to:
+    kind: Service
+    name: fleetshift-server
+  port:
+    targetPort: grpc
+  tls:
+    termination: edge
+    insecureEdgeTerminationPolicy: Redirect

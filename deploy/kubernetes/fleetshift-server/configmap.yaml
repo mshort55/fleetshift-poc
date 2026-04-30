@@ -1,0 +1,12 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: fleetshift-server-config
+data:
+  OIDC_ISSUER_URL: "https://keycloak.apps.cluster.example.com/realms/fleetshift"
+  OIDC_UI_CLIENT_ID: "fleetshift-ui"
+  OIDC_CLIENT_ID: "fleetshift-cli"
+  OIDC_AUDIENCE: "fleetshift-cli"
+  KEY_ENROLLMENT_CLIENT_ID: "fleetshift-signing"
+  KEY_REGISTRY_ID: "github.com"
+  KEY_REGISTRY_SUBJECT_EXPR: "claims.github_username"
