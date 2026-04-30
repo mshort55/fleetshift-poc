@@ -60,19 +60,6 @@ should_run() {
   fi
 }
 
-check() {
-  local desc="$1"
-  shift
-  local output
-  if output=$("$@" 2>&1); then
-    echo "$output"
-    return 0
-  else
-    echo "$output"
-    return 1
-  fi
-}
-
 pass() {
   echo -e "  ${GREEN}PASS${NC}: $1"
   PASSED=$((PASSED + 1))
@@ -128,6 +115,14 @@ pause_for_user() {
   echo -e "${YELLOW}  ⏸  $1${NC}"
   read -rp "  Press ENTER to continue (or ctrl-C to abort)... "
   echo ""
+}
+
+kill_tree() {
+  local pid=$1
+  for child in $(pgrep -P "$pid" 2>/dev/null); do
+    kill_tree "$child"
+  done
+  kill "$pid" 2>/dev/null || true
 }
 
 ensure_down() {
@@ -233,7 +228,8 @@ if should_run 1; then
   task d:logs &
   LOGS_PID=$!
   sleep 3
-  kill "$LOGS_PID" 2>/dev/null && wait "$LOGS_PID" 2>/dev/null || true
+  kill_tree "$LOGS_PID"
+  wait "$LOGS_PID" 2>/dev/null || true
   pass "logs streamed without error"
 
   echo ""
@@ -525,7 +521,8 @@ if should_run 10; then
     skip "10: UI_DIR not found (${UI_DIR_VALUE:-unset}) — dev mode requires the UI repo"
   else
     echo "10a. Starting in dev mode (builds from source)..."
-    task d:dev
+    DEV_LOG=$(mktemp)
+    task d:dev 2>&1 | tee "$DEV_LOG"
     echo ""
 
     echo "10b. State file persists DEV=true"
@@ -534,18 +531,13 @@ if should_run 10; then
     assert_file_contains "$STATE_FILE" "^DEV=true$" "state: DEV=true"
 
     echo ""
-    echo "10c. Server image built locally (not pulled from registry)"
-    SERVER_IMAGE=$(podman inspect podman-fleetshift-server-1 --format '{{.Image}}' 2>/dev/null || true)
-    if [ -z "$SERVER_IMAGE" ]; then
-      fail "could not inspect fleetshift-server container"
+    echo "10c. Images built from source (not pulled)"
+    if grep -qE 'STEP [0-9]+/' "$DEV_LOG"; then
+      pass "build steps detected in compose output"
     else
-      DIGEST_COUNT=$(podman image inspect "$SERVER_IMAGE" | jq '.[0].RepoDigests // [] | length')
-      if [ "$DIGEST_COUNT" -eq 0 ]; then
-        pass "server image has no remote repo digests (built locally)"
-      else
-        fail "server image has $DIGEST_COUNT repo digests (appears pulled from registry)"
-      fi
+      fail "no build steps in output — images may have been pulled instead of built"
     fi
+    rm -f "$DEV_LOG"
 
     echo ""
     echo "10d. Follow-up status works via state file (no args)"
