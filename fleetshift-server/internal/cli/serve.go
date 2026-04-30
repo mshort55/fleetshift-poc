@@ -55,6 +55,7 @@ type serveFlags struct {
 	httpAddr         string
 	dbPath           string
 	databaseURL      string
+	databaseURLFile  string
 	logLevel         string
 	logFormat        string
 	logLevelOverride string
@@ -78,6 +79,7 @@ func newServeCmd() *cobra.Command {
 	cmd.Flags().StringVar(&f.httpAddr, "http-addr", ":8080", "HTTP/JSON gateway listen address")
 	cmd.Flags().StringVar(&f.dbPath, "db", "fleetshift.db", "SQLite database path")
 	cmd.Flags().StringVar(&f.databaseURL, "database-url", os.Getenv("DATABASE_URL"), "PostgreSQL connection URL (mutually exclusive with --db)")
+	cmd.Flags().StringVar(&f.databaseURLFile, "database-url-file", os.Getenv("DATABASE_URL_FILE"), "path to file containing PostgreSQL connection URL (mutually exclusive with --database-url and --db)")
 	cmd.Flags().StringVar(&f.logLevel, "log-level", "info", "log level (debug, info, warn, error)")
 	cmd.Flags().StringVar(&f.logFormat, "log-format", "text", "log format (text, json)")
 	cmd.Flags().StringVar(&f.logLevelOverride, "log-level-override", "", "per-component log level overrides (e.g. deployment=debug,authn=debug)")
@@ -92,6 +94,10 @@ func newServeCmd() *cobra.Command {
 func runServe(ctx context.Context, f *serveFlags) error {
 	ctx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
 	defer stop()
+
+	if err := resolveDatabaseURLFile(f); err != nil {
+		return err
+	}
 
 	// --- infrastructure ---
 	if f.databaseURL != "" && f.dbPath != "fleetshift.db" {
@@ -580,6 +586,24 @@ func parseAddons(spec string) map[string]bool {
 		}
 	}
 	return addons
+}
+
+func resolveDatabaseURLFile(f *serveFlags) error {
+	if f.databaseURLFile == "" {
+		return nil
+	}
+	if f.databaseURL != "" {
+		return fmt.Errorf("--database-url-file and --database-url are mutually exclusive")
+	}
+	if f.dbPath != "fleetshift.db" {
+		return fmt.Errorf("--database-url-file and --db are mutually exclusive")
+	}
+	data, err := os.ReadFile(f.databaseURLFile)
+	if err != nil {
+		return fmt.Errorf("read database URL file: %w", err)
+	}
+	f.databaseURL = strings.TrimSpace(string(data))
+	return nil
 }
 
 // parseDatabaseURL extracts host, port, user, password, and dbname from a
