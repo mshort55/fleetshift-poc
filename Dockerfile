@@ -35,20 +35,5 @@ EXPOSE 50051 8085
 ENTRYPOINT ["fleetshift"]
 CMD ["serve", "--http-addr", ":8085", "--grpc-addr", ":50051", "--db", "/data/fleetshift.db", "--log-level", "debug"]
 
-# ── Dev target (podman/kind/kubectl for local Kind addon) ────
-FROM runtime-base AS local-podman
-
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    podman \
-    && rm -rf /var/lib/apt/lists/*
-
-RUN ARCH=$(dpkg --print-architecture) && \
-    curl -Lo /usr/local/bin/kind "https://kind.sigs.k8s.io/dl/v0.31.0/kind-linux-${ARCH}" && \
-    chmod +x /usr/local/bin/kind
-
-RUN ARCH=$(dpkg --print-architecture) && \
-    curl -Lo /usr/local/bin/kubectl "https://dl.k8s.io/release/v1.33.0/bin/linux/${ARCH}/kubectl" && \
-    chmod +x /usr/local/bin/kubectl
-
 # ── Production target (lean) ────────────────────────────────
 FROM runtime-base AS production
