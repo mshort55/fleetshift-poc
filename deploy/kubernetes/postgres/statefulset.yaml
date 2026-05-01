@@ -13,25 +13,31 @@ spec:
       labels:
         app: postgres
     spec:
+      initContainers:
+        - name: init-pgdata
+          image: docker.io/library/postgres:18
+          command: ["sh", "-c", "mkdir -p /var/lib/postgresql/data"]
+          volumeMounts:
+            - name: postgres-data
+              mountPath: /var/lib/postgresql
       containers:
         - name: postgres
-          image: postgres:18
+          image: docker.io/library/postgres:18
           ports:
             - containerPort: 5432
           env:
             - name: POSTGRES_USER_FILE
-              value: /run/secrets/postgres-user
+              value: /run/secrets/fleetshift/postgres-user
             - name: POSTGRES_PASSWORD_FILE
-              value: /run/secrets/postgres-password
+              value: /run/secrets/fleetshift/postgres-password
             - name: POSTGRES_DB_FILE
-              value: /run/secrets/postgres-db
+              value: /run/secrets/fleetshift/postgres-db
           volumeMounts:
             - name: pg-credentials
-              mountPath: /run/secrets
+              mountPath: /run/secrets/fleetshift
               readOnly: true
             - name: postgres-data
-              mountPath: /var/lib/postgresql/data
-              subPath: pgdata
+              mountPath: /var/lib/postgresql
           readinessProbe:
             exec:
               command: ["pg_isready", "-U", "fleetshift"]

@@ -41,6 +41,13 @@ tasks:
       - oc get svc -n {{.NAMESPACE}}
       - echo ""
       - oc get routes -n {{.NAMESPACE}}
+      - |
+        echo ""
+        TAG=$(oc get imagestream fleetshift-server -n {{.NAMESPACE}} -o jsonpath='{.spec.tags[0].from.name}' 2>/dev/null)
+        DEFAULT="quay.io/stolostron/fleetshift-server:latest"
+        if [ "$TAG" != "$DEFAULT" ] && [ -n "$TAG" ]; then
+          echo "IMAGE OVERRIDE ACTIVE: $TAG"
+        fi
 
   logs:
     desc: Tail logs from the fleetshift-server deployment
@@ -67,6 +74,35 @@ tasks:
         msg: "Namespace '{{.NAMESPACE}}' not found."
     cmds:
       - oc logs -f {{.POD}} -n {{.NAMESPACE}} --all-containers
+
+  set-image:
+    desc: "Override the fleetshift-server image tag via ImageStream (e.g. task kubernetes:set-image TAG=PR48-abc123)"
+    preconditions:
+      - sh: command -v oc
+        msg: "'oc' CLI not found."
+      - sh: timeout 5 oc whoami &>/dev/null
+        msg: "Not logged in to OpenShift. Run 'oc login' first."
+      - sh: oc get namespace {{.NAMESPACE}} &>/dev/null
+        msg: "Namespace '{{.NAMESPACE}}' not found."
+      - sh: test -n "{{.TAG}}"
+        msg: "TAG is required. Usage: task kubernetes:set-image TAG=<image-tag>"
+    cmds:
+      - oc tag quay.io/stolostron/fleetshift-server:{{.TAG}} fleetshift-server:latest -n {{.NAMESPACE}}
+      - echo "ImageStream fleetshift-server:latest → quay.io/stolostron/fleetshift-server:{{.TAG}}"
+      - echo "Deployment will roll out automatically via image trigger."
+
+  reset-image:
+    desc: Reset fleetshift-server image to the default :latest tag
+    preconditions:
+      - sh: command -v oc
+        msg: "'oc' CLI not found."
+      - sh: timeout 5 oc whoami &>/dev/null
+        msg: "Not logged in to OpenShift. Run 'oc login' first."
+      - sh: oc get namespace {{.NAMESPACE}} &>/dev/null
+        msg: "Namespace '{{.NAMESPACE}}' not found."
+    cmds:
+      - oc tag quay.io/stolostron/fleetshift-server:latest fleetshift-server:latest -n {{.NAMESPACE}}
+      - echo "ImageStream fleetshift-server:latest → quay.io/stolostron/fleetshift-server:latest"
 
   import-images:
     desc: Force reimport of images from quay.io

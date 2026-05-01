@@ -23,6 +23,7 @@ spec:
       initContainers:
         - name: web-builder
           image: quay.io/stolostron/fleetshift-web:latest
+          command: ["sh", "-c", "cp -r /srv/web/* /output/"]
           volumeMounts:
             - name: web-assets
               mountPath: /output
@@ -31,7 +32,7 @@ spec:
           image: quay.io/stolostron/fleetshift-server:latest
           args:
             - serve
-            - --database-url-file=/run/secrets/database-url
+            - --database-url-file=/run/secrets/fleetshift/database-url
             - --http-addr=:8085
             - --grpc-addr=:50051
             - --log-level=info
@@ -55,7 +56,7 @@ spec:
             periodSeconds: 5
           volumeMounts:
             - name: db-credentials
-              mountPath: /run/secrets
+              mountPath: /run/secrets/fleetshift
               readOnly: true
             - name: web-assets
               mountPath: /srv/web
