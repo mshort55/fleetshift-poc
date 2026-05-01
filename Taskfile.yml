@@ -15,7 +15,7 @@ includes:
   kubernetes:
     taskfile: ./deploy/kubernetes/Taskfile.yml
     dir: ./deploy/kubernetes
-    aliases: [k8]
+    aliases: [k8s]
   keycloak:
     taskfile: ./deploy/keycloak/Taskfile.yml
     dir: ./deploy/keycloak

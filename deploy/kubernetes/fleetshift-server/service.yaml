@@ -12,3 +12,4 @@ spec:
     - name: grpc
       port: 50051
       targetPort: 50051
+      appProtocol: kubernetes.io/h2c

@@ -7,8 +7,11 @@ import (
 )
 
 type globalFlags struct {
-	server       string
-	outputFormat string
+	server         string
+	outputFormat   string
+	serverTLS      bool
+	serverCAFile   string
+	serverInsecure bool
 }
 
 type cmdContext struct {
@@ -32,7 +35,7 @@ func New() *cobra.Command {
 			}
 			ctx.printer = output.NewPrinter(cmd.OutOrStdout(), format)
 
-			conn, err := dial(cmd.Context(), ctx.flags.server)
+			conn, err := dial(ctx.flags)
 			if err != nil {
 				return err
 			}
@@ -49,6 +52,9 @@ func New() *cobra.Command {
 
 	root.PersistentFlags().StringVarP(&ctx.flags.server, "server", "s", "localhost:50051", "gRPC server address")
 	root.PersistentFlags().StringVarP(&ctx.flags.outputFormat, "output", "o", string(output.FormatTable), "output format (table, json)")
+	root.PersistentFlags().BoolVar(&ctx.flags.serverTLS, "server-tls", false, "Use TLS for the gRPC connection")
+	root.PersistentFlags().StringVar(&ctx.flags.serverCAFile, "server-ca-file", "", "PEM CA bundle to trust for the gRPC server certificate")
+	root.PersistentFlags().BoolVar(&ctx.flags.serverInsecure, "server-insecure", false, "Skip TLS certificate verification (debugging only)")
 
 	root.AddCommand(newDeploymentCmd(ctx))
 	root.AddCommand(newAuthCmd(ctx))
