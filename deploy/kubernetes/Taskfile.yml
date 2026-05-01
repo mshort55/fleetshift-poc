@@ -1,0 +1,97 @@
+version: '3'
+
+vars:
+  NAMESPACE: fleetshift
+
+tasks:
+  deploy:
+    desc: Deploy FleetShift to OpenShift (kustomize manifests, images, auth-setup)
+    preconditions:
+      - sh: command -v oc
+        msg: "'oc' CLI not found."
+      - sh: timeout 5 oc whoami &>/dev/null
+        msg: "Not logged in to OpenShift. Run 'oc login' first."
+    cmds:
+      - ./scripts/deploy.sh
+
+  teardown:
+    desc: Tear down FleetShift from OpenShift (kustomize delete + namespace)
+    preconditions:
+      - sh: command -v oc
+        msg: "'oc' CLI not found."
+      - sh: timeout 5 oc whoami &>/dev/null
+        msg: "Not logged in to OpenShift. Run 'oc login' first."
+      - sh: oc get namespace {{.NAMESPACE}} &>/dev/null
+        msg: "Namespace '{{.NAMESPACE}}' not found — nothing to tear down."
+    cmds:
+      - ./scripts/teardown.sh
+
+  status:
+    desc: Show pods, services, and routes in the fleetshift namespace
+    preconditions:
+      - sh: command -v oc
+        msg: "'oc' CLI not found."
+      - sh: timeout 5 oc whoami &>/dev/null
+        msg: "Not logged in to OpenShift. Run 'oc login' first."
+      - sh: oc get namespace {{.NAMESPACE}} &>/dev/null
+        msg: "Namespace '{{.NAMESPACE}}' not found."
+    cmds:
+      - oc get pods -n {{.NAMESPACE}}
+      - echo ""
+      - oc get svc -n {{.NAMESPACE}}
+      - echo ""
+      - oc get routes -n {{.NAMESPACE}}
+
+  logs:
+    desc: Tail logs from the fleetshift-server deployment
+    preconditions:
+      - sh: command -v oc
+        msg: "'oc' CLI not found."
+      - sh: timeout 5 oc whoami &>/dev/null
+        msg: "Not logged in to OpenShift. Run 'oc login' first."
+      - sh: oc get namespace {{.NAMESPACE}} &>/dev/null
+        msg: "Namespace '{{.NAMESPACE}}' not found."
+    cmds:
+      - oc logs -f deployment/fleetshift-server -n {{.NAMESPACE}} --all-containers
+
+  'logs:*':
+    desc: "Tail logs from a specific pod (e.g. task k8s:logs:postgres-0)"
+    vars:
+      POD: '{{index .MATCH 0}}'
+    preconditions:
+      - sh: command -v oc
+        msg: "'oc' CLI not found."
+      - sh: timeout 5 oc whoami &>/dev/null
+        msg: "Not logged in to OpenShift. Run 'oc login' first."
+      - sh: oc get namespace {{.NAMESPACE}} &>/dev/null
+        msg: "Namespace '{{.NAMESPACE}}' not found."
+    cmds:
+      - oc logs -f {{.POD}} -n {{.NAMESPACE}} --all-containers
+
+  import-images:
+    desc: Force reimport of images from quay.io
+    preconditions:
+      - sh: command -v oc
+        msg: "'oc' CLI not found."
+      - sh: timeout 5 oc whoami &>/dev/null
+        msg: "Not logged in to OpenShift. Run 'oc login' first."
+      - sh: oc get namespace {{.NAMESPACE}} &>/dev/null
+        msg: "Namespace '{{.NAMESPACE}}' not found."
+    cmds:
+      - oc import-image fleetshift-server:latest -n {{.NAMESPACE}} --confirm
+      - oc import-image fleetshift-web:latest -n {{.NAMESPACE}} --confirm
+
+  auth-setup:
+    desc: Re-run the auth-setup job (deletes previous job first)
+    preconditions:
+      - sh: command -v oc
+        msg: "'oc' CLI not found."
+      - sh: timeout 5 oc whoami &>/dev/null
+        msg: "Not logged in to OpenShift. Run 'oc login' first."
+      - sh: oc get namespace {{.NAMESPACE}} &>/dev/null
+        msg: "Namespace '{{.NAMESPACE}}' not found."
+    cmds:
+      - oc delete job auth-setup -n {{.NAMESPACE}} --ignore-not-found=true
+      - oc apply -f auth-setup/job.yaml -n {{.NAMESPACE}}
+      - echo "Waiting for auth-setup to complete..."
+      - oc wait -n {{.NAMESPACE}} job/auth-setup --for=condition=Complete --timeout=120s
