@@ -22,7 +22,7 @@ This repository represents both a **prototype** for a next generation k8s/OpenSh
 
 ```bash
 cp .env.template .env         # configure (edit as needed)
-task build                    # build all Go binaries
+task build:all                    # build all Go binaries
 task podman:up                # start the stack (demo mode)
 task podman:cli-setup         # configure fleetctl CLI
 bin/fleetctl auth login       # log in (opens browser)
@@ -41,7 +41,7 @@ Run `task --list` for the full list. All tasks run from the project root.
 ### Build
 
 ```bash
-task build              # build all Go binaries → bin/
+task build:all              # build all Go binaries → bin/
 task build:server       # fleetshift-server
 task build:cli          # fleetctl CLI
 task build:ocp-engine   # ocp-engine
@@ -52,7 +52,7 @@ Builds are incremental — only recompiles when source files change.
 ### Test
 
 ```bash
-task test               # unit tests for all modules
+task test:all               # unit tests for all modules
 task test:e2e           # end-to-end tests (requires .env + interactive auth)
 task test:e2e-aws       # AWS provision/destroy end-to-end test
 ```

@@ -15,7 +15,7 @@ source "$(cd "$(dirname "$0")" && pwd)/common.sh"
 #
 # Prerequisites:
 #   - Stack running (task podman:up)
-#   - fleetctl built (task build in repo root)
+#   - fleetctl built (task build:all in repo root)
 #
 # Usage:
 #   ./test-attestation.sh
@@ -40,7 +40,7 @@ die()  { printf '\033[1;31mERROR: %s\033[0m\n' "$*" >&2; exit 1; }
 # --- Pre-flight checks -----------------------------------------------
 
 if [ ! -f "$FLEETCTL" ]; then
-  die "fleetctl not found at ${FLEETCTL}. Run 'task build' in the repo root."
+  die "fleetctl not found at ${FLEETCTL}. Run 'task build:all' in the repo root."
 elif [ ! -x "$FLEETCTL" ]; then
   die "fleetctl at ${FLEETCTL} is not executable. Run: chmod +x ${FLEETCTL}"
 fi

@@ -26,12 +26,11 @@ vars:
 
 tasks:
   default:
-    desc: Show available tasks
     silent: true
     cmds:
       - task --list
 
-  build:
+  build:all:
     desc: Build all binaries
     deps: [build:server, build:cli, build:ocp-engine]
 
@@ -59,7 +58,7 @@ tasks:
     cmds:
       - go build -o ../bin/ocp-engine .
 
-  test:
+  test:all:
     desc: Run unit tests for all modules
     deps: [test:server, test:cli, test:ocp-engine]
 
@@ -83,7 +82,7 @@ tasks:
 
   test:e2e:
     desc: Run end-to-end tests (requires .env and interactive auth)
-    deps: [build]
+    deps: [build:all]
     dir: e2e
     preconditions:
       - sh: test -f {{.ROOT_DIR}}/.env
@@ -93,7 +92,7 @@ tasks:
 
   test:e2e-aws:
     desc: Run AWS provision/destroy E2E test
-    deps: [build]
+    deps: [build:all]
     dir: e2e
     preconditions:
       - sh: test -f {{.ROOT_DIR}}/.env

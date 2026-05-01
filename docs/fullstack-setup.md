@@ -111,7 +111,7 @@ before injecting it into the kubeadm config. Unset it to disable the rewrite
 ### Build
 
 ```bash
-task build          # builds bin/fleetshift and bin/fleetctl
+task build:all      # builds bin/fleetshift and bin/fleetctl
 ```
 
 ### Run the server
@@ -132,7 +132,7 @@ OIDC_HTTPS_PORT=8443 \
 ### Run tests
 
 ```bash
-task test
+task test:all
 ```
 
 ### Generate protobuf code

@@ -153,7 +153,7 @@ if [ ! -f .env ]; then
 fi
 
 if [ ! -f bin/fleetctl ]; then
-  echo -e "${YELLOW}WARNING: bin/fleetctl not found. Run 'task build' first for attestation tests.${NC}"
+  echo -e "${YELLOW}WARNING: bin/fleetctl not found. Run 'task build:all' first for attestation tests.${NC}"
 fi
 
 ensure_down
@@ -446,7 +446,7 @@ if should_run 8; then
   ensure_down
 
   if [ ! -f bin/fleetctl ]; then
-    skip "fleetctl not built — run 'task build' first"
+    skip "fleetctl not built — run 'task build:all' first"
   else
     echo "8a. Starting default stack..."
     task pd:up
@@ -480,7 +480,7 @@ if should_run 9; then
   ensure_down
 
   if [ ! -f bin/fleetctl ]; then
-    skip "fleetctl not built — run 'task build' first"
+    skip "fleetctl not built — run 'task build:all' first"
   else
     echo "9a. Starting stack with AUTH=external..."
     task pd:up AUTH=external
