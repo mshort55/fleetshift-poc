@@ -55,7 +55,7 @@ tasks:
       - oc logs -f deployment/fleetshift-server -n {{.NAMESPACE}} --all-containers
 
   'logs:*':
-    desc: "Tail logs from a specific pod (e.g. task k8s:logs:postgres-0)"
+    desc: "Tail logs from a specific pod (e.g. task kubernetes:logs:postgres-0)"
     vars:
       POD: '{{index .MATCH 0}}'
     preconditions:
