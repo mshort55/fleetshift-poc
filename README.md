@@ -77,7 +77,7 @@ Customize with `DEPLOY_MODE`, `DB`, `AUTH` variables (e.g. `task podman:up DEPLO
 ### Generate & Images
 
 ```bash
-task generate           # regenerate protobuf and gRPC stubs
+task protogen           # regenerate protobuf and gRPC stubs
 task image:build        # build server container images
 task image:push         # push to DEV_REGISTRY
 ```

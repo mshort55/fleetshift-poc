@@ -138,7 +138,7 @@ task test
 ### Generate protobuf code
 
 ```bash
-task generate       # requires buf CLI
+task protogen       # requires buf CLI
 ```
 
 ## Keycloak realm
