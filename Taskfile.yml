@@ -3,15 +3,19 @@ version: '3'
 dotenv: ['.env']
 
 includes:
-  deploy:
+  podman:
     taskfile: ./deploy/podman/Taskfile.yml
     dir: ./deploy/podman
-    aliases: [d]
+    aliases: [pd]
     vars:
       DEPLOY_MODE_INPUT: '{{.DEPLOY_MODE | default ""}}'
       DB_INPUT: '{{.DB | default ""}}'
       AUTH_INPUT: '{{.AUTH | default ""}}'
       DEV_INPUT: '{{.DEV | default ""}}'
+  k8s:
+    taskfile: ./deploy/kubernetes/Taskfile.yml
+    dir: ./deploy/kubernetes
+    aliases: [k]
   keycloak:
     taskfile: ./deploy/keycloak/Taskfile.yml
     dir: ./deploy/keycloak
