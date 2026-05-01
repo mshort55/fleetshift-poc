@@ -12,10 +12,10 @@ includes:
       DB_INPUT: '{{.DB | default ""}}'
       AUTH_INPUT: '{{.AUTH | default ""}}'
       DEV_INPUT: '{{.DEV | default ""}}'
-  k8s:
+  kubernetes:
     taskfile: ./deploy/kubernetes/Taskfile.yml
     dir: ./deploy/kubernetes
-    aliases: [k]
+    aliases: [k8]
   keycloak:
     taskfile: ./deploy/keycloak/Taskfile.yml
     dir: ./deploy/keycloak
