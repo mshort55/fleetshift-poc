@@ -1,6 +1,24 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# ------------------------------------------------------------------
+# FleetShift Kubernetes Teardown
+#
+# Removes all FleetShift resources from an OpenShift cluster.
+# Called by 'task kubernetes:teardown'.
+#
+# Steps:
+#   1. Deletes Kustomize-managed resources (deployment, services, routes, etc.)
+#   2. Deletes the fleetshift namespace
+#
+# Prerequisites:
+#   - 'oc' CLI installed
+#   - Logged into an OpenShift cluster (oc login)
+#
+# Usage:
+#   ./teardown.sh
+# ------------------------------------------------------------------
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 K8S_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 NAMESPACE="fleetshift"

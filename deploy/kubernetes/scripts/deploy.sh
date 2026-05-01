@@ -1,6 +1,29 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# ------------------------------------------------------------------
+# FleetShift Kubernetes Deployment
+#
+# Deploys FleetShift to an OpenShift cluster using Kustomize manifests.
+# Called by 'task kubernetes:deploy'.
+#
+# Steps:
+#   1. Applies Kustomize manifests (namespace, postgres, server, routes)
+#   2. Waits for PostgreSQL to be ready
+#   3. Imports container images from quay.io via ImageStreams
+#   4. Configures image change triggers on the server deployment
+#   5. Waits for the fleetshift-server deployment to be available
+#   6. Runs the auth-setup job (creates OIDC client config)
+#
+# Prerequisites:
+#   - 'oc' CLI installed
+#   - Logged into an OpenShift cluster (oc login)
+#   - Container images pushed to quay.io (task image:build && task image:push)
+#
+# Usage:
+#   ./deploy.sh
+# ------------------------------------------------------------------
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 K8S_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 NAMESPACE="fleetshift"
