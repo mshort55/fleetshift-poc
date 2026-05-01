@@ -30,12 +30,8 @@ PASSWORD="${KC_NEW_PASSWORD:-}"
 GITHUB="${KC_NEW_GITHUB:-}"
 ROLES="${KC_NEW_ROLES:-}"
 
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-NC='\033[0m'
-
-info()  { echo -e "${GREEN}[INFO]${NC} $*"; }
-error() { echo -e "${RED}[ERROR]${NC} $*"; exit 1; }
+info()  { echo "==> $*"; }
+error() { echo "ERROR: $*" >&2; exit 1; }
 
 while [[ $# -gt 0 ]]; do
     case "$1" in

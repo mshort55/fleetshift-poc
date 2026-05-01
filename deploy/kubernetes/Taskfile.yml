@@ -112,6 +112,24 @@ tasks:
       - oc import-image fleetshift-server:latest -n {{.NAMESPACE}} --confirm
       - oc import-image fleetshift-web:latest -n {{.NAMESPACE}} --confirm
 
+  register-redirect:
+    desc: "Register the UI redirect URI in Keycloak (e.g. task kubernetes:register-redirect USER=admin PASSWORD=secret)"
+    preconditions:
+      - sh: command -v oc
+        msg: "'oc' CLI not found."
+      - sh: timeout 5 oc whoami &>/dev/null
+        msg: "Not logged in to OpenShift. Run 'oc login' first."
+      - sh: oc get namespace {{.NAMESPACE}} &>/dev/null
+        msg: "Namespace '{{.NAMESPACE}}' not found."
+      - sh: command -v jq
+        msg: "'jq' not found."
+      - sh: test -n "{{.USER}}"
+        msg: "USER is required. Usage: task kubernetes:register-redirect USER=admin PASSWORD=secret"
+      - sh: test -n "{{.PASSWORD}}"
+        msg: "PASSWORD is required. Usage: task kubernetes:register-redirect USER=admin PASSWORD=secret"
+    cmds:
+      - ./scripts/register-redirect.sh {{.USER}} {{.PASSWORD}}
+
   auth-setup:
     desc: Re-run the auth-setup job (deletes previous job first)
     preconditions:
