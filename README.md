@@ -23,15 +23,15 @@ This repository represents both a **prototype** for a next generation k8s/OpenSh
 ```bash
 cp .env.template .env         # configure (edit as needed)
 task build                    # build all Go binaries
-task deploy:up                # start the stack (demo mode)
-task deploy:cli-setup         # configure fleetctl CLI
+task podman:up                # start the stack (demo mode)
+task podman:cli-setup         # configure fleetctl CLI
 bin/fleetctl auth login       # log in (opens browser)
 ```
 
 For development with hot-reload:
 
 ```bash
-task deploy:dev               # builds from source, mounts source dirs
+task podman:dev               # builds from source, mounts source dirs
 ```
 
 ## Tasks
@@ -60,19 +60,19 @@ task test:e2e-aws       # AWS provision/destroy end-to-end test
 ### Deploy
 
 ```bash
-task deploy:up                        # start the stack (demo mode by default)
-task deploy:dev                       # dev mode — source mounts + hot-reload
-task deploy:down                      # stop containers, preserve data
-task deploy:clean                     # stop + delete all data
-task deploy:rebuild                   # stop → rebuild images → restart
-task deploy:logs                      # follow logs from all containers
-task deploy:logs:fleetshift-server    # tail specific service
-task deploy:status                    # show running containers
-task deploy:cli-setup                 # configure fleetctl for local auth
-task deploy:reset-keycloak            # wipe keycloak state, re-import realm
+task podman:up                        # start the stack (demo mode by default)
+task podman:dev                       # dev mode — source mounts + hot-reload
+task podman:down                      # stop containers, preserve data
+task podman:clean                     # stop + delete all data
+task podman:rebuild                   # stop → rebuild images → restart
+task podman:logs                      # follow logs from all containers
+task podman:logs:fleetshift-server    # tail specific service
+task podman:status                    # show running containers
+task podman:cli-setup                 # configure fleetctl for local auth
+task podman:reset-keycloak            # wipe keycloak state, re-import realm
 ```
 
-Customize with `DEPLOY_MODE`, `DB`, `AUTH` variables (e.g. `task deploy:up DEPLOY_MODE=prod`). The `d:` alias works for all deploy tasks.
+Customize with `DEPLOY_MODE`, `DB`, `AUTH` variables (e.g. `task podman:up DEPLOY_MODE=prod`). The `pd:` alias works for all podman tasks.
 
 ### Generate & Images
 
@@ -93,9 +93,9 @@ Override axes independently with `DB=sqlite|postgres` and `AUTH=local|external`.
 
 ## Dev Mode
 
-`task deploy:dev` builds frontend assets in a container (using `Dockerfile.web` from the UI repo) and starts the Go backend serving everything on `:8085`. No host Node.js or npm required. Requires `UI_DIR` in `.env` pointing to the `fleetshift-user-interface` repo.
+`task podman:dev` builds frontend assets in a container (using `Dockerfile.web` from the UI repo) and starts the Go backend serving everything on `:8085`. No host Node.js or npm required. Requires `UI_DIR` in `.env` pointing to the `fleetshift-user-interface` repo.
 
-After changing Go code, run `task deploy:rebuild` to rebuild and restart. After changing frontend code, run `task deploy:clean` then `task deploy:dev` to rebuild the web assets.
+After changing Go code, run `task podman:rebuild` to rebuild and restart. After changing frontend code, run `task podman:clean` then `task podman:dev` to rebuild the web assets.
 
 ## Configuration
 

@@ -14,7 +14,7 @@ source "$(cd "$(dirname "$0")" && pwd)/common.sh"
 #   6. Deploys a signed ConfigMap to the managed cluster
 #
 # Prerequisites:
-#   - Stack running (task deploy:up)
+#   - Stack running (task podman:up)
 #   - fleetctl built (task build in repo root)
 #
 # Usage:
@@ -53,13 +53,13 @@ fi
 
 log "Checking FleetShift server is reachable"
 if ! curl -sf "http://localhost:${FLEETSHIFT_SERVER_HTTP_PORT:-8085}/v1/deployments" >/dev/null 2>&1; then
-  die "FleetShift server not reachable on :${FLEETSHIFT_SERVER_HTTP_PORT:-8085}. Run 'task deploy:up' first."
+  die "FleetShift server not reachable on :${FLEETSHIFT_SERVER_HTTP_PORT:-8085}. Run 'task podman:up' first."
 fi
 echo "  Server is up."
 
 log "Checking OIDC provider is reachable"
 if ! curl -sf "$OIDC_URL" >/dev/null 2>&1; then
-  die "OIDC provider not reachable at ${OIDC_URL}. Run 'task deploy:up' first."
+  die "OIDC provider not reachable at ${OIDC_URL}. Run 'task podman:up' first."
 fi
 echo "  OIDC provider is up at ${OIDC_URL}"
 

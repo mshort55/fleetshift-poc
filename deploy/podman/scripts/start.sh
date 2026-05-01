@@ -2,7 +2,7 @@
 set -euo pipefail
 source "$(cd "$(dirname "$0")" && pwd)/common.sh"
 
-# Start the FleetShift stack. Called by 'task deploy:up'.
+# Start the FleetShift stack. Called by 'task podman:up'.
 #
 # In demo mode (AUTH=local): generates Keycloak passwords, templates the
 # realm JSON, starts the stack, then registers the github_username user
@@ -124,8 +124,8 @@ if [ "$AUTH_MODE" = "local" ]; then
 fi
 echo ""
 if [ "$AUTH_MODE" = "local" ]; then
-  echo "    Run 'task deploy:cli-setup' to configure fleetctl."
+  echo "    Run 'task podman:cli-setup' to configure fleetctl."
 fi
-echo "    Run 'task deploy:logs' to tail container output."
-echo "    Run 'task deploy:status' to check container health."
+echo "    Run 'task podman:logs' to tail container output."
+echo "    Run 'task podman:status' to check container health."
 echo "    Run 'task --list' to see all available commands."

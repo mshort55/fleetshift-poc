@@ -43,7 +43,7 @@ Set this as `OIDC_CONSOLE_CLIENT_SECRET` in `.env` for the local podman stack, o
 # OpenShift Keycloak (auto-discovers credentials via oc):
 task kc:add-user USERNAME=you@example.com PASSWORD=mypass GITHUB=ghuser ROLES=ops,dev
 
-# Local podman Keycloak (pass admin password from deploy:up output):
+# Local podman Keycloak (pass admin password from podman:up output):
 task kc:add-user USERNAME=you@example.com PASSWORD=mypass GITHUB=ghuser ROLES=ops,dev ADMIN_PASSWORD=<from-output>
 ```
 

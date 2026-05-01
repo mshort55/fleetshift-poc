@@ -2,7 +2,7 @@
 set -euo pipefail
 source "$(cd "$(dirname "$0")" && pwd)/common.sh"
 
-# Stop the FleetShift stack. Called by 'task deploy:down' and 'task deploy:clean'.
+# Stop the FleetShift stack. Called by 'task podman:down' and 'task podman:clean'.
 #
 #   ./stop.sh          — stop containers, preserve volumes
 #   ./stop.sh --clean  — stop containers, delete volumes, remove kind cluster

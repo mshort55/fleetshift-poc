@@ -100,7 +100,7 @@ tasks:
       - podman compose $COMPOSE_FILES --env-file {{.ROOT_DIR}}/.env logs -f
 
   'logs:*':
-    desc: "Tail logs from a specific container (e.g. task deploy:logs:fleetshift-server)"
+    desc: "Tail logs from a specific container (e.g. task podman:logs:fleetshift-server)"
     env: *deploy_env
     vars:
       CONTAINER: '{{index .MATCH 0}}'
@@ -114,7 +114,7 @@ tasks:
       - podman compose $COMPOSE_FILES --env-file {{.ROOT_DIR}}/.env ps
 
   'restart:*':
-    desc: "Restart a specific container (e.g. task deploy:restart:keycloak)"
+    desc: "Restart a specific container (e.g. task podman:restart:keycloak)"
     env: *deploy_env
     vars:
       CONTAINER: '{{index .MATCH 0}}'
@@ -157,4 +157,4 @@ tasks:
       - podman compose $COMPOSE_FILES --env-file {{.ROOT_DIR}}/.env rm -f keycloak
       - podman volume rm fleetshift_keycloak-certs 2>/dev/null || podman volume rm keycloak-certs 2>/dev/null || true
       - rm -f .realm.json
-      - echo "Keycloak state wiped. Run 'task deploy:up' to restart with fresh realm and passwords."
+      - echo "Keycloak state wiped. Run 'task podman:up' to restart with fresh realm and passwords."

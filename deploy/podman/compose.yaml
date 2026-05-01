@@ -1,12 +1,12 @@
 # FleetShift deployment — composable via override files.
 #
 # Usage (via Taskfile):
-#   task deploy:up                         — demo: sqlite + local keycloak
-#   task deploy:up DEPLOY_MODE=prod        — prod: postgres + external oidc
-#   task deploy:up DB=postgres AUTH=local  — override: postgres + local keycloak
+#   task podman:up                         — demo: sqlite + local keycloak
+#   task podman:up DEPLOY_MODE=prod        — prod: postgres + external oidc
+#   task podman:up DB=postgres AUTH=local  — override: postgres + local keycloak
 #
 # Override files are in deploy/podman/overrides/ and layered by scripts/common.sh.
-# Do not use `podman compose` directly — use `task deploy:*` targets instead.
+# Do not use `podman compose` directly — use `task podman:*` targets instead.
 
 # ── Shared fleetshift-server config ──────────────────────────────────
 x-fleetshift-server: &fleetshift-server

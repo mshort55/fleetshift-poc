@@ -127,7 +127,7 @@ kill_tree() {
 
 ensure_down() {
   echo "  Ensuring stack is clean (removing volumes for fresh state)..."
-  task d:clean 2>/dev/null || true
+  task pd:clean 2>/dev/null || true
   rm -f "$STATE_FILE"
 }
 
@@ -167,28 +167,28 @@ if should_run 0; then
 
   echo "0a. Taskfile parses correctly"
   OUTPUT=$(task --list 2>&1)
-  assert_output_contains "$OUTPUT" "deploy:test-attestation" "test-attestation task listed"
-  assert_output_contains "$OUTPUT" "deploy:cli-setup" "cli-setup task listed"
+  assert_output_contains "$OUTPUT" "podman:test-attestation" "test-attestation task listed"
+  assert_output_contains "$OUTPUT" "podman:cli-setup" "cli-setup task listed"
 
   echo ""
   echo "0b. Invalid AUTH rejected"
-  OUTPUT=$(task d:up AUTH=bogus 2>&1 || true)
+  OUTPUT=$(task pd:up AUTH=bogus 2>&1 || true)
   assert_output_contains "$OUTPUT" "AUTH must be local or external" "AUTH=bogus rejected"
 
   echo ""
   echo "0c. Invalid DB rejected"
-  OUTPUT=$(task d:up DB=mongo 2>&1 || true)
+  OUTPUT=$(task pd:up DB=mongo 2>&1 || true)
   assert_output_contains "$OUTPUT" "DB must be sqlite or postgres" "DB=mongo rejected"
 
   echo ""
   echo "0d. reset-keycloak rejected with external auth"
-  OUTPUT=$(task d:reset-keycloak AUTH=external 2>&1 || true)
+  OUTPUT=$(task pd:reset-keycloak AUTH=external 2>&1 || true)
   assert_output_contains "$OUTPUT" "reset-keycloak only works with AUTH=local" "reset-keycloak blocked for external"
 
   echo ""
   echo "0e. No state file — defaults are correct"
   rm -f "$STATE_FILE"
-  OUTPUT=$(task d:up --dry 2>&1)
+  OUTPUT=$(task pd:up --dry 2>&1)
   assert_output_contains "$OUTPUT" "AUTH=local" "default AUTH=local"
   assert_output_contains "$OUTPUT" "DB=sqlite" "default DB=sqlite"
 fi
@@ -202,7 +202,7 @@ if should_run 1; then
   ensure_down
 
   echo "1a. Starting default stack..."
-  task d:up
+  task pd:up
   echo ""
 
   echo "1b. State file written"
@@ -212,7 +212,7 @@ if should_run 1; then
 
   echo ""
   echo "1c. cli-setup picks up local auth (no args)"
-  task d:cli-setup
+  task pd:cli-setup
   assert_file_exists "$AUTH_JSON" "auth.json created"
   assert_json_field "$AUTH_JSON" ".issuer_url" "http://keycloak:8180/auth/realms/fleetshift" "issuer_url is local keycloak"
   assert_json_field "$AUTH_JSON" ".client_id" "fleetshift-cli" "client_id correct"
@@ -220,12 +220,12 @@ if should_run 1; then
 
   echo ""
   echo "1d. status shows correct containers (no args)"
-  OUTPUT=$(task d:status 2>&1)
+  OUTPUT=$(task pd:status 2>&1)
   assert_output_contains "$OUTPUT" "keycloak" "keycloak container running (local auth)"
 
   echo ""
   echo "1e. logs works (no args) — checking for 3 seconds"
-  task d:logs &
+  task pd:logs &
   LOGS_PID=$!
   sleep 3
   kill_tree "$LOGS_PID"
@@ -234,12 +234,12 @@ if should_run 1; then
 
   echo ""
   echo "1f. reset-keycloak allowed with local auth (no args)"
-  OUTPUT=$(task d:reset-keycloak --dry 2>&1)
+  OUTPUT=$(task pd:reset-keycloak --dry 2>&1)
   assert_output_not_contains "$OUTPUT" "precondition not met" "reset-keycloak allowed for local"
 
   echo ""
   echo "1g. Stopping stack"
-  task d:down
+  task pd:down
   assert_file_missing "$STATE_FILE" "state file removed by d:down"
 fi
 
@@ -252,7 +252,7 @@ if should_run 2; then
   ensure_down
 
   echo "2a. Starting stack with AUTH=external..."
-  task d:up AUTH=external
+  task pd:up AUTH=external
   echo ""
 
   echo "2b. State file written"
@@ -261,7 +261,7 @@ if should_run 2; then
 
   echo ""
   echo "2c. cli-setup picks up external auth (NO args)"
-  task d:cli-setup
+  task pd:cli-setup
   ISSUER=$(jq -r .issuer_url "$AUTH_JSON")
   if echo "$ISSUER" | grep -q "keycloak:8180"; then
     fail "issuer_url is local keycloak — state file not working"
@@ -271,22 +271,22 @@ if should_run 2; then
 
   echo ""
   echo "2d. status uses correct compose files (NO args)"
-  OUTPUT=$(task d:status 2>&1)
+  OUTPUT=$(task pd:status 2>&1)
   assert_output_not_contains "$OUTPUT" "keycloak" "keycloak NOT running (external auth)"
 
   echo ""
   echo "2e. reset-keycloak blocked (NO args — reads state AUTH=external)"
-  OUTPUT=$(task d:reset-keycloak 2>&1 || true)
+  OUTPUT=$(task pd:reset-keycloak 2>&1 || true)
   assert_output_contains "$OUTPUT" "reset-keycloak only works with AUTH=local" "reset-keycloak blocked via state file"
 
   echo ""
   echo "2f. CLI override takes precedence over state file"
-  OUTPUT=$(task d:reset-keycloak --dry AUTH=local 2>&1 || true)
+  OUTPUT=$(task pd:reset-keycloak --dry AUTH=local 2>&1 || true)
   assert_output_not_contains "$OUTPUT" "precondition not met" "CLI AUTH=local overrides state AUTH=external"
 
   echo ""
   echo "2g. Stopping stack"
-  task d:down
+  task pd:down
   assert_file_missing "$STATE_FILE" "state file removed by d:down"
 fi
 
@@ -299,7 +299,7 @@ if should_run 3; then
   ensure_down
 
   echo "3a. Starting stack with DB=postgres..."
-  task d:up DB=postgres
+  task pd:up DB=postgres
   echo ""
 
   echo "3b. State file written"
@@ -308,13 +308,13 @@ if should_run 3; then
 
   echo ""
   echo "3c. status shows correct containers (NO args)"
-  OUTPUT=$(task d:status 2>&1)
+  OUTPUT=$(task pd:status 2>&1)
   assert_output_contains "$OUTPUT" "postgres" "postgres container running"
   assert_output_contains "$OUTPUT" "keycloak" "keycloak container running"
 
   echo ""
   echo "3d. Stopping stack"
-  task d:down
+  task pd:down
 fi
 
 # ──────────────────────────────────────────────────────────────
@@ -326,7 +326,7 @@ if should_run 4; then
   ensure_down
 
   echo "4a. Starting stack with AUTH=external DB=postgres..."
-  task d:up AUTH=external DB=postgres
+  task pd:up AUTH=external DB=postgres
   echo ""
 
   echo "4b. State file written"
@@ -335,7 +335,7 @@ if should_run 4; then
 
   echo ""
   echo "4c. cli-setup picks up external (NO args)"
-  task d:cli-setup
+  task pd:cli-setup
   ISSUER=$(jq -r .issuer_url "$AUTH_JSON")
   if echo "$ISSUER" | grep -q "keycloak:8180"; then
     fail "issuer_url is local — state not working"
@@ -345,12 +345,12 @@ if should_run 4; then
 
   echo ""
   echo "4d. status shows correct containers (NO args)"
-  OUTPUT=$(task d:status 2>&1)
+  OUTPUT=$(task pd:status 2>&1)
   assert_output_contains "$OUTPUT" "postgres" "postgres container running"
 
   echo ""
   echo "4e. Stopping stack"
-  task d:down
+  task pd:down
 fi
 
 # ──────────────────────────────────────────────────────────────
@@ -362,7 +362,7 @@ if should_run 5; then
   ensure_down
 
   echo "5a. Starting stack in prod mode..."
-  task d:up DEPLOY_MODE=prod
+  task pd:up DEPLOY_MODE=prod
   echo ""
 
   echo "5b. State file shows prod defaults"
@@ -371,7 +371,7 @@ if should_run 5; then
 
   echo ""
   echo "5c. cli-setup uses external (NO args)"
-  task d:cli-setup
+  task pd:cli-setup
   ISSUER=$(jq -r .issuer_url "$AUTH_JSON")
   if echo "$ISSUER" | grep -q "keycloak:8180"; then
     fail "issuer_url is local — prod mode not resolving external"
@@ -381,7 +381,7 @@ if should_run 5; then
 
   echo ""
   echo "5d. Stopping stack"
-  task d:down
+  task pd:down
 fi
 
 # ──────────────────────────────────────────────────────────────
@@ -393,12 +393,12 @@ if should_run 6; then
   ensure_down
 
   echo "6a. Starting with AUTH=external..."
-  task d:up AUTH=external
+  task pd:up AUTH=external
   assert_file_contains "$STATE_FILE" "^AUTH=external$" "initial state: AUTH=external"
 
   echo ""
   echo "6b. Rebuilding (stop + up cycle)..."
-  task d:rebuild
+  task pd:rebuild
   echo ""
 
   echo "6c. State survived rebuild"
@@ -406,7 +406,7 @@ if should_run 6; then
 
   echo ""
   echo "6d. cli-setup still works without args"
-  task d:cli-setup
+  task pd:cli-setup
   ISSUER=$(jq -r .issuer_url "$AUTH_JSON")
   if echo "$ISSUER" | grep -q "keycloak:8180"; then
     fail "issuer_url is local — rebuild broke state"
@@ -416,7 +416,7 @@ if should_run 6; then
 
   echo ""
   echo "6e. Stopping stack"
-  task d:down
+  task pd:down
 fi
 
 # ──────────────────────────────────────────────────────────────
@@ -428,12 +428,12 @@ if should_run 7; then
   ensure_down
 
   echo "7a. Starting with overrides..."
-  task d:up AUTH=external DB=postgres
+  task pd:up AUTH=external DB=postgres
   assert_file_exists "$STATE_FILE" "state file exists"
 
   echo ""
   echo "7b. Cleaning..."
-  task d:clean
+  task pd:clean
   assert_file_missing "$STATE_FILE" "state file removed by d:clean"
 fi
 
@@ -449,7 +449,7 @@ if should_run 8; then
     skip "fleetctl not built — run 'task build' first"
   else
     echo "8a. Starting default stack..."
-    task d:up
+    task pd:up
     echo ""
 
     echo "8b. Running test-attestation (local auth)..."
@@ -462,12 +462,12 @@ if should_run 8; then
     echo ""
     pause_for_user "Ready to start local auth attestation?"
 
-    task d:test-attestation
+    task pd:test-attestation
     pass "local auth attestation completed"
 
     echo ""
     echo "8c. Cleaning up for next attestation..."
-    task d:clean
+    task pd:clean
   fi
 fi
 
@@ -483,7 +483,7 @@ if should_run 9; then
     skip "fleetctl not built — run 'task build' first"
   else
     echo "9a. Starting stack with AUTH=external..."
-    task d:up AUTH=external
+    task pd:up AUTH=external
     echo ""
 
     echo "9b. Running test-attestation (external auth, NO args — reads state)..."
@@ -493,12 +493,12 @@ if should_run 9; then
     echo ""
     pause_for_user "Ready to start external auth attestation?"
 
-    task d:test-attestation -- --reuse-key
+    task pd:test-attestation -- --reuse-key
     pass "external auth attestation completed"
 
     echo ""
     echo "9c. Cleaning up..."
-    task d:clean
+    task pd:clean
   fi
 fi
 
@@ -522,7 +522,7 @@ if should_run 10; then
   else
     echo "10a. Starting in dev mode (builds from source)..."
     DEV_LOG=$(mktemp)
-    task d:dev 2>&1 | tee "$DEV_LOG"
+    task pd:dev 2>&1 | tee "$DEV_LOG"
     echo ""
 
     echo "10b. State file persists DEV=true"
@@ -541,12 +541,12 @@ if should_run 10; then
 
     echo ""
     echo "10d. Follow-up status works via state file (no args)"
-    OUTPUT=$(task d:status 2>&1)
+    OUTPUT=$(task pd:status 2>&1)
     assert_output_contains "$OUTPUT" "fleetshift-server" "status shows server container"
 
     echo ""
     echo "10e. Stopping stack"
-    task d:down
+    task pd:down
     assert_file_missing "$STATE_FILE" "state file removed by d:down"
   fi
 fi

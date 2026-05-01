@@ -7,7 +7,7 @@ ROOT_DIR="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 # Add a user to the fleetshift realm with a specific GitHub username.
 #
 # Local usage (podman deployment):
-#   ./add-user.sh --admin-password <from task deploy:up output> \
+#   ./add-user.sh --admin-password <from task podman:up output> \
 #     --username mshort@redhat.com --password mypass --github mshort55
 #
 # External usage (OpenShift Keycloak, you need to be connected to the OCP cluster via oc cli):
