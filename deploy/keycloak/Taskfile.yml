@@ -3,13 +3,6 @@ version: '3'
 tasks:
   deploy:
     desc: Deploy Keycloak to OpenShift (cert-manager, RHBK, PostgreSQL, realm import)
-    preconditions:
-      - sh: command -v oc
-        msg: "'oc' CLI not found."
-      - sh: command -v jq
-        msg: "'jq' not found."
-      - sh: timeout 5 oc whoami &>/dev/null
-        msg: "Not logged in to OpenShift. Run 'oc login' first."
     requires:
       vars: [ACME_EMAIL]
     vars:
@@ -26,10 +19,6 @@ tasks:
     desc: Tear down Keycloak deployment from OpenShift (interactive)
     interactive: true
     preconditions:
-      - sh: command -v oc
-        msg: "'oc' CLI not found."
-      - sh: timeout 5 oc whoami &>/dev/null
-        msg: "Not logged in to OpenShift. Run 'oc login' first."
       - sh: oc get namespace keycloak-prod &>/dev/null
         msg: "Namespace 'keycloak-prod' not found — Keycloak does not appear to be deployed on this cluster."
     cmds:
@@ -37,13 +26,6 @@ tasks:
 
   add-base-domain:
     desc: Add a cluster's console redirect URI to the ocp-console Keycloak client
-    preconditions:
-      - sh: command -v oc
-        msg: "'oc' CLI not found."
-      - sh: timeout 5 oc whoami &>/dev/null
-        msg: "Not logged in to OpenShift. Run 'oc login' first."
-      - sh: oc get namespace keycloak-prod &>/dev/null
-        msg: "Namespace 'keycloak-prod' not found — Keycloak does not appear to be deployed on this cluster."
     requires:
       vars: [BASE_DOMAIN, CLUSTER_NAME]
     cmds:
@@ -51,9 +33,6 @@ tasks:
 
   add-user:
     desc: Add or update a user in the FleetShift Keycloak realm
-    preconditions:
-      - sh: command -v jq
-        msg: "'jq' not found."
     requires:
       vars: [USERNAME, PASSWORD, GITHUB]
     vars:
