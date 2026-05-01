@@ -6,11 +6,20 @@ resources:
   - postgres/statefulset.yaml
   - postgres/service.yaml
   - postgres/pvc.yaml
-  - postgres/secret.yaml
   - fleetshift-server/deployment.yaml
   - fleetshift-server/service.yaml
   - fleetshift-server/route-http.yaml
   - fleetshift-server/route-grpc.yaml
-  - fleetshift-server/configmap.yaml
   - fleetshift-server/imagestreams.yaml
   - auth-setup/job.yaml
+configMapGenerator:
+  - name: fleetshift-server-config
+    envs:
+      - config.env
+secretGenerator:
+  - name: postgres-credentials
+    envs:
+      - secrets.env
+    type: Opaque
+generatorOptions:
+  disableNameSuffixHash: true

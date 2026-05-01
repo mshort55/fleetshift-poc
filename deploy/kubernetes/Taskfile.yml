@@ -37,16 +37,15 @@ tasks:
         msg: "Namespace '{{.NAMESPACE}}' not found."
     cmds:
       - oc get pods -n {{.NAMESPACE}}
-      - echo ""
       - oc get svc -n {{.NAMESPACE}}
-      - echo ""
       - oc get routes -n {{.NAMESPACE}}
       - |
-        echo ""
         TAG=$(oc get imagestream fleetshift-server -n {{.NAMESPACE}} -o jsonpath='{.spec.tags[0].from.name}' 2>/dev/null)
         DEFAULT="quay.io/stolostron/fleetshift-server:latest"
         if [ "$TAG" != "$DEFAULT" ] && [ -n "$TAG" ]; then
           echo "IMAGE OVERRIDE ACTIVE: $TAG"
+        else
+          echo "NO IMAGE OVERRIDES"
         fi
 
   logs:
@@ -101,8 +100,8 @@ tasks:
       - sh: oc get namespace {{.NAMESPACE}} &>/dev/null
         msg: "Namespace '{{.NAMESPACE}}' not found."
     cmds:
-      - oc tag quay.io/stolostron/fleetshift-server:latest fleetshift-server:latest -n {{.NAMESPACE}}
-      - echo "ImageStream fleetshift-server:latest → quay.io/stolostron/fleetshift-server:latest"
+      - oc tag --scheduled quay.io/stolostron/fleetshift-server:latest fleetshift-server:latest -n {{.NAMESPACE}}
+      - echo "ImageStream fleetshift-server:latest → quay.io/stolostron/fleetshift-server:latest (scheduled import restored)"
 
   import-images:
     desc: Force reimport of images from quay.io
