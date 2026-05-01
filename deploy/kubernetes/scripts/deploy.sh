@@ -109,11 +109,13 @@ fi
 # --- Summary ---
 echo ""
 echo "=== Deployment Complete ==="
-HTTP_ROUTE=$(oc get route fleetshift -n "${NAMESPACE}" -o jsonpath='{.spec.host}' 2>/dev/null || echo "<pending>")
-GRPC_ROUTE=$(oc get route fleetshift-grpc -n "${NAMESPACE}" -o jsonpath='{.spec.host}' 2>/dev/null || echo "<pending>")
+HTTP_ROUTE=$(oc get route web -n "${NAMESPACE}" -o jsonpath='{.spec.host}' 2>/dev/null || echo "<pending>")
+GRPC_ROUTE=$(oc get route grpc -n "${NAMESPACE}" -o jsonpath='{.spec.host}' 2>/dev/null || echo "<pending>")
 echo "  Frontend + API: https://${HTTP_ROUTE}"
 echo "  gRPC:           ${GRPC_ROUTE}:443"
 echo ""
-echo "  Force image update:  oc import-image fleetshift-server:latest -n ${NAMESPACE} --confirm"
-echo "  View logs:           oc logs -n ${NAMESPACE} deployment/fleetshift-server"
-echo "  Tear down:           ${SCRIPT_DIR}/teardown.sh"
+echo "  Status:         task kubernetes:status"
+echo "  View logs:      task kubernetes:logs"
+echo "  Image override: task kubernetes:set-image TAG=<tag>"
+echo "  Force reimport: task kubernetes:import-images"
+echo "  Tear down:      task kubernetes:teardown"

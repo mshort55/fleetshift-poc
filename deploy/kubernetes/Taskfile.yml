@@ -36,16 +36,12 @@ tasks:
       - sh: oc get namespace {{.NAMESPACE}} &>/dev/null
         msg: "Namespace '{{.NAMESPACE}}' not found."
     cmds:
-      - oc get pods -n {{.NAMESPACE}}
-      - oc get svc -n {{.NAMESPACE}}
-      - oc get routes -n {{.NAMESPACE}}
+      - oc get all -n {{.NAMESPACE}}
       - |
         TAG=$(oc get imagestream fleetshift-server -n {{.NAMESPACE}} -o jsonpath='{.spec.tags[0].from.name}' 2>/dev/null)
         DEFAULT="quay.io/stolostron/fleetshift-server:latest"
         if [ "$TAG" != "$DEFAULT" ] && [ -n "$TAG" ]; then
           echo "IMAGE OVERRIDE ACTIVE: $TAG"
-        else
-          echo "NO IMAGE OVERRIDES"
         fi
 
   logs:
