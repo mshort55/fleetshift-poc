@@ -16,26 +16,11 @@ if ! oc get namespace "${NAMESPACE}" &>/dev/null; then
   exit 0
 fi
 
-MODE="${1:-kustomize}"
+echo "Removing resources via Kustomize..."
+oc delete -k "${K8S_DIR}" --ignore-not-found=true
 
-case "${MODE}" in
-  kustomize)
-    echo "Removing resources via Kustomize..."
-    oc delete -k "${K8S_DIR}" --ignore-not-found=true
-    echo "Deleting namespace..."
-    oc delete namespace "${NAMESPACE}" --ignore-not-found=true
-    ;;
-  namespace)
-    echo "Deleting entire namespace (all resources)..."
-    oc delete namespace "${NAMESPACE}"
-    ;;
-  *)
-    echo "Usage: $0 [kustomize|namespace]"
-    echo "  kustomize (default): delete Kustomize resources, then namespace"
-    echo "  namespace: delete entire namespace at once"
-    exit 1
-    ;;
-esac
+echo "Deleting namespace..."
+oc delete namespace "${NAMESPACE}" --ignore-not-found=true
 
 echo ""
 echo "=== Teardown Complete ==="
