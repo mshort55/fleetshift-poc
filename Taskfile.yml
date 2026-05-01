@@ -108,16 +108,16 @@ tasks:
       - buf generate --template buf.gen.ocp.yaml --path proto/ocp/v1
 
   image:build:
-    desc: Build fleetshift-server container images (production + local-podman)
+    desc: Build fleetshift-server container images
     preconditions:
       - sh: test -n "{{.DEV_REGISTRY}}"
         msg: "DEV_REGISTRY is not set. Set it in .env (e.g. DEV_REGISTRY=quay.io/yourusername)"
     cmds:
-      - podman build --target production -t {{.DEV_REGISTRY}}/fleetshift-server:{{.IMAGE_TAG}} .
-      - podman build --target local-podman -t {{.DEV_REGISTRY}}/fleetshift-server-local:{{.IMAGE_TAG}} .
+      - podman build -t fleetshift-server -t {{.DEV_REGISTRY}}/fleetshift-server:{{.IMAGE_TAG}} .
+      - podman build -f Dockerfile.local -t {{.DEV_REGISTRY}}/fleetshift-server-local:{{.IMAGE_TAG}} .
 
   image:push:
-    desc: Push server images to DEV_REGISTRY (production + local-podman)
+    desc: Push server images to DEV_REGISTRY
     preconditions:
       - sh: test -n "{{.DEV_REGISTRY}}"
         msg: "DEV_REGISTRY is not set. Set it in .env (e.g. DEV_REGISTRY=quay.io/yourusername)"

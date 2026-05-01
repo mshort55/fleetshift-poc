@@ -20,8 +20,7 @@ COPY proto/ ./proto/
 RUN cd fleetshift-server && CGO_ENABLED=0 go build -o /bin/fleetshift ./cmd/fleetshift
 RUN cd fleetshift-cli && CGO_ENABLED=0 go build -o /bin/fleetctl ./cmd/fleetctl
 
-# ── Shared runtime base ─────────────────────────────────────
-FROM debian:bookworm-slim AS runtime-base
+FROM debian:bookworm-slim
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates curl \
@@ -34,6 +33,3 @@ EXPOSE 50051 8085
 
 ENTRYPOINT ["fleetshift"]
 CMD ["serve", "--http-addr", ":8085", "--grpc-addr", ":50051", "--db", "/data/fleetshift.db", "--log-level", "debug"]
-
-# ── Production target (lean) ────────────────────────────────
-FROM runtime-base AS production

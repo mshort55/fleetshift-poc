@@ -55,6 +55,8 @@ fi
 echo "==> Starting FleetShift stack (db=$DB_BACKEND, auth=$AUTH_MODE)"
 UP_ARGS=(-d)
 if [ "${DEV:-}" = "true" ] || [ "${BUILD:-}" = "true" ]; then
+  echo "==> Building base fleetshift-server image"
+  podman build -t fleetshift-server "$ROOT_DIR"
   UP_ARGS+=(--build)
   podman volume rm -f web-assets podman_web-assets 2>/dev/null || true
 fi
