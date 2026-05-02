@@ -8,11 +8,13 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
 	"net"
 	"net/http"
 	"net/url"
 	"os"
 	"os/signal"
+	"slices"
 	"strconv"
 	"strings"
 	"syscall"
@@ -149,6 +151,7 @@ func runServe(ctx context.Context, f *serveFlags) error {
 	}
 
 	enabledAddons := parseAddons(f.addons)
+	logger.Info("enabled addons", "addons", slices.Sorted(maps.Keys(enabledAddons)))
 
 	if enabledAddons["kind"] {
 		kindOpts := []kindaddon.AgentOption{
@@ -180,7 +183,6 @@ func runServe(ctx context.Context, f *serveFlags) error {
 			kindOpts...,
 		)
 		router.Register(kindaddon.TargetType, kindAgent)
-		logger.Info("addon enabled", "addon", "kind")
 	}
 
 	// --- OCP agent ---

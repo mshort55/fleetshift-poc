@@ -48,6 +48,13 @@ spec:
               containerPort: 8085
             - name: grpc
               containerPort: 50051
+          livenessProbe:
+            httpGet:
+              path: /v1/deployments
+              port: 8085
+            initialDelaySeconds: 15
+            periodSeconds: 10
+            failureThreshold: 3
           readinessProbe:
             httpGet:
               path: /v1/deployments
