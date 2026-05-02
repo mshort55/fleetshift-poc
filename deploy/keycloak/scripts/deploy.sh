@@ -57,6 +57,60 @@ wait_for_csv() {
     return 1
 }
 
+render_template() {
+    local src="$1"
+    local out="$2"
+
+    sed \
+        -e "s|ACME_EMAIL|${ACME_EMAIL}|g" \
+        -e "s|KEYCLOAK_HOST|${KEYCLOAK_HOST}|g" \
+        "${src}" > "${out}"
+}
+
+apply_template() {
+    local src="$1"
+    local namespace="${2:-}"
+    local tmp
+
+    tmp="$(mktemp)"
+    render_template "${src}" "${tmp}"
+
+    if [[ -n "${namespace}" ]]; then
+        oc apply -n "${namespace}" -f "${tmp}"
+    else
+        oc apply -f "${tmp}"
+    fi
+
+    rm -f "${tmp}"
+}
+
+wait_for_cert_manager_webhook_trust() {
+    local validation_manifest="$1"
+    local timeout="${2:-180}"
+    local elapsed=0
+    local ca_bundle=""
+    local tmp
+
+    tmp="$(mktemp)"
+    render_template "${validation_manifest}" "${tmp}"
+
+    while [[ $elapsed -lt $timeout ]]; do
+        ca_bundle="$(oc get validatingwebhookconfiguration cert-manager-webhook \
+            -o jsonpath='{.webhooks[0].clientConfig.caBundle}' 2>/dev/null || true)"
+
+        if [[ -n "${ca_bundle}" ]] && oc apply --dry-run=server -f "${tmp}" >/dev/null 2>&1; then
+            rm -f "${tmp}"
+            return 0
+        fi
+
+        sleep 5
+        elapsed=$((elapsed + 5))
+    done
+
+    rm -f "${tmp}"
+    return 1
+}
+
 # --- Step 1: Preflight checks ---
 info "Checking prerequisites..."
 command -v oc &>/dev/null || error "'oc' CLI not found in PATH."
@@ -126,11 +180,12 @@ fi
 
 if [[ "$CERT_READY" != "true" && -n "$ACME_EMAIL" ]]; then
     info "No backup found. Requesting certificate from Let's Encrypt..."
-    sed "s|ACME_EMAIL|${ACME_EMAIL}|g" "${KEYCLOAK_DIR}/manifests/cluster-issuer.yaml" \
-        | oc apply -f -
+    info "Waiting for cert-manager webhook CA injection and API trust..."
+    wait_for_cert_manager_webhook_trust "${KEYCLOAK_DIR}/manifests/cluster-issuer.yaml" 180 || \
+        error "Timed out waiting for cert-manager webhook trust to become ready."
 
-    sed "s|KEYCLOAK_HOST|${KEYCLOAK_HOST}|g" "${KEYCLOAK_DIR}/manifests/certificate.yaml" \
-        | oc apply -n "${NAMESPACE}" -f -
+    apply_template "${KEYCLOAK_DIR}/manifests/cluster-issuer.yaml"
+    apply_template "${KEYCLOAK_DIR}/manifests/certificate.yaml" "${NAMESPACE}"
 
     info "Waiting for TLS certificate to be issued (up to 3 minutes)..."
     cert_timeout=180

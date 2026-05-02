@@ -79,3 +79,20 @@ tasks:
       - oc apply -f auth-setup/job.yaml -n {{.NAMESPACE}}
       - echo "Waiting for auth-setup to complete..."
       - oc wait -n {{.NAMESPACE}} job/auth-setup --for=condition=Complete --timeout=120s
+
+  'grpc-route-cert:deploy':
+    desc: "Deploy a cert-manager-backed trusted certificate for the grpc Route"
+    preconditions:
+      - sh: test -n "{{.ACME_EMAIL}}"
+        msg: "ACME_EMAIL is required. Usage: task kubernetes:grpc-route-cert:deploy ACME_EMAIL=you@example.com"
+    cmds:
+      - >-
+        ./grpc-route-cert/scripts/deploy.sh
+        --acme-email "{{.ACME_EMAIL}}"
+        {{if eq (.FRESH_CERT | default "false") "true"}}--fresh-cert{{end}}
+
+  'grpc-route-cert:teardown':
+    desc: Remove the cert-manager-backed certificate integration from the grpc Route
+    interactive: true
+    cmds:
+      - ./grpc-route-cert/scripts/teardown.sh
