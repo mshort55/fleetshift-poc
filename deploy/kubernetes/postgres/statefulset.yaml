@@ -1,0 +1,64 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: postgres
+spec:
+  serviceName: postgres
+  replicas: 1
+  selector:
+    matchLabels:
+      app: postgres
+  template:
+    metadata:
+      labels:
+        app: postgres
+    spec:
+      initContainers:
+        - name: init-pgdata
+          image: docker.io/library/postgres:18
+          command: ["sh", "-c", "mkdir -p /var/lib/postgresql/data"]
+          volumeMounts:
+            - name: postgres-data
+              mountPath: /var/lib/postgresql
+      containers:
+        - name: postgres
+          image: docker.io/library/postgres:18
+          ports:
+            - containerPort: 5432
+          env:
+            - name: POSTGRES_USER_FILE
+              value: /run/secrets/fleetshift/postgres-user
+            - name: POSTGRES_PASSWORD_FILE
+              value: /run/secrets/fleetshift/postgres-password
+            - name: POSTGRES_DB_FILE
+              value: /run/secrets/fleetshift/postgres-db
+          volumeMounts:
+            - name: pg-credentials
+              mountPath: /run/secrets/fleetshift
+              readOnly: true
+            - name: postgres-data
+              mountPath: /var/lib/postgresql
+          readinessProbe:
+            exec:
+              command: ["pg_isready", "-U", "fleetshift"]
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+      volumes:
+        - name: pg-credentials
+          secret:
+            secretName: postgres-credentials
+            items:
+              - key: POSTGRES_USER
+                path: postgres-user
+              - key: POSTGRES_PASSWORD
+                path: postgres-password
+              - key: POSTGRES_DB
+                path: postgres-db
+            defaultMode: 0400
+        - name: postgres-data
+          persistentVolumeClaim:
+            claimName: postgres-data

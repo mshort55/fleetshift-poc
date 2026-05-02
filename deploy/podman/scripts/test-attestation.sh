@@ -14,8 +14,8 @@ source "$(cd "$(dirname "$0")" && pwd)/common.sh"
 #   6. Deploys a signed ConfigMap to the managed cluster
 #
 # Prerequisites:
-#   - Stack running (task deploy:up)
-#   - fleetctl built (task build in repo root)
+#   - Stack running (task podman:up)
+#   - fleetctl built (task build:all in repo root)
 #
 # Usage:
 #   ./test-attestation.sh
@@ -40,7 +40,7 @@ die()  { printf '\033[1;31mERROR: %s\033[0m\n' "$*" >&2; exit 1; }
 # --- Pre-flight checks -----------------------------------------------
 
 if [ ! -f "$FLEETCTL" ]; then
-  die "fleetctl not found at ${FLEETCTL}. Run 'task build' in the repo root."
+  die "fleetctl not found at ${FLEETCTL}. Run 'task build:all' in the repo root."
 elif [ ! -x "$FLEETCTL" ]; then
   die "fleetctl at ${FLEETCTL} is not executable. Run: chmod +x ${FLEETCTL}"
 fi
@@ -53,13 +53,13 @@ fi
 
 log "Checking FleetShift server is reachable"
 if ! curl -sf "http://localhost:${FLEETSHIFT_SERVER_HTTP_PORT:-8085}/v1/deployments" >/dev/null 2>&1; then
-  die "FleetShift server not reachable on :${FLEETSHIFT_SERVER_HTTP_PORT:-8085}. Run 'task deploy:up' first."
+  die "FleetShift server not reachable on :${FLEETSHIFT_SERVER_HTTP_PORT:-8085}. Run 'task podman:up' first."
 fi
 echo "  Server is up."
 
 log "Checking OIDC provider is reachable"
 if ! curl -sf "$OIDC_URL" >/dev/null 2>&1; then
-  die "OIDC provider not reachable at ${OIDC_URL}. Run 'task deploy:up' first."
+  die "OIDC provider not reachable at ${OIDC_URL}. Run 'task podman:up' first."
 fi
 echo "  OIDC provider is up at ${OIDC_URL}"
 

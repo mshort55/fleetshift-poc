@@ -21,8 +21,8 @@ CLIENT_ID="ocp-console"
 BASE_DOMAIN=""
 CLUSTER_NAME=""
 
-log()  { printf '\033[1;34m>>> %s\033[0m\n' "$*"; }
-die()  { printf '\033[1;31mERROR: %s\033[0m\n' "$*" >&2; exit 1; }
+log()  { echo "==> $*"; }
+die()  { echo "ERROR: $*" >&2; exit 1; }
 
 while [[ $# -gt 0 ]]; do
   case "$1" in

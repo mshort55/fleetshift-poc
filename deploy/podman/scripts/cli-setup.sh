@@ -2,7 +2,7 @@
 set -euo pipefail
 source "$(cd "$(dirname "$0")" && pwd)/common.sh"
 
-# Configure fleetctl CLI for the current deployment. Called by 'task deploy:cli-setup'.
+# Configure fleetctl CLI for the current deployment. Called by 'task podman:cli-setup'.
 #
 # Fetches OIDC discovery and writes auth config to ~/.config/fleetshift/auth.json.
 # Env vars (OIDC_URL, OIDC_CLIENT_ID, etc.) are set by Taskfile.
@@ -16,7 +16,7 @@ DISCOVERY_URL="${ISSUER_URL}/.well-known/openid-configuration"
 echo "==> Fetching OIDC discovery from ${DISCOVERY_URL}"
 DISCOVERY=$(curl -sf "$DISCOVERY_URL") || {
   echo "ERROR: Could not reach OIDC provider at ${DISCOVERY_URL}" >&2
-  echo "Is the stack running? Try 'task deploy:up' first." >&2
+  echo "Is the stack running? Try 'task podman:up' first." >&2
   exit 1
 }
 

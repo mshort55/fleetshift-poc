@@ -1,0 +1,14 @@
+FROM fleetshift-server
+
+ARG KIND_VERSION=v0.31.0
+ARG KUBECTL_VERSION=v1.33.0
+
+RUN set -eux; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends podman; \
+    rm -rf /var/lib/apt/lists/*; \
+    ARCH="$(dpkg --print-architecture)"; \
+    curl -Lo /usr/local/bin/kind "https://kind.sigs.k8s.io/dl/${KIND_VERSION}/kind-linux-${ARCH}"; \
+    chmod +x /usr/local/bin/kind; \
+    curl -Lo /usr/local/bin/kubectl "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/${ARCH}/kubectl"; \
+    chmod +x /usr/local/bin/kubectl

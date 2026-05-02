@@ -3,15 +3,19 @@ version: '3'
 dotenv: ['.env']
 
 includes:
-  deploy:
+  podman:
     taskfile: ./deploy/podman/Taskfile.yml
     dir: ./deploy/podman
-    aliases: [d]
+    aliases: [pd]
     vars:
       DEPLOY_MODE_INPUT: '{{.DEPLOY_MODE | default ""}}'
       DB_INPUT: '{{.DB | default ""}}'
       AUTH_INPUT: '{{.AUTH | default ""}}'
       DEV_INPUT: '{{.DEV | default ""}}'
+  kubernetes:
+    taskfile: ./deploy/kubernetes/Taskfile.yml
+    dir: ./deploy/kubernetes
+    aliases: [k8s]
   keycloak:
     taskfile: ./deploy/keycloak/Taskfile.yml
     dir: ./deploy/keycloak
@@ -22,12 +26,11 @@ vars:
 
 tasks:
   default:
-    desc: Show available tasks
     silent: true
     cmds:
       - task --list
 
-  build:
+  build:all:
     desc: Build all binaries
     deps: [build:server, build:cli, build:ocp-engine]
 
@@ -55,7 +58,7 @@ tasks:
     cmds:
       - go build -o ../bin/ocp-engine .
 
-  test:
+  test:all:
     desc: Run unit tests for all modules
     deps: [test:server, test:cli, test:ocp-engine]
 
@@ -79,7 +82,7 @@ tasks:
 
   test:e2e:
     desc: Run end-to-end tests (requires .env and interactive auth)
-    deps: [build]
+    deps: [build:all]
     dir: e2e
     preconditions:
       - sh: test -f {{.ROOT_DIR}}/.env
@@ -89,7 +92,7 @@ tasks:
 
   test:e2e-aws:
     desc: Run AWS provision/destroy E2E test
-    deps: [build]
+    deps: [build:all]
     dir: e2e
     preconditions:
       - sh: test -f {{.ROOT_DIR}}/.env
@@ -97,7 +100,7 @@ tasks:
     cmds:
       - go test -tags e2e -timeout 3h -v -run TestAWSProvision
 
-  generate:
+  protogen:
     desc: Generate protobuf and gRPC code (skips if unchanged)
     preconditions:
       - sh: command -v buf
@@ -108,17 +111,19 @@ tasks:
       - buf generate --template buf.gen.ocp.yaml --path proto/ocp/v1
 
   image:build:
-    desc: Build the fleetshift-server container image
+    desc: Build fleetshift-server container images
     preconditions:
       - sh: test -n "{{.DEV_REGISTRY}}"
         msg: "DEV_REGISTRY is not set. Set it in .env (e.g. DEV_REGISTRY=quay.io/yourusername)"
     cmds:
-      - podman build -t {{.DEV_REGISTRY}}/fleetshift-server:{{.IMAGE_TAG}} .
+      - podman build -t fleetshift-server -t {{.DEV_REGISTRY}}/fleetshift-server:{{.IMAGE_TAG}} .
+      - podman build -f Dockerfile.local -t {{.DEV_REGISTRY}}/fleetshift-server-local:{{.IMAGE_TAG}} .
 
   image:push:
-    desc: Push the server image to DEV_REGISTRY
+    desc: Push server images to DEV_REGISTRY
     preconditions:
       - sh: test -n "{{.DEV_REGISTRY}}"
         msg: "DEV_REGISTRY is not set. Set it in .env (e.g. DEV_REGISTRY=quay.io/yourusername)"
     cmds:
       - podman push {{.DEV_REGISTRY}}/fleetshift-server:{{.IMAGE_TAG}}
+      - podman push {{.DEV_REGISTRY}}/fleetshift-server-local:{{.IMAGE_TAG}}

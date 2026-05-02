@@ -1,0 +1,12 @@
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: fleetshift-grpc-route
+  namespace: __NAMESPACE__
+spec:
+  secretName: __TLS_SECRET_NAME__
+  issuerRef:
+    name: __ISSUER_NAME__
+    kind: ClusterIssuer
+  dnsNames:
+    - __GRPC_ROUTE_HOST__
