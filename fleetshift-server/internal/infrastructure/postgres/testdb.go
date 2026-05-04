@@ -21,7 +21,7 @@ func isPodmanAvailable() bool {
 }
 
 func init() {
-	if isPodmanAvailable() {
+	if os.Getenv("TESTCONTAINERS_PROVIDER") != "docker" && isPodmanAvailable() {
 		os.Setenv("TESTCONTAINERS_RYUK_DISABLED", "true")
 	}
 }
@@ -34,6 +34,9 @@ var (
 )
 
 func detectProvider() testcontainers.ContainerCustomizer {
+	if os.Getenv("TESTCONTAINERS_PROVIDER") == "docker" {
+		return testcontainers.WithProvider(testcontainers.ProviderDefault)
+	}
 	if isPodmanAvailable() {
 		return testcontainers.WithProvider(testcontainers.ProviderPodman)
 	}
