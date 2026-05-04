@@ -66,9 +66,18 @@ func setupWithStoreAndAgent(t *testing.T, store domain.Store, agent domain.Deliv
 		},
 	}
 
+	cleanupSpec := &domain.DeleteCleanupWorkflowSpec{
+		Store: store,
+	}
+	cleanupWf, err := reg.RegisterDeleteCleanup(cleanupSpec)
+	if err != nil {
+		t.Fatalf("RegisterDeleteCleanup: %v", err)
+	}
+
 	deleteSpec := &domain.DeleteDeploymentWorkflowSpec{
 		Store:         store,
 		Orchestration: orchWf,
+		Cleanup:       cleanupWf,
 	}
 	deleteWf, err := reg.RegisterDeleteDeployment(deleteSpec)
 	if err != nil {
@@ -111,24 +120,24 @@ func setup(t *testing.T) testHarness {
 	return setupWithStoreAndAgent(t, store, agent)
 }
 
-func awaitDeploymentState(ctx context.Context, t *testing.T, store domain.Store, id domain.DeploymentID, want domain.DeploymentState) domain.Deployment {
+func awaitDeploymentState(ctx context.Context, t *testing.T, store domain.Store, id domain.DeploymentID, want domain.FulfillmentState) domain.DeploymentView {
 	t.Helper()
 	for {
 		tx, err := store.BeginReadOnly(ctx)
 		if err != nil {
 			t.Fatalf("Begin: %v", err)
 		}
-		dep, err := tx.Deployments().Get(ctx, id)
+		view, err := tx.Deployments().GetView(ctx, id)
 		tx.Rollback()
 		if err != nil && !errors.Is(err, domain.ErrNotFound) {
-			t.Fatalf("Get(%s): %v", id, err)
+			t.Fatalf("GetView(%s): %v", id, err)
 		}
-		if err == nil && dep.State == want {
-			return dep
+		if err == nil && view.Fulfillment.State == want {
+			return view
 		}
 		select {
 		case <-ctx.Done():
-			t.Fatalf("timed out waiting for deployment %s to reach state %q", id, want)
+			t.Fatalf("timed out waiting for deployment %s to reach fulfillment state %q", id, want)
 		case <-time.After(5 * time.Millisecond):
 		}
 	}
@@ -141,9 +150,13 @@ func queryDeliveries(ctx context.Context, t *testing.T, store domain.Store, depI
 		t.Fatalf("Begin: %v", err)
 	}
 	defer tx.Rollback()
-	records, err := tx.Deliveries().ListByDeployment(ctx, depID)
+	view, err := tx.Deployments().GetView(ctx, depID)
 	if err != nil {
-		t.Fatalf("ListByDeployment: %v", err)
+		t.Fatalf("GetView: %v", err)
+	}
+	records, err := tx.Deliveries().ListByFulfillment(ctx, view.Fulfillment.ID)
+	if err != nil {
+		t.Fatalf("ListByFulfillment: %v", err)
 	}
 	return records
 }
@@ -158,13 +171,13 @@ func registerTargets(t *testing.T, h testHarness, ids ...string) {
 	}
 }
 
-func assertResolvedTargets(t *testing.T, dep domain.Deployment, expectedIDs ...string) {
+func assertResolvedTargets(t *testing.T, view domain.DeploymentView, expectedIDs ...string) {
 	t.Helper()
-	if len(dep.ResolvedTargets) != len(expectedIDs) {
-		t.Fatalf("ResolvedTargets: got %d, want %d", len(dep.ResolvedTargets), len(expectedIDs))
+	if len(view.Fulfillment.ResolvedTargets) != len(expectedIDs) {
+		t.Fatalf("ResolvedTargets: got %d, want %d", len(view.Fulfillment.ResolvedTargets), len(expectedIDs))
 	}
 	got := make(map[domain.TargetID]bool)
-	for _, id := range dep.ResolvedTargets {
+	for _, id := range view.Fulfillment.ResolvedTargets {
 		got[id] = true
 	}
 	for _, id := range expectedIDs {
@@ -196,7 +209,7 @@ func TestCreateDeployment_StaticPlacement(t *testing.T) {
 		t.Fatalf("Create: %v", err)
 	}
 
-	dep := awaitDeploymentState(ctx, t, h.store, "d1", domain.DeploymentStateActive)
+	dep := awaitDeploymentState(ctx, t, h.store, "d1", domain.FulfillmentStateActive)
 	assertResolvedTargets(t, dep, "t1", "t3")
 
 	records := queryDeliveries(ctx, t, h.store, "d1")
@@ -224,7 +237,7 @@ func TestCreateDeployment_AllPlacement(t *testing.T) {
 		t.Fatalf("Create: %v", err)
 	}
 
-	dep := awaitDeploymentState(ctx, t, h.store, "d1", domain.DeploymentStateActive)
+	dep := awaitDeploymentState(ctx, t, h.store, "d1", domain.FulfillmentStateActive)
 	assertResolvedTargets(t, dep, "t1", "t2", "t3")
 
 	records := queryDeliveries(ctx, t, h.store, "d1")
@@ -257,7 +270,7 @@ func TestCreateDeployment_SelectorPlacement(t *testing.T) {
 		t.Fatalf("Create: %v", err)
 	}
 
-	dep := awaitDeploymentState(ctx, t, h.store, "d1", domain.DeploymentStateActive)
+	dep := awaitDeploymentState(ctx, t, h.store, "d1", domain.FulfillmentStateActive)
 	assertResolvedTargets(t, dep, "t1", "t3")
 }
 
@@ -303,24 +316,19 @@ func TestDeleteDeployment_TransitionsToDeleting(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	awaitDeploymentState(ctx, t, h.store, "d1", domain.DeploymentStateActive)
+	awaitDeploymentState(ctx, t, h.store, "d1", domain.FulfillmentStateActive)
 
 	dep, err := h.deployments.Delete(ctx, "d1")
 	if err != nil {
 		t.Fatalf("Delete: %v", err)
 	}
-	if dep.State != domain.DeploymentStateDeleting {
-		t.Errorf("returned State = %q, want deleting", dep.State)
+	if dep.Fulfillment.State != domain.FulfillmentStateDeleting {
+		t.Errorf("returned Fulfillment.State = %q, want deleting", dep.Fulfillment.State)
 	}
 
-	// Verify the deployment is persisted in Deleting state.
-	persisted, err := queryDeployment(ctx, t, h.store, "d1")
-	if err != nil {
-		t.Fatalf("query deployment after delete: %v", err)
-	}
-	if persisted.State != domain.DeploymentStateDeleting {
-		t.Errorf("persisted State = %q, want deleting", persisted.State)
-	}
+	// The deployment should eventually be fully removed once the
+	// background cleanup workflow completes.
+	awaitDeploymentGone(ctx, t, h.store, "d1")
 }
 
 func TestDeleteDeployment_ReturnsSnapshot(t *testing.T) {
@@ -342,21 +350,21 @@ func TestDeleteDeployment_ReturnsSnapshot(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	awaitDeploymentState(ctx, t, h.store, "d1", domain.DeploymentStateActive)
+	awaitDeploymentState(ctx, t, h.store, "d1", domain.FulfillmentStateActive)
 
 	dep, err := h.deployments.Delete(ctx, "d1")
 	if err != nil {
 		t.Fatalf("Delete: %v", err)
 	}
-	if dep.State != domain.DeploymentStateDeleting {
-		t.Errorf("State = %q, want deleting", dep.State)
+	if dep.Fulfillment.State != domain.FulfillmentStateDeleting {
+		t.Errorf("Fulfillment.State = %q, want deleting", dep.Fulfillment.State)
 	}
-	if dep.ID != "d1" {
-		t.Errorf("ID = %q, want d1", dep.ID)
+	if dep.Deployment.ID != "d1" {
+		t.Errorf("ID = %q, want d1", dep.Deployment.ID)
 	}
 }
 
-func TestDeleteDeployment_Idempotent(t *testing.T) {
+func TestDeleteDeployment_SecondDeleteAfterCompleteIsNotFound(t *testing.T) {
 	h := setup(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -375,41 +383,142 @@ func TestDeleteDeployment_Idempotent(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	awaitDeploymentState(ctx, t, h.store, "d1", domain.DeploymentStateActive)
+	awaitDeploymentState(ctx, t, h.store, "d1", domain.FulfillmentStateActive)
 
 	_, err = h.deployments.Delete(ctx, "d1")
 	if err != nil {
 		t.Fatalf("first Delete: %v", err)
 	}
 
-	// Second delete on same (now Deleting) deployment should not error.
+	awaitDeploymentGone(ctx, t, h.store, "d1")
+
 	_, err = h.deployments.Delete(ctx, "d1")
-	if err != nil {
-		t.Fatalf("second Delete (idempotent): %v", err)
+	if !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("second Delete after cleanup: got %v, want ErrNotFound", err)
 	}
 }
 
-func queryDeployment(ctx context.Context, t *testing.T, store domain.Store, id domain.DeploymentID) (domain.Deployment, error) {
+func TestDeleteDeployment_IdempotentWhileDeleting(t *testing.T) {
+	h := setup(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	registerTargets(t, h, "t1")
+
+	_, err := h.deployments.Create(ctx, domain.CreateDeploymentInput{
+		ID: "d1",
+		ManifestStrategy: domain.ManifestStrategySpec{
+			Type:      domain.ManifestStrategyInline,
+			Manifests: []domain.Manifest{{Raw: json.RawMessage(`{}`)}},
+		},
+		PlacementStrategy: domain.PlacementStrategySpec{Type: domain.PlacementStrategyAll},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	awaitDeploymentState(ctx, t, h.store, "d1", domain.FulfillmentStateActive)
+
+	dep1, err := h.deployments.Delete(ctx, "d1")
+	if err != nil {
+		t.Fatalf("first Delete: %v", err)
+	}
+	if dep1.Fulfillment.State != domain.FulfillmentStateDeleting {
+		t.Fatalf("first Delete state = %q, want deleting", dep1.Fulfillment.State)
+	}
+
+	// Second delete while still deleting should be idempotent.
+	dep2, err := h.deployments.Delete(ctx, "d1")
+	if err != nil {
+		t.Fatalf("second Delete (idempotent): %v", err)
+	}
+	if dep2.Fulfillment.State != domain.FulfillmentStateDeleting {
+		t.Fatalf("second Delete state = %q, want deleting", dep2.Fulfillment.State)
+	}
+}
+
+func TestDeleteDeployment_DeploymentVisibleDuringCleanup(t *testing.T) {
+	h := setup(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	registerTargets(t, h, "t1")
+
+	_, err := h.deployments.Create(ctx, domain.CreateDeploymentInput{
+		ID: "d1",
+		ManifestStrategy: domain.ManifestStrategySpec{
+			Type:      domain.ManifestStrategyInline,
+			Manifests: []domain.Manifest{{Raw: json.RawMessage(`{}`)}},
+		},
+		PlacementStrategy: domain.PlacementStrategySpec{Type: domain.PlacementStrategyAll},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	awaitDeploymentState(ctx, t, h.store, "d1", domain.FulfillmentStateActive)
+
+	dep, err := h.deployments.Delete(ctx, "d1")
+	if err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+	if dep.Fulfillment.State != domain.FulfillmentStateDeleting {
+		t.Fatalf("Delete state = %q, want deleting", dep.Fulfillment.State)
+	}
+
+	// Deployment should be visible via GetView in DELETING state after
+	// Delete returns (the cleanup workflow hasn't finished yet or we can
+	// verify it's at least DELETING before it completes).
+	view, err := queryDeployment(ctx, t, h.store, "d1")
+	if err != nil && !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("GetView after Delete: %v", err)
+	}
+	if err == nil && view.Fulfillment.State != domain.FulfillmentStateDeleting {
+		t.Fatalf("GetView state = %q, want deleting", view.Fulfillment.State)
+	}
+}
+
+func queryDeployment(ctx context.Context, t *testing.T, store domain.Store, id domain.DeploymentID) (domain.DeploymentView, error) {
 	t.Helper()
 	tx, err := store.BeginReadOnly(ctx)
 	if err != nil {
 		t.Fatalf("Begin: %v", err)
 	}
 	defer tx.Rollback()
-	return tx.Deployments().Get(ctx, id)
+	return tx.Deployments().GetView(ctx, id)
 }
 
-func awaitCondition(ctx context.Context, t *testing.T, store domain.Store, id domain.DeploymentID, cond func(domain.Deployment) bool) domain.Deployment {
+func awaitDeploymentGone(ctx context.Context, t *testing.T, store domain.Store, id domain.DeploymentID) {
 	t.Helper()
 	for {
 		tx, err := store.BeginReadOnly(ctx)
 		if err != nil {
 			t.Fatalf("Begin: %v", err)
 		}
-		dep, err := tx.Deployments().Get(ctx, id)
+		_, err = tx.Deployments().GetView(ctx, id)
 		tx.Rollback()
-		if err == nil && cond(dep) {
-			return dep
+		if errors.Is(err, domain.ErrNotFound) {
+			return
+		}
+		select {
+		case <-ctx.Done():
+			t.Fatalf("timed out waiting for deployment %s to be deleted", id)
+		case <-time.After(5 * time.Millisecond):
+		}
+	}
+}
+
+func awaitCondition(ctx context.Context, t *testing.T, store domain.Store, id domain.DeploymentID, cond func(domain.DeploymentView) bool) domain.DeploymentView {
+	t.Helper()
+	for {
+		tx, err := store.BeginReadOnly(ctx)
+		if err != nil {
+			t.Fatalf("Begin: %v", err)
+		}
+		view, err := tx.Deployments().GetView(ctx, id)
+		tx.Rollback()
+		if err == nil && cond(view) {
+			return view
 		}
 		select {
 		case <-ctx.Done():
@@ -427,22 +536,24 @@ func TestCreateDeployment_MissingID(t *testing.T) {
 	}
 }
 
-func seedDeployment(t *testing.T, store domain.Store, dep domain.Deployment) {
+// seedDeployment persists a fulfillment and a thin deployment that references it.
+// mutate runs after default strategies are applied via Advance* helpers.
+func seedDeployment(t *testing.T, store domain.Store, depID domain.DeploymentID, mutate func(*domain.Fulfillment)) {
 	t.Helper()
-	if dep.UID == "" {
-		dep.UID = "test-uid"
+	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	fID := domain.FulfillmentID("ful-" + string(depID))
+	f := domain.Fulfillment{
+		ID:        fID,
+		CreatedAt: now,
+		UpdatedAt: now,
 	}
-	if dep.Etag == "" {
-		dep.Etag = "test-etag"
-	}
-	if dep.CreatedAt.IsZero() {
-		dep.CreatedAt = time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
-	}
-	if dep.UpdatedAt.IsZero() {
-		dep.UpdatedAt = dep.CreatedAt
-	}
-	if dep.Generation == 0 {
-		dep.Generation = 1
+	ms := defaultManifestStrategy()
+	ps := defaultPlacementStrategy()
+	f.AdvanceManifestStrategy(ms, now)
+	f.AdvancePlacementStrategy(ps, now)
+	f.AdvanceRolloutStrategy(nil, now)
+	if mutate != nil {
+		mutate(&f)
 	}
 	ctx := context.Background()
 	tx, err := store.Begin(ctx)
@@ -450,7 +561,18 @@ func seedDeployment(t *testing.T, store domain.Store, dep domain.Deployment) {
 		t.Fatalf("Begin: %v", err)
 	}
 	defer tx.Rollback()
-	if err := tx.Deployments().Create(ctx, dep); err != nil {
+	if err := tx.Fulfillments().Create(ctx, f); err != nil {
+		t.Fatalf("Create fulfillment: %v", err)
+	}
+	d := domain.Deployment{
+		ID:            depID,
+		UID:           "test-uid",
+		FulfillmentID: fID,
+		CreatedAt:     now,
+		UpdatedAt:     now,
+		Etag:          "test-etag",
+	}
+	if err := tx.Deployments().Create(ctx, d); err != nil {
 		t.Fatalf("Create deployment: %v", err)
 	}
 	if err := tx.Commit(); err != nil {
@@ -469,9 +591,8 @@ func TestResumeDeployment_WrongState(t *testing.T) {
 	h := setup(t)
 	ctx := application.ContextWithAuth(context.Background(), testAuthContext())
 
-	seedDeployment(t, h.store, domain.Deployment{
-		ID:    "d1",
-		State: domain.DeploymentStateActive,
+	seedDeployment(t, h.store, "d1", func(f *domain.Fulfillment) {
+		f.State = domain.FulfillmentStateActive
 	})
 
 	_, err := h.deployments.Resume(ctx, application.ResumeInput{ID: "d1"})
@@ -493,9 +614,8 @@ func TestResumeDeployment_NotFound(t *testing.T) {
 func TestResumeDeployment_NoAuth(t *testing.T) {
 	h := setup(t)
 
-	seedDeployment(t, h.store, domain.Deployment{
-		ID:    "d1",
-		State: domain.DeploymentStatePausedAuth,
+	seedDeployment(t, h.store, "d1", func(f *domain.Fulfillment) {
+		f.State = domain.FulfillmentStatePausedAuth
 	})
 
 	_, err := h.deployments.Resume(context.Background(), application.ResumeInput{ID: "d1"})
@@ -563,7 +683,7 @@ func TestResumeDeployment_PausedAuth_EndToEnd(t *testing.T) {
 		t.Fatalf("Create: %v", err)
 	}
 
-	awaitDeploymentState(ctx, t, h.store, "d1", domain.DeploymentStatePausedAuth)
+	awaitDeploymentState(ctx, t, h.store, "d1", domain.FulfillmentStatePausedAuth)
 
 	resumeCtx := application.ContextWithAuth(ctx, &application.AuthorizationContext{
 		Subject: &domain.SubjectClaims{FederatedIdentity: domain.FederatedIdentity{Subject: "user-1", Issuer: "https://issuer.example.com"}},
@@ -574,7 +694,7 @@ func TestResumeDeployment_PausedAuth_EndToEnd(t *testing.T) {
 		t.Fatalf("Resume: %v", err)
 	}
 
-	dep := awaitDeploymentState(ctx, t, h.store, "d1", domain.DeploymentStateActive)
+	dep := awaitDeploymentState(ctx, t, h.store, "d1", domain.FulfillmentStateActive)
 	assertResolvedTargets(t, dep, "t1")
 }
 

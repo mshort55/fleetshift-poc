@@ -7,8 +7,8 @@ This is the monorepo for FleetShift, a fleet management platform. It contains th
 The architecture documentation lives in docs/design/ and is the primary source of truth for domain concepts, system design, and open questions.
 
 - Start with docs/design/architecture.md -- it gives the system's core mental model, names the major subsystems, and contains a reading guide that routes to the detailed sub-documents in docs/design/architecture/:
-  - core_model.md -- core vocabulary, strategy axes, target model, delivery contract, single-pod invariant
-  - orchestration.md -- deployment execution, re-evaluation, rollout
+  - core_model.md -- core vocabulary, strategy axes, fulfillment kernel primitive, target model, delivery contract, single-pod invariant
+  - orchestration.md -- fulfillment execution, re-evaluation, rollout
   - fleetlet_and_transport.md -- fleetlets, channels, proxying, routing, data paths
   - tenancy_and_permissions.md -- provider/tenant/workspace model, generic permission boundary
   - addon_integration.md -- capability registration, addon strategy contracts, managed-resource bridging, UI/API extensions
@@ -23,11 +23,12 @@ The architecture documentation lives in docs/design/ and is the primary source o
 - For gRPC / proto generation and linting, see docs/buf.md
 - For API design conventions (AIP-aligned), see docs/api-design.md
 
-## Rules
+## Cross-cutting concerns
 
-- Never remove TODO comments unless it is truly no longer relevant (e.g. implemented or obsolete)
+- Never remove comments unless they are truly no longer relevant (e.g. a TODO that is now implemented or obsolete). Prefer updating out of date explanations unless new behavior is trivially obvious.
 - Prefer modern stdlib abstractions and utilities where relevant (especially around crypto or low level encoding / decoding)
 - Follow test-driven development. When at all possible, write failing tests **first**, then write the code to make the test pass.
+- See the Taskfile (used w/ `task` cli) for common development tasks like running tests, generating proto, and building binaries
 
 ## fleetshift-server
 

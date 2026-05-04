@@ -7,10 +7,12 @@ import (
 )
 
 // MutationResult is the outcome of a mutation activity: the
-// deployment snapshot after mutation and the generation it wrote.
+// deployment view snapshot after mutation, the fulfillment ID, and
+// the generation it wrote.
 type MutationResult struct {
-	Deployment Deployment
-	MyGen      Generation
+	View          DeploymentView
+	FulfillmentID FulfillmentID
+	MyGen         Generation
 }
 
 const convergencePollInterval = 500 * time.Millisecond
@@ -21,33 +23,33 @@ const convergencePollInterval = 500 * time.Millisecond
 func convergenceLoop(
 	record Record,
 	orchestration OrchestrationWorkflow,
-	loadDeployment Activity[DeploymentID, *Deployment],
-	deploymentID DeploymentID,
+	loadFulfillment Activity[FulfillmentID, *Fulfillment],
+	fulfillmentID FulfillmentID,
 	myGen Generation,
 	missingMeansDone bool,
 ) error {
 	for {
-		dep, err := RunActivity(record, loadDeployment, deploymentID)
+		f, err := RunActivity(record, loadFulfillment, fulfillmentID)
 		if err != nil {
-			return fmt.Errorf("load deployment for convergence: %w", err)
+			return fmt.Errorf("load fulfillment for convergence: %w", err)
 		}
-		if dep == nil && missingMeansDone {
+		if f == nil && missingMeansDone {
 			// Successful delete; done
 			return nil
 		}
-		if dep == nil {
-			return fmt.Errorf("deployment %q: %w", deploymentID, ErrNotFound)
+		if f == nil {
+			return fmt.Errorf("fulfillment %q: %w", fulfillmentID, ErrNotFound)
 		}
-		if dep.ObservedGeneration >= myGen {
+		if f.ObservedGeneration >= myGen {
 			// Reconciled already to at least this gen; done
 			return nil
 		}
-		if dep.Generation > myGen {
+		if f.Generation > myGen {
 			// Something else updated, let that convergence loop take over
 			return nil
 		}
 
-		_, err = orchestration.Start(record.Context(), deploymentID)
+		_, err = orchestration.Start(record.Context(), fulfillmentID)
 		if err != nil && !errors.Is(err, ErrAlreadyRunning) {
 			return fmt.Errorf("start orchestration: %w", err)
 		}

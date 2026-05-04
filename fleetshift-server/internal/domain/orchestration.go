@@ -12,12 +12,12 @@ import (
 
 // errAuthPaused is a sentinel error returned by [awaitDeliveries] when
 // a delivery reports [DeliveryStateAuthFailed]. The orchestration
-// catches this to transition to [DeploymentStatePausedAuth] and
+// catches this to transition to [FulfillmentStatePausedAuth] and
 // complete the workflow.
 var errAuthPaused = errors.New("delivery auth failed: pausing for fresh credentials")
 
 // TargetDelta represents the difference between the previous and current
-// resolved target sets for a deployment.
+// resolved target sets for a fulfillment.
 type TargetDelta struct {
 	Added     []TargetInfo
 	Removed   []TargetInfo
@@ -27,11 +27,11 @@ type TargetDelta struct {
 // RolloutStep is a single step in a rollout plan: either remove from targets
 // or deliver to targets. Exactly one of Remove and Deliver is non-nil.
 type RolloutStep struct {
-	Remove  *RolloutStepRemove  // remove deployment from these targets
+	Remove  *RolloutStepRemove  // remove fulfillment from these targets
 	Deliver *RolloutStepDeliver // generate and deliver to these targets
 }
 
-// RolloutStepRemove is a step that removes the deployment from the listed targets.
+// RolloutStepRemove is a step that removes the fulfillment from the listed targets.
 type RolloutStepRemove struct {
 	Targets []TargetInfo
 }
@@ -62,22 +62,22 @@ type GenerateManifestsInput struct {
 
 // DeliverInput is the input to the deliver-to-target activity.
 type DeliverInput struct {
-	Target       TargetInfo
-	DeliveryID   DeliveryID
-	DeploymentID DeploymentID
-	Manifests    []Manifest
-	Auth         DeliveryAuth
-	Attestation  *Attestation // nil for token-passthrough deliveries
+	Target        TargetInfo
+	DeliveryID    DeliveryID
+	FulfillmentID FulfillmentID
+	Manifests     []Manifest
+	Auth          DeliveryAuth
+	Attestation   *Attestation // nil for token-passthrough deliveries
 }
 
 // RemoveInput is the input to the remove-from-target activity.
 type RemoveInput struct {
-	Target       TargetInfo
-	DeliveryID   DeliveryID
-	DeploymentID DeploymentID
-	Manifests    []Manifest
-	Auth         DeliveryAuth
-	Attestation  *Attestation // nil for token-passthrough deliveries
+	Target        TargetInfo
+	DeliveryID    DeliveryID
+	FulfillmentID FulfillmentID
+	Manifests     []Manifest
+	Auth          DeliveryAuth
+	Attestation   *Attestation // nil for token-passthrough deliveries
 }
 
 // ResolvePlacementInput is the input to the resolve-placement activity.
@@ -93,11 +93,14 @@ type PlanRolloutInput struct {
 	Delta TargetDelta
 }
 
-// DeploymentAndPool is the result of loading a deployment and the target pool
-// in a single step. Used to avoid separate durable steps for deployment and pool.
-type DeploymentAndPool struct {
-	Deployment Deployment
-	Pool       []TargetInfo
+// FulfillmentAndPool is the result of loading a fulfillment and the target pool
+// in a single step. Used to avoid separate durable steps for fulfillment and pool.
+// When the fulfillment carries [Provenance], the signer enrollment is also
+// resolved eagerly so attestation assembly is deterministic on replay.
+type FulfillmentAndPool struct {
+	Fulfillment     Fulfillment
+	Pool            []TargetInfo
+	SignerAssertion *SignerAssertion
 }
 
 // PersistAndCompleteInput carries the reconciliation result and the
@@ -108,10 +111,10 @@ type PersistAndCompleteInput struct {
 	ReconciledGen Generation
 }
 
-// OrchestrationWorkflowSpec is the deployment pipeline expressed as a
+// OrchestrationWorkflowSpec is the fulfillment pipeline expressed as a
 // deterministic workflow. Each reconciliation loads the current state,
 // runs the full pipeline (or delete), and atomically completes. If
-// the deployment's [Generation] has advanced during execution the
+// the fulfillment's [Generation] has advanced during execution the
 // workflow loops and re-runs the pipeline.
 //
 // Pass this spec to [Registry.RegisterOrchestration] to obtain an
@@ -121,7 +124,7 @@ type OrchestrationWorkflowSpec struct {
 	Delivery         DeliveryService
 	Strategies       StrategyFactory
 	Registry         Registry
-	Observer         DeploymentObserver
+	Observer         FulfillmentObserver
 	DeliveryObserver DeliveryObserver
 	Vault            Vault
 	Now              func() time.Time
@@ -134,48 +137,67 @@ func (s *OrchestrationWorkflowSpec) now() time.Time {
 	return time.Now()
 }
 
-func (s *OrchestrationWorkflowSpec) Name() string { return "orchestrate-deployment" }
+func (s *OrchestrationWorkflowSpec) Name() string { return "orchestrate-fulfillment" }
 
 // Each method returns a typed [Activity] derived from the spec's own
 // dependencies. Infrastructure adapters call these to register activities;
 // the workflow body calls them via [RunActivity].
 
 // AcquireLockAndLoad acquires the orchestration lock (if not already
-// held) and loads the deployment and target pool in a single activity.
+// held) and loads the fulfillment and target pool in a single activity.
 // On the first call the lock is claimed; on subsequent calls (within
 // the same workflow execution) it is already held so only the load
-// happens. This combines the former AcquireLock and LoadDeploymentAndPool
-// activities to eliminate a redundant deployment read.
-func (s *OrchestrationWorkflowSpec) AcquireLockAndLoad() Activity[DeploymentID, DeploymentAndPool] {
-	return NewActivity("acquire-lock-and-load", func(ctx context.Context, id DeploymentID) (DeploymentAndPool, error) {
+// happens. This combines the former AcquireLock and LoadFulfillmentAndPool
+// activities to eliminate a redundant fulfillment read.
+func (s *OrchestrationWorkflowSpec) AcquireLockAndLoad() Activity[FulfillmentID, FulfillmentAndPool] {
+	return NewActivity("acquire-lock-and-load", func(ctx context.Context, id FulfillmentID) (FulfillmentAndPool, error) {
 		tx, err := s.Store.Begin(ctx)
 		if err != nil {
-			return DeploymentAndPool{}, fmt.Errorf("begin tx: %w", err)
+			return FulfillmentAndPool{}, fmt.Errorf("begin tx: %w", err)
 		}
 		defer tx.Rollback()
 
-		dep, err := tx.Deployments().Get(ctx, id)
+		f, err := tx.Fulfillments().Get(ctx, id)
 		if err != nil {
-			return DeploymentAndPool{}, err
+			return FulfillmentAndPool{}, err
 		}
-		if dep.AcquireOrchestrationLock() {
-			if err := tx.Deployments().Update(ctx, dep); err != nil {
-				return DeploymentAndPool{}, err
+		if f.AcquireOrchestrationLock() {
+			if err := tx.Fulfillments().Update(ctx, f); err != nil {
+				return FulfillmentAndPool{}, err
 			}
 		}
 
 		pool, err := tx.Targets().List(ctx)
 		if err != nil {
-			return DeploymentAndPool{}, err
+			return FulfillmentAndPool{}, err
 		}
+
+		var sa *SignerAssertion
+		if f.Provenance != nil {
+			found, err := tx.SignerEnrollments().ListBySubject(ctx, f.Provenance.Sig.Signer)
+			if err != nil {
+				return FulfillmentAndPool{}, fmt.Errorf("list signer enrollments: %w", err)
+			}
+			if len(found) == 0 {
+				return FulfillmentAndPool{}, fmt.Errorf("no signer enrollment found for %s / %s",
+					f.Provenance.Sig.Signer.Subject, f.Provenance.Sig.Signer.Issuer)
+			}
+			enrollment := found[0]
+			sa = &SignerAssertion{
+				IdentityToken:   enrollment.IdentityToken,
+				RegistryID:      enrollment.RegistryID,
+				RegistrySubject: enrollment.RegistrySubject,
+			}
+		}
+
 		if err := tx.Commit(); err != nil {
-			return DeploymentAndPool{}, fmt.Errorf("commit: %w", err)
+			return FulfillmentAndPool{}, fmt.Errorf("commit: %w", err)
 		}
-		return DeploymentAndPool{Deployment: dep, Pool: pool}, nil
+		return FulfillmentAndPool{Fulfillment: f, Pool: pool, SignerAssertion: sa}, nil
 	})
 }
 
-// ResolvePlacement runs the deployment's placement strategy against the
+// ResolvePlacement runs the fulfillment's placement strategy against the
 // target pool (placement view only). Invoked as an activity so placement
 // may perform I/O or use state that changes over time.
 func (s *OrchestrationWorkflowSpec) ResolvePlacement() Activity[ResolvePlacementInput, []PlacementTarget] {
@@ -188,7 +210,7 @@ func (s *OrchestrationWorkflowSpec) ResolvePlacement() Activity[ResolvePlacement
 	})
 }
 
-// PlanRollout runs the deployment's rollout strategy to produce an
+// PlanRollout runs the fulfillment's rollout strategy to produce an
 // ordered execution plan from the target delta. Invoked as an activity
 // so rollout may perform I/O or use state that changes over time.
 func (s *OrchestrationWorkflowSpec) PlanRollout() Activity[PlanRolloutInput, RolloutPlan] {
@@ -236,13 +258,13 @@ func (s *OrchestrationWorkflowSpec) DeliverToTarget() Activity[DeliverInput, Del
 
 		now := s.now()
 		if err := tx.Deliveries().Put(ctx, Delivery{
-			ID:           in.DeliveryID,
-			DeploymentID: in.DeploymentID,
-			TargetID:     in.Target.ID,
-			Manifests:    in.Manifests,
-			State:        DeliveryStatePending,
-			CreatedAt:    now,
-			UpdatedAt:    now,
+			ID:            in.DeliveryID,
+			FulfillmentID: in.FulfillmentID,
+			TargetID:      in.Target.ID,
+			Manifests:     in.Manifests,
+			State:         DeliveryStatePending,
+			CreatedAt:     now,
+			UpdatedAt:     now,
 		}); err != nil {
 			return DeliveryResult{}, fmt.Errorf("create delivery record: %w", err)
 		}
@@ -251,8 +273,8 @@ func (s *OrchestrationWorkflowSpec) DeliverToTarget() Activity[DeliverInput, Del
 		}
 
 		signaler := NewDeliverySignaler(
-			in.DeploymentID, in.DeliveryID, in.Target,
-			s.Store, s.Registry.SignalDeploymentEvent,
+			in.FulfillmentID, in.DeliveryID, in.Target,
+			s.Store, s.Registry.SignalFulfillmentEvent,
 			s.DeliveryObserver,
 		)
 
@@ -273,7 +295,7 @@ func (s *OrchestrationWorkflowSpec) RemoveFromTarget() Activity[RemoveInput, str
 			return struct{}{}, fmt.Errorf("begin tx: %w", err)
 		}
 
-		delivery, err := tx.Deliveries().GetByDeploymentTarget(ctx, in.DeploymentID, in.Target.ID)
+		delivery, err := tx.Deliveries().GetByFulfillmentTarget(ctx, in.FulfillmentID, in.Target.ID)
 		tx.Rollback() // close before calling Remove
 		if errors.Is(err, ErrNotFound) {
 			return struct{}{}, nil
@@ -286,19 +308,21 @@ func (s *OrchestrationWorkflowSpec) RemoveFromTarget() Activity[RemoveInput, str
 	})
 }
 
-// CleanupAndDeleteDeployment atomically cleans up provisioned targets
-// (e.g. kind clusters), hard-deletes delivery records, and hard-deletes
-// the deployment record in a single transaction. This combines the
-// former CleanupProvisionedTargets and DeleteDeploymentRecord activities.
-func (s *OrchestrationWorkflowSpec) CleanupAndDeleteDeployment() Activity[DeploymentID, struct{}] {
-	return NewActivity("cleanup-and-delete-deployment", func(ctx context.Context, id DeploymentID) (struct{}, error) {
+// CleanupDeliveryData cleans up provisioned targets (e.g. kind
+// clusters) and hard-deletes delivery records for a fulfillment. The
+// fulfillment row itself is NOT deleted here; that responsibility
+// belongs to [DeleteCleanupWorkflow], which deletes both the
+// deployment and fulfillment rows in FK-safe order after receiving
+// a [DeleteCleanupCompleteSignal].
+func (s *OrchestrationWorkflowSpec) CleanupDeliveryData() Activity[FulfillmentID, struct{}] {
+	return NewActivity("cleanup-delivery-data", func(ctx context.Context, id FulfillmentID) (struct{}, error) {
 		tx, err := s.Store.Begin(ctx)
 		if err != nil {
 			return struct{}{}, fmt.Errorf("begin tx: %w", err)
 		}
 		defer tx.Rollback()
 
-		deliveries, err := tx.Deliveries().ListByDeployment(ctx, id)
+		deliveries, err := tx.Deliveries().ListByFulfillment(ctx, id)
 		if err != nil {
 			return struct{}{}, fmt.Errorf("list deliveries: %w", err)
 		}
@@ -322,11 +346,8 @@ func (s *OrchestrationWorkflowSpec) CleanupAndDeleteDeployment() Activity[Deploy
 			}
 		}
 
-		if err := tx.Deliveries().DeleteByDeployment(ctx, id); err != nil {
+		if err := tx.Deliveries().DeleteByFulfillment(ctx, id); err != nil {
 			return struct{}{}, fmt.Errorf("delete delivery records: %w", err)
-		}
-		if err := tx.Deployments().Delete(ctx, id); err != nil {
-			return struct{}{}, fmt.Errorf("delete deployment: %w", err)
 		}
 		return struct{}{}, tx.Commit()
 	})
@@ -334,13 +355,19 @@ func (s *OrchestrationWorkflowSpec) CleanupAndDeleteDeployment() Activity[Deploy
 
 // PersistAndCompleteReconciliation atomically applies a
 // [ReconciliationResult] and completes reconciliation in a single
-// read-modify-write cycle. It reads the latest deployment aggregate
+// read-modify-write cycle. It reads the latest fulfillment aggregate
 // (preserving concurrent generation bumps), applies the result, and
-// advances [Deployment.ObservedGeneration]. Returns needsRestart when
+// advances [Fulfillment.ObservedGeneration]. Returns needsRestart when
 // the generation has advanced during the pipeline.
 //
+// For [FulfillmentStateDeleting] results, the activity also signals the
+// [DeleteCleanupWorkflow] after the commit succeeds. Combining the
+// signal with the persist step eliminates a retry window where a
+// separate signal activity could fail and force a redundant full
+// re-execution of the delete pipeline.
+//
 // Combining persist and complete eliminates the window where the
-// deployment's state is updated but the lock has not yet been released,
+// fulfillment's state is updated but the lock has not yet been released,
 // and prevents the error-swallowing that existed when the two were
 // separate activities.
 func (s *OrchestrationWorkflowSpec) PersistAndCompleteReconciliation() Activity[PersistAndCompleteInput, bool] {
@@ -351,20 +378,31 @@ func (s *OrchestrationWorkflowSpec) PersistAndCompleteReconciliation() Activity[
 		}
 		defer tx.Rollback()
 
-		fresh, err := tx.Deployments().Get(ctx, in.Result.DeploymentID)
+		fresh, err := tx.Fulfillments().Get(ctx, in.Result.FulfillmentID)
 		if err != nil {
-			return false, fmt.Errorf("get deployment: %w", err)
+			return false, fmt.Errorf("get fulfillment: %w", err)
 		}
 
 		fresh.ApplyReconciliationResult(in.Result)
 		needsRestart := fresh.CompleteReconciliation(in.ReconciledGen)
 		fresh.UpdatedAt = s.now()
-		fresh.Etag = uuid.New().String()
 
-		if err := tx.Deployments().Update(ctx, fresh); err != nil {
+		if err := tx.Fulfillments().Update(ctx, fresh); err != nil {
 			return false, err
 		}
-		return needsRestart, tx.Commit()
+		if err := tx.Commit(); err != nil {
+			return false, err
+		}
+
+		if in.Result.State == FulfillmentStateDeleting {
+			if err := s.Registry.SignalDeleteCleanupComplete(ctx, in.Result.FulfillmentID, DeleteCleanupCompleteEvent{
+				FulfillmentID: in.Result.FulfillmentID,
+			}); err != nil {
+				return false, fmt.Errorf("signal delete cleanup: %w", err)
+			}
+		}
+
+		return needsRestart, nil
 	})
 }
 
@@ -396,7 +434,7 @@ func (s *OrchestrationWorkflowSpec) ProcessDeliveryOutputs() Activity[DeliveryRe
 		}
 		defer tx.Rollback()
 
-		// TODO: revisit the "TargetRegistrar" thing – should we make that upsert instead? remove that?
+		// TODO: revisit the "TargetRegistrar" thing – should we make that upsert instead? remove that?
 		now := s.now()
 		for _, pt := range result.ProvisionedTargets {
 			invID := InventoryItemID("target:" + string(pt.ID))
@@ -430,105 +468,113 @@ func (s *OrchestrationWorkflowSpec) ProcessDeliveryOutputs() Activity[DeliveryRe
 	})
 }
 
-// ReleaseLock clears [Deployment.ActiveWorkflowGen] without advancing
-// [Deployment.ObservedGeneration]. Used before ContinueAsNew so the
+// ReleaseLock clears [Fulfillment.ActiveWorkflowGen] without advancing
+// [Fulfillment.ObservedGeneration]. Used before ContinueAsNew so the
 // next execution can re-acquire the lock for a fresh retry attempt.
-func (s *OrchestrationWorkflowSpec) ReleaseLock() Activity[DeploymentID, struct{}] {
-	return NewActivity("release-orchestration-lock", func(ctx context.Context, id DeploymentID) (struct{}, error) {
+func (s *OrchestrationWorkflowSpec) ReleaseLock() Activity[FulfillmentID, struct{}] {
+	return NewActivity("release-orchestration-lock", func(ctx context.Context, id FulfillmentID) (struct{}, error) {
 		tx, err := s.Store.Begin(ctx)
 		if err != nil {
 			return struct{}{}, fmt.Errorf("begin tx: %w", err)
 		}
 		defer tx.Rollback()
 
-		dep, err := tx.Deployments().Get(ctx, id)
+		f, err := tx.Fulfillments().Get(ctx, id)
 		if err != nil {
 			return struct{}{}, err
 		}
-		dep.ReleaseOrchestrationLock()
-		if err := tx.Deployments().Update(ctx, dep); err != nil {
+		f.ReleaseOrchestrationLock()
+		if err := tx.Fulfillments().Update(ctx, f); err != nil {
 			return struct{}{}, err
 		}
 		return struct{}{}, tx.Commit()
 	})
 }
 
-// CheckGeneration reads the deployment's current generation from the
+// CheckGeneration reads the fulfillment's current generation from the
 // store. Used mid-rollout to detect whether a new mutation has arrived.
-func (s *OrchestrationWorkflowSpec) CheckGeneration() Activity[DeploymentID, Generation] {
-	return NewActivity("check-generation", func(ctx context.Context, id DeploymentID) (Generation, error) {
+func (s *OrchestrationWorkflowSpec) CheckGeneration() Activity[FulfillmentID, Generation] {
+	return NewActivity("check-generation", func(ctx context.Context, id FulfillmentID) (Generation, error) {
 		tx, err := s.Store.BeginReadOnly(ctx)
 		if err != nil {
 			return 0, fmt.Errorf("begin tx: %w", err)
 		}
 		defer tx.Rollback()
 
-		dep, err := tx.Deployments().Get(ctx, id)
+		f, err := tx.Fulfillments().Get(ctx, id)
 		if err != nil {
 			return 0, err
 		}
-		return dep.Generation, tx.Commit()
+		return f.Generation, tx.Commit()
 	})
 }
 
-func (s *OrchestrationWorkflowSpec) observer() DeploymentObserver {
+func (s *OrchestrationWorkflowSpec) observer() FulfillmentObserver {
 	if s.Observer != nil {
 		return s.Observer
 	}
-	return NoOpDeploymentObserver{}
+	return NoOpFulfillmentObserver{}
 }
 
 // Run is the deterministic workflow body. Each execution does a single
 // pass through the pipeline. On retryable failure the workflow releases
 // its lock and returns [ContinueAsNew] to restart with a fresh history.
-// On terminal failure the workflow persists [DeploymentStateFailed] and
+// On terminal failure the workflow persists [FulfillmentStateFailed] and
 // completes reconciliation atomically. Run never returns a non-nil
 // error — it always terminates in a controlled state or restarts via
 // ContinueAsNew.
-func (s *OrchestrationWorkflowSpec) Run(record Record, deploymentID DeploymentID) (struct{}, error) {
-	ctx, probe := s.observer().RunStarted(record.Context(), deploymentID)
+func (s *OrchestrationWorkflowSpec) Run(record Record, fulfillmentID FulfillmentID) (struct{}, error) {
+	ctx, probe := s.observer().RunStarted(record.Context(), fulfillmentID)
 	defer probe.End()
 	_ = ctx
 
 	for {
-		loaded, err := RunActivity(record, s.AcquireLockAndLoad(), deploymentID)
+		loaded, err := RunActivity(record, s.AcquireLockAndLoad(), fulfillmentID)
 		if err != nil {
 			probe.Error(err)
 			if IsTerminal(err) {
 				return struct{}{}, nil
 			}
-			return struct{}{}, s.releaseLockAndContinue(record, deploymentID, probe)
+			return struct{}{}, s.releaseLockAndContinue(record, fulfillmentID, probe)
 		}
-		dep, pool := loaded.Deployment, loaded.Pool
-		startGen := dep.Generation
+		f, pool := loaded.Fulfillment, loaded.Pool
+		startGen := f.Generation
 
 		var result ReconciliationResult
 
-		switch dep.State {
-		case DeploymentStateDeleting:
-			if err := s.executeDelete(record, dep, pool, deploymentID); err != nil {
+		switch f.State {
+		case FulfillmentStateDeleting:
+			if err := s.executeDelete(record, f, pool, fulfillmentID, loaded.SignerAssertion); err != nil {
 				probe.Error(err)
 				if !IsTerminal(err) {
-					return struct{}{}, s.releaseLockAndContinue(record, deploymentID, probe)
+					return struct{}{}, s.releaseLockAndContinue(record, fulfillmentID, probe)
 				}
-				result = NewFailedResult(deploymentID, dep.Auth, err.Error())
+				result = NewFailedResult(fulfillmentID, f.Auth, err.Error())
 			} else {
-				return struct{}{}, nil
+				if _, err := RunActivity(record, s.CleanupDeliveryData(), fulfillmentID); err != nil {
+					probe.Error(err)
+					return struct{}{}, s.releaseLockAndContinue(record, fulfillmentID, probe)
+				}
+				result = ReconciliationResult{
+					FulfillmentID: fulfillmentID,
+					State:         FulfillmentStateDeleting,
+					Auth:          f.Auth,
+				}
 			}
 
 		default:
-			resolvedIDs, err := s.executePlacementPipeline(record, dep, pool, deploymentID, startGen, probe)
+			resolvedIDs, err := s.executePlacementPipeline(record, f, pool, fulfillmentID, startGen, probe, loaded.SignerAssertion)
 			if errors.Is(err, errAuthPaused) {
 				probe.Error(err)
-				result = NewPausedAuthResult(deploymentID, dep.Auth)
+				result = NewPausedAuthResult(fulfillmentID, f.Auth)
 			} else if err != nil {
 				probe.Error(err)
 				if !IsTerminal(err) {
-					return struct{}{}, s.releaseLockAndContinue(record, deploymentID, probe)
+					return struct{}{}, s.releaseLockAndContinue(record, fulfillmentID, probe)
 				}
-				result = NewFailedResult(deploymentID, dep.Auth, err.Error())
+				result = NewFailedResult(fulfillmentID, f.Auth, err.Error())
 			} else {
-				result = NewActiveResult(deploymentID, resolvedIDs, dep.Auth)
+				result = NewActiveResult(fulfillmentID, resolvedIDs, f.Auth)
 			}
 		}
 
@@ -539,8 +585,9 @@ func (s *OrchestrationWorkflowSpec) Run(record Record, deploymentID DeploymentID
 		})
 		if err != nil {
 			probe.Error(err)
-			return struct{}{}, s.releaseLockAndContinue(record, deploymentID, probe)
+			return struct{}{}, s.releaseLockAndContinue(record, fulfillmentID, probe)
 		}
+
 		if !needsRestart {
 			return struct{}{}, nil
 		}
@@ -551,27 +598,28 @@ func (s *OrchestrationWorkflowSpec) Run(record Record, deploymentID DeploymentID
 // [ContinueAsNew] error to restart with a fresh history.
 func (s *OrchestrationWorkflowSpec) releaseLockAndContinue(
 	record Record,
-	deploymentID DeploymentID,
-	probe DeploymentRunProbe,
+	fulfillmentID FulfillmentID,
+	probe FulfillmentRunProbe,
 ) error {
-	if _, err := RunActivity(record, s.ReleaseLock(), deploymentID); err != nil {
+	if _, err := RunActivity(record, s.ReleaseLock(), fulfillmentID); err != nil {
 		probe.Error(err)
 	}
-	return ContinueAsNew(deploymentID)
+	return ContinueAsNew(fulfillmentID)
 }
 
 // executePlacementPipeline runs the full resolve → delta → plan → execute
 // pipeline and returns the new resolved target IDs.
 func (s *OrchestrationWorkflowSpec) executePlacementPipeline(
 	record Record,
-	dep Deployment,
+	f Fulfillment,
 	pool []TargetInfo,
-	deploymentID DeploymentID,
+	fulfillmentID FulfillmentID,
 	startGen Generation,
-	probe DeploymentRunProbe,
+	probe FulfillmentRunProbe,
+	sa *SignerAssertion,
 ) ([]TargetID, error) {
 	resolved, err := RunActivity(record, s.ResolvePlacement(), ResolvePlacementInput{
-		Spec: dep.PlacementStrategy,
+		Spec: f.PlacementStrategy,
 		Pool: PlacementTargets(pool),
 	})
 	if err != nil {
@@ -583,17 +631,17 @@ func (s *OrchestrationWorkflowSpec) executePlacementPipeline(
 	}
 
 	resolvedTargets := ResolvedTargetInfos(resolved, pool)
-	delta := ComputeTargetDelta(dep.ResolvedTargets, resolvedTargets, pool)
+	delta := ComputeTargetDelta(f.ResolvedTargets, resolvedTargets, pool)
 
 	plan, err := RunActivity(record, s.PlanRollout(), PlanRolloutInput{
-		Spec:  dep.RolloutStrategy,
+		Spec:  f.RolloutStrategy,
 		Delta: delta,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("plan rollout: %w", err)
 	}
 
-	if err := s.executeRolloutPlan(record, dep, plan, deploymentID, startGen, probe); err != nil {
+	if err := s.executeRolloutPlan(record, f, plan, fulfillmentID, startGen, probe, sa); err != nil {
 		return nil, err
 	}
 
@@ -604,43 +652,33 @@ func (s *OrchestrationWorkflowSpec) executePlacementPipeline(
 	return ids, nil
 }
 
-// executeDelete removes the deployment from all currently resolved
-// targets, cleans up provisioned targets, and hard-deletes records.
+// executeDelete removes the fulfillment from all currently resolved
+// targets. Delivery-data cleanup is handled by [CleanupDeliveryData]
+// in the DELETING branch of [Run]. The delete-ready signal and the
+// actual row hard-deletes are handled by
+// [PersistAndCompleteReconciliation] and [DeleteCleanupWorkflow]
+// respectively.
 func (s *OrchestrationWorkflowSpec) executeDelete(
 	record Record,
-	dep Deployment,
+	f Fulfillment,
 	pool []TargetInfo,
-	deploymentID DeploymentID,
+	fulfillmentID FulfillmentID,
+	sa *SignerAssertion,
 ) error {
-	// Phase 1: Resource cleanup.
-	var sa *SignerAssertion
-	if dep.Provenance != nil {
-		looked, err := lookupSignerAssertion(record.Context(), s.Store, dep.Provenance)
-		if err != nil {
-			return fmt.Errorf("lookup signer enrollment for attestation assembly: %w", err)
-		}
-		sa = &looked
-	}
-
-	targets := targetInfosByID(dep.ResolvedTargets, pool)
+	targets := targetInfosByID(f.ResolvedTargets, pool)
 	for _, target := range targets {
 		in := RemoveInput{
-			Target:       target,
-			DeliveryID:   deliveryIDFor(deploymentID, target.ID),
-			DeploymentID: deploymentID,
-			Auth:         dep.Auth,
+			Target:        target,
+			DeliveryID:    deliveryIDFor(fulfillmentID, target.ID),
+			FulfillmentID: fulfillmentID,
+			Auth:          f.Auth,
 		}
 		if sa != nil {
-			in.Attestation = assembleRemoveAttestation(dep, *sa)
+			in.Attestation = assembleRemoveAttestation(f, *sa)
 		}
 		if _, err := RunActivity(record, s.RemoveFromTarget(), in); err != nil {
 			return fmt.Errorf("remove delivery for target %s: %w", target.ID, err)
 		}
-	}
-
-	// Phase 2: Cleanup provisioned targets and delete records atomically.
-	if _, err := RunActivity(record, s.CleanupAndDeleteDeployment(), deploymentID); err != nil {
-		return fmt.Errorf("cleanup and delete: %w", err)
 	}
 
 	return nil
@@ -649,40 +687,32 @@ func (s *OrchestrationWorkflowSpec) executeDelete(
 // executeRolloutPlan runs each step in a [RolloutPlan]. For deliver
 // steps it dispatches all deliveries, then waits for every delivery in
 // the step to reach a terminal state before proceeding to the next step.
-// Between steps, it checks whether the deployment's generation has
+// Between steps, it checks whether the fulfillment's generation has
 // advanced; if so and the [VersionConflictPolicy] is restart, it aborts
 // so the next reconciliation can start fresh.
 func (s *OrchestrationWorkflowSpec) executeRolloutPlan(
 	record Record,
-	dep Deployment,
+	f Fulfillment,
 	plan RolloutPlan,
-	deploymentID DeploymentID,
+	fulfillmentID FulfillmentID,
 	startGen Generation,
-	probe DeploymentRunProbe,
+	probe FulfillmentRunProbe,
+	sa *SignerAssertion,
 ) error {
-	policy := dep.RolloutStrategy.EffectiveVersionConflictPolicy()
-
-	var sa *SignerAssertion
-	if dep.Provenance != nil {
-		looked, err := lookupSignerAssertion(record.Context(), s.Store, dep.Provenance)
-		if err != nil {
-			return fmt.Errorf("lookup signer enrollment for attestation assembly: %w", err)
-		}
-		sa = &looked
-	}
+	policy := f.RolloutStrategy.EffectiveVersionConflictPolicy()
 
 	for i, step := range plan.Steps {
 		if step.Remove != nil {
 			for _, target := range step.Remove.Targets {
 				// TODO: need to call the manifest generator on remove hook
 				in := RemoveInput{
-					Target:       target,
-					DeliveryID:   deliveryIDFor(deploymentID, target.ID),
-					DeploymentID: deploymentID,
-					Auth:         dep.Auth,
+					Target:        target,
+					DeliveryID:    deliveryIDFor(fulfillmentID, target.ID),
+					FulfillmentID: fulfillmentID,
+					Auth:          f.Auth,
 				}
 				if sa != nil {
-					in.Attestation = assembleRemoveAttestation(dep, *sa)
+					in.Attestation = assembleRemoveAttestation(f, *sa)
 				}
 				if _, err := RunActivity(record, s.RemoveFromTarget(), in); err != nil {
 					return fmt.Errorf("remove delivery for target %s: %w", target.ID, err)
@@ -694,7 +724,7 @@ func (s *OrchestrationWorkflowSpec) executeRolloutPlan(
 			var syncResults []DeliveryResult
 			for _, target := range step.Deliver.Targets {
 				manifests, err := RunActivity(record, s.GenerateManifests(), GenerateManifestsInput{
-					Spec:   dep.ManifestStrategy,
+					Spec:   f.ManifestStrategy,
 					Target: target,
 				})
 				if err != nil {
@@ -709,16 +739,16 @@ func (s *OrchestrationWorkflowSpec) executeRolloutPlan(
 				if len(manifests) == 0 {
 					continue
 				}
-				did := deliveryIDFor(deploymentID, target.ID)
+				did := deliveryIDFor(fulfillmentID, target.ID)
 				in := DeliverInput{
-					Target:       target,
-					DeliveryID:   did,
-					DeploymentID: deploymentID,
-					Manifests:    manifests,
-					Auth:         dep.Auth,
+					Target:        target,
+					DeliveryID:    did,
+					FulfillmentID: fulfillmentID,
+					Manifests:     manifests,
+					Auth:          f.Auth,
 				}
 				if sa != nil {
-					in.Attestation = assembleDeliverAttestation(dep, manifests, *sa)
+					in.Attestation = assembleDeliverAttestation(f, manifests, *sa)
 				}
 				result, err := RunActivity(record, s.DeliverToTarget(), in)
 				if err != nil {
@@ -734,8 +764,6 @@ func (s *OrchestrationWorkflowSpec) executeRolloutPlan(
 					return fmt.Errorf("delivery %s failed: %s",
 						did, result.Message)
 				default:
-					// Synchronous terminal state (e.g. Delivered): collect
-					// result directly without waiting for a signal.
 					syncResults = append(syncResults, result)
 				}
 			}
@@ -755,7 +783,7 @@ func (s *OrchestrationWorkflowSpec) executeRolloutPlan(
 		}
 
 		if i < len(plan.Steps)-1 && policy == VersionConflictRestart {
-			currentGen, err := RunActivity(record, s.CheckGeneration(), deploymentID)
+			currentGen, err := RunActivity(record, s.CheckGeneration(), fulfillmentID)
 			if err != nil {
 				return fmt.Errorf("check generation: %w", err)
 			}
@@ -779,7 +807,7 @@ func (s *OrchestrationWorkflowSpec) awaitDeliveries(
 	}
 
 	for len(remaining) > 0 {
-		event, err := AwaitSignal(record, DeploymentEventSignal)
+		event, err := AwaitSignal(record, FulfillmentEventSignal)
 		if err != nil {
 			return nil, fmt.Errorf("await delivery completion: %w", err)
 		}
@@ -804,11 +832,11 @@ func (s *OrchestrationWorkflowSpec) awaitDeliveries(
 }
 
 // deliveryIDFor produces a deterministic [DeliveryID] for a
-// deployment-target pair. This keeps IDs stable across re-deliveries
+// fulfillment-target pair. This keeps IDs stable across re-deliveries
 // to the same target, which is the current one-delivery-per-pair model.
 // TODO: does this need to be deterministic? Do we actually want different IDs on redelivery?
-func deliveryIDFor(depID DeploymentID, tgtID TargetID) DeliveryID {
-	return DeliveryID(string(depID) + ":" + string(tgtID))
+func deliveryIDFor(fID FulfillmentID, tgtID TargetID) DeliveryID {
+	return DeliveryID(string(fID) + ":" + string(tgtID))
 }
 
 // targetInfosByID looks up each id in pool and returns the matching
@@ -866,45 +894,11 @@ func ComputeTargetDelta(previousIDs []TargetID, resolved []TargetInfo, pool []Ta
 	return delta
 }
 
-func lookupSignerAssertion(ctx context.Context, store Store, prov *Provenance) (SignerAssertion, error) {
-	tx, err := store.BeginReadOnly(ctx)
-	if err != nil {
-		return SignerAssertion{}, fmt.Errorf("begin read tx: %w", err)
-	}
-	defer tx.Rollback()
-
-	found, err := tx.SignerEnrollments().ListBySubject(ctx, prov.Sig.Signer)
-	if err != nil {
-		return SignerAssertion{}, fmt.Errorf("list signer enrollments: %w", err)
-	}
-	if len(found) == 0 {
-		return SignerAssertion{}, fmt.Errorf("no signer enrollment found for %s / %s", prov.Sig.Signer.Subject, prov.Sig.Signer.Issuer)
-	}
-	if err := tx.Commit(); err != nil {
-		return SignerAssertion{}, fmt.Errorf("commit read tx: %w", err)
-	}
-	enrollment := found[0]
-	return SignerAssertion{
-		IdentityToken:   enrollment.IdentityToken,
-		RegistryID:      enrollment.RegistryID,
-		RegistrySubject: enrollment.RegistrySubject,
-	}, nil
-}
-
-func assembleDeliverAttestation(dep Deployment, manifests []Manifest, sa SignerAssertion) *Attestation {
-	prov := dep.Provenance
+func assembleDeliverAttestation(f Fulfillment, manifests []Manifest, sa SignerAssertion) *Attestation {
 	return &Attestation{
 		Input: SignedInput{
-			Content: DeploymentContent{
-				DeploymentID:      dep.ID,
-				ManifestStrategy:  dep.ManifestStrategy,
-				PlacementStrategy: dep.PlacementStrategy,
-			},
-			Sig:                prov.Sig,
-			Signer:             sa,
-			ValidUntil:         prov.ValidUntil,
-			OutputConstraints:  prov.OutputConstraints,
-			ExpectedGeneration: prov.ExpectedGeneration,
+			Provenance: *f.Provenance,
+			Signer:     sa,
 		},
 		Output: &PutManifests{
 			Manifests: manifests,
@@ -912,23 +906,17 @@ func assembleDeliverAttestation(dep Deployment, manifests []Manifest, sa SignerA
 	}
 }
 
-func assembleRemoveAttestation(dep Deployment, sa SignerAssertion) *Attestation {
-	prov := dep.Provenance
+func assembleRemoveAttestation(f Fulfillment, sa SignerAssertion) *Attestation {
 	return &Attestation{
 		Input: SignedInput{
-			Content: DeploymentContent{
-				DeploymentID:      dep.ID,
-				ManifestStrategy:  dep.ManifestStrategy,
-				PlacementStrategy: dep.PlacementStrategy,
-			},
-			Sig:                prov.Sig,
-			Signer:             sa,
-			ValidUntil:         prov.ValidUntil,
-			OutputConstraints:  prov.OutputConstraints,
-			ExpectedGeneration: prov.ExpectedGeneration,
+			Provenance: *f.Provenance,
+			Signer:     sa,
 		},
 		Output: &RemoveByDeploymentId{
-			DeploymentID: dep.ID,
+			DeploymentID: DeploymentID(f.Provenance.Content.ContentID()),
 		},
 	}
 }
+
+// unused import guard
+var _ = uuid.New
