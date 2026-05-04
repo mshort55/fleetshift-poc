@@ -32,6 +32,9 @@ jobs:
           cache: true
           cache-dependency-path: "**/go.sum"
 
+      - name: Detect Docker host address for kind OIDC tests
+        run: echo "KIND_HOST_ADDR=$(docker network inspect bridge --format '{{(index .IPAM.Config 0).Gateway}}')" >> "$GITHUB_ENV"
+
       - name: Run tests
         working-directory: ${{ matrix.module }}
         run: go test -count=1 -timeout 15m ./...
