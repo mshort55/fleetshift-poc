@@ -481,7 +481,7 @@ func Run(t *testing.T, infraFactory InfraFactory, registryFactory RegistryFactor
 			}
 			ful := view.Fulfillment
 			ful.BumpGeneration()
-			if err := tx.Fulfillments().Update(ctx, ful); err != nil {
+			if err := tx.Fulfillments().Update(ctx, &ful); err != nil {
 				t.Fatalf("Fulfillments.Update: %v", err)
 			}
 			if err := tx.Commit(); err != nil {
@@ -769,7 +769,7 @@ func registerWorkflows(t *testing.T, infra Infra, registryFactory RegistryFactor
 	orchSpec := &domain.OrchestrationWorkflowSpec{
 		Store:      infra.Store,
 		Delivery:   infra.Delivery,
-		Strategies: domain.DefaultStrategyFactory{},
+		Strategies: domain.StrategyFactory{Store: infra.Store},
 		Registry:   reg,
 		Vault:      infra.Vault,
 	}
@@ -787,12 +787,12 @@ func registerWorkflows(t *testing.T, infra Infra, registryFactory RegistryFactor
 		t.Fatalf("RegisterCreateDeployment: %v", err)
 	}
 
-	cleanupSpec := &domain.DeleteCleanupWorkflowSpec{
+	cleanupSpec := &domain.DeleteDeploymentCleanupWorkflowSpec{
 		Store: infra.Store,
 	}
-	cleanupWf, err := reg.RegisterDeleteCleanup(cleanupSpec)
+	cleanupWf, err := reg.RegisterDeleteDeploymentCleanup(cleanupSpec)
 	if err != nil {
-		t.Fatalf("RegisterDeleteCleanup: %v", err)
+		t.Fatalf("RegisterDeleteDeploymentCleanup: %v", err)
 	}
 
 	deleteSpec := &domain.DeleteDeploymentWorkflowSpec{
@@ -1025,7 +1025,7 @@ func seedFulfillmentCreating(ctx context.Context, t *testing.T, infra Infra, dep
 		t.Fatalf("Begin: %v", err)
 	}
 	defer tx.Rollback()
-	must(t, tx.Fulfillments().Create(ctx, f))
+	must(t, tx.Fulfillments().Create(ctx, &f))
 	must(t, tx.Deployments().Create(ctx, dep))
 	must(t, tx.Commit())
 	return fID
@@ -1213,7 +1213,7 @@ func registerWorkflowsWithAgents(t *testing.T, infra Infra, registryFactory Regi
 	orchSpec := &domain.OrchestrationWorkflowSpec{
 		Store:      infra.Store,
 		Delivery:   infra.Delivery,
-		Strategies: domain.DefaultStrategyFactory{},
+		Strategies: domain.StrategyFactory{Store: infra.Store},
 		Registry:   reg,
 		Vault:      infra.Vault,
 	}
@@ -1231,12 +1231,12 @@ func registerWorkflowsWithAgents(t *testing.T, infra Infra, registryFactory Regi
 		t.Fatalf("RegisterCreateDeployment: %v", err)
 	}
 
-	cleanupSpec := &domain.DeleteCleanupWorkflowSpec{
+	cleanupSpec := &domain.DeleteDeploymentCleanupWorkflowSpec{
 		Store: infra.Store,
 	}
-	cleanupWf, err := reg.RegisterDeleteCleanup(cleanupSpec)
+	cleanupWf, err := reg.RegisterDeleteDeploymentCleanup(cleanupSpec)
 	if err != nil {
-		t.Fatalf("RegisterDeleteCleanup: %v", err)
+		t.Fatalf("RegisterDeleteDeploymentCleanup: %v", err)
 	}
 
 	deleteSpec := &domain.DeleteDeploymentWorkflowSpec{

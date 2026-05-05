@@ -17,8 +17,8 @@ import (
 	"github.com/fleetshift/fleetshift-poc/fleetshift-server/internal/application"
 	"github.com/fleetshift/fleetshift-poc/fleetshift-server/internal/domain"
 	"github.com/fleetshift/fleetshift-poc/fleetshift-server/internal/infrastructure/delivery"
-	"github.com/fleetshift/fleetshift-poc/fleetshift-server/internal/infrastructure/sqlite"
 	"github.com/fleetshift/fleetshift-poc/fleetshift-server/internal/infrastructure/memworkflow"
+	"github.com/fleetshift/fleetshift-poc/fleetshift-server/internal/infrastructure/sqlite"
 	transportgrpc "github.com/fleetshift/fleetshift-poc/fleetshift-server/internal/transport/grpc"
 )
 
@@ -42,7 +42,7 @@ func setup(t *testing.T) pb.DeploymentServiceClient {
 	orchSpec := &domain.OrchestrationWorkflowSpec{
 		Store:      store,
 		Delivery:   router,
-		Strategies: domain.DefaultStrategyFactory{},
+		Strategies: domain.StrategyFactory{Store: store},
 		Registry:   reg,
 	}
 	orchWf, err := reg.RegisterOrchestration(orchSpec)
@@ -59,12 +59,12 @@ func setup(t *testing.T) pb.DeploymentServiceClient {
 		t.Fatalf("RegisterCreateDeployment: %v", err)
 	}
 
-	cleanupSpec := &domain.DeleteCleanupWorkflowSpec{
+	cleanupSpec := &domain.DeleteDeploymentCleanupWorkflowSpec{
 		Store: store,
 	}
-	cleanupWf, err := reg.RegisterDeleteCleanup(cleanupSpec)
+	cleanupWf, err := reg.RegisterDeleteDeploymentCleanup(cleanupSpec)
 	if err != nil {
-		t.Fatalf("RegisterDeleteCleanup: %v", err)
+		t.Fatalf("RegisterDeleteDeploymentCleanup: %v", err)
 	}
 
 	deleteSpec := &domain.DeleteDeploymentWorkflowSpec{

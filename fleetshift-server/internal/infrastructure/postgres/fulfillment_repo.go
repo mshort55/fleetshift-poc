@@ -16,7 +16,7 @@ type FulfillmentRepo struct {
 	DB *sql.Tx
 }
 
-func (r *FulfillmentRepo) Create(ctx context.Context, f domain.Fulfillment) error {
+func (r *FulfillmentRepo) Create(ctx context.Context, f *domain.Fulfillment) error {
 	rt, err := json.Marshal(f.ResolvedTargets)
 	if err != nil {
 		return fmt.Errorf("marshal resolved targets: %w", err)
@@ -32,6 +32,13 @@ func (r *FulfillmentRepo) Create(ctx context.Context, f domain.Fulfillment) erro
 			return fmt.Errorf("marshal provenance: %w", err)
 		}
 	}
+	var attestRefJSON []byte
+	if f.AttestationRef != nil {
+		attestRefJSON, err = json.Marshal(f.AttestationRef)
+		if err != nil {
+			return fmt.Errorf("marshal attestation ref: %w", err)
+		}
+	}
 
 	_, err = r.DB.ExecContext(ctx,
 		`INSERT INTO fulfillments (
@@ -39,15 +46,17 @@ func (r *FulfillmentRepo) Create(ctx context.Context, f domain.Fulfillment) erro
 			placement_strategy_version,
 			rollout_strategy_version,
 			resolved_targets, state, status_reason, auth, provenance,
+			attestation_ref,
 			generation, observed_generation, active_workflow_gen,
 			created_at, updated_at
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)`,
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)`,
 		string(f.ID),
 		int64(f.ManifestStrategyVersion),
 		int64(f.PlacementStrategyVersion),
 		int64(f.RolloutStrategyVersion),
 		string(rt), string(f.State), f.StatusReason,
 		string(auth), nullStringFromBytes(provJSON),
+		nullStringFromBytes(attestRefJSON),
 		int64(f.Generation), int64(f.ObservedGeneration),
 		nullGeneration(f.ActiveWorkflowGen),
 		f.CreatedAt.UTC().Format(time.RFC3339),
@@ -60,10 +69,10 @@ func (r *FulfillmentRepo) Create(ctx context.Context, f domain.Fulfillment) erro
 		return fmt.Errorf("insert fulfillment: %w", err)
 	}
 
-	return r.flushPendingStrategyRecords(ctx, &f)
+	return r.flushPendingStrategyRecords(ctx, f)
 }
 
-func (r *FulfillmentRepo) Get(ctx context.Context, id domain.FulfillmentID) (domain.Fulfillment, error) {
+func (r *FulfillmentRepo) Get(ctx context.Context, id domain.FulfillmentID) (*domain.Fulfillment, error) {
 	row := r.DB.QueryRowContext(ctx,
 		`SELECT `+fulfillmentColumnsJoined("f")+`
 		 FROM fulfillments f
@@ -71,15 +80,23 @@ func (r *FulfillmentRepo) Get(ctx context.Context, id domain.FulfillmentID) (dom
 		 WHERE f.id = $1`,
 		string(id),
 	)
-	return scanFulfillment(row)
+	f, err := scanFulfillment(row)
+	if err != nil {
+		return nil, err
+	}
+	return &f, nil
 }
 
-func (r *FulfillmentRepo) Update(ctx context.Context, f domain.Fulfillment) error {
+func (r *FulfillmentRepo) Update(ctx context.Context, f *domain.Fulfillment) error {
 	rt, _ := json.Marshal(f.ResolvedTargets)
 	auth, _ := json.Marshal(f.Auth)
 	var provJSON []byte
 	if f.Provenance != nil {
 		provJSON, _ = json.Marshal(f.Provenance)
+	}
+	var attestRefJSON []byte
+	if f.AttestationRef != nil {
+		attestRefJSON, _ = json.Marshal(f.AttestationRef)
 	}
 
 	res, err := r.DB.ExecContext(ctx,
@@ -88,15 +105,15 @@ func (r *FulfillmentRepo) Update(ctx context.Context, f domain.Fulfillment) erro
 			placement_strategy_version = $2,
 			rollout_strategy_version = $3,
 			resolved_targets = $4, state = $5, status_reason = $6,
-			auth = $7, provenance = $8,
-			generation = $9, observed_generation = $10, active_workflow_gen = $11,
-			updated_at = $12
-		WHERE id = $13`,
+			auth = $7, provenance = $8, attestation_ref = $9,
+			generation = $10, observed_generation = $11, active_workflow_gen = $12,
+			updated_at = $13
+		WHERE id = $14`,
 		int64(f.ManifestStrategyVersion),
 		int64(f.PlacementStrategyVersion),
 		int64(f.RolloutStrategyVersion),
 		string(rt), string(f.State), f.StatusReason,
-		string(auth), nullStringFromBytes(provJSON),
+		string(auth), nullStringFromBytes(provJSON), nullStringFromBytes(attestRefJSON),
 		int64(f.Generation), int64(f.ObservedGeneration),
 		nullGeneration(f.ActiveWorkflowGen),
 		f.UpdatedAt.UTC().Format(time.RFC3339),
@@ -110,7 +127,7 @@ func (r *FulfillmentRepo) Update(ctx context.Context, f domain.Fulfillment) erro
 		return fmt.Errorf("fulfillment %q: %w", f.ID, domain.ErrNotFound)
 	}
 
-	return r.flushPendingStrategyRecords(ctx, &f)
+	return r.flushPendingStrategyRecords(ctx, f)
 }
 
 func (r *FulfillmentRepo) Delete(ctx context.Context, id domain.FulfillmentID) error {
@@ -180,7 +197,7 @@ func fulfillmentColumnsJoined(f string) string {
 		f + ".placement_strategy_version, ps.spec, " +
 		f + ".rollout_strategy_version, rs.spec, " +
 		f + ".resolved_targets, " + f + ".state, " + f + ".status_reason, " +
-		f + ".auth, " + f + ".provenance, " +
+		f + ".auth, " + f + ".provenance, " + f + ".attestation_ref, " +
 		f + ".generation, " + f + ".observed_generation, " + f + ".active_workflow_gen, " +
 		f + ".created_at, " + f + ".updated_at"
 }
@@ -196,12 +213,12 @@ func strategyJoins(f string) string {
 func scanFulfillment(s scanner) (domain.Fulfillment, error) {
 	var f domain.Fulfillment
 	var id, rtJSON, stateStr, statusReason, authJSON, createdAtStr, updatedAtStr string
-	var msSpec, psSpec, rsSpec, provJSON sql.NullString
+	var msSpec, psSpec, rsSpec, provJSON, attestRefJSON sql.NullString
 	var msVer, psVer, rsVer, generation, observedGeneration int64
 	var activeWorkflowGen sql.NullInt64
 	if err := s.Scan(
 		&id, &msVer, &msSpec, &psVer, &psSpec, &rsVer, &rsSpec,
-		&rtJSON, &stateStr, &statusReason, &authJSON, &provJSON,
+		&rtJSON, &stateStr, &statusReason, &authJSON, &provJSON, &attestRefJSON,
 		&generation, &observedGeneration, &activeWorkflowGen,
 		&createdAtStr, &updatedAtStr,
 	); err != nil {
@@ -258,6 +275,12 @@ func scanFulfillment(s scanner) (domain.Fulfillment, error) {
 		f.Provenance = &domain.Provenance{}
 		if err := json.Unmarshal([]byte(provJSON.String), f.Provenance); err != nil {
 			return f, fmt.Errorf("unmarshal provenance: %w", err)
+		}
+	}
+	if attestRefJSON.Valid {
+		f.AttestationRef = &domain.AttestationRef{}
+		if err := json.Unmarshal([]byte(attestRefJSON.String), f.AttestationRef); err != nil {
+			return f, fmt.Errorf("unmarshal attestation ref: %w", err)
 		}
 	}
 	return f, nil

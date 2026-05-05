@@ -68,7 +68,7 @@ func seedFulfillmentAndDeployment(t *testing.T, store domain.Store, depID domain
 		t.Fatalf("begin tx: %v", err)
 	}
 	defer tx.Rollback()
-	if err := tx.Fulfillments().Create(context.Background(), f); err != nil {
+	if err := tx.Fulfillments().Create(context.Background(), &f); err != nil {
 		t.Fatalf("seed fulfillment %q: %v", f.ID, err)
 	}
 	if err := tx.Deployments().Create(context.Background(), dep); err != nil {
@@ -122,7 +122,7 @@ func getFulfillment(t *testing.T, store domain.Store, id domain.DeploymentID) do
 	if err != nil {
 		t.Fatalf("get fulfillment for deployment %q: %v", id, err)
 	}
-	return f
+	return *f
 }
 
 func getThinDeployment(t *testing.T, store domain.Store, id domain.DeploymentID) domain.Deployment {
@@ -350,7 +350,11 @@ func (r *stubRegistry) RegisterDeleteDeployment(_ *domain.DeleteDeploymentWorkfl
 	return nil, nil
 }
 
-func (r *stubRegistry) RegisterDeleteCleanup(_ *domain.DeleteCleanupWorkflowSpec) (domain.DeleteCleanupWorkflow, error) {
+func (r *stubRegistry) RegisterDeleteDeploymentCleanup(_ *domain.DeleteDeploymentCleanupWorkflowSpec) (domain.DeleteDeploymentCleanupWorkflow, error) {
+	return nil, nil
+}
+
+func (r *stubRegistry) RegisterDeleteManagedResourceCleanup(_ *domain.DeleteManagedResourceCleanupWorkflowSpec) (domain.DeleteManagedResourceCleanupWorkflow, error) {
 	return nil, nil
 }
 
@@ -359,6 +363,14 @@ func (r *stubRegistry) RegisterResumeDeployment(_ *domain.ResumeDeploymentWorkfl
 }
 
 func (r *stubRegistry) RegisterProvisionIdP(_ *domain.ProvisionIdPWorkflowSpec) (domain.ProvisionIdPWorkflow, error) {
+	return nil, nil
+}
+
+func (r *stubRegistry) RegisterCreateManagedResource(_ *domain.CreateManagedResourceWorkflowSpec) (domain.CreateManagedResourceWorkflow, error) {
+	return nil, nil
+}
+
+func (r *stubRegistry) RegisterDeleteManagedResource(_ *domain.DeleteManagedResourceWorkflowSpec) (domain.DeleteManagedResourceWorkflow, error) {
 	return nil, nil
 }
 
@@ -497,7 +509,7 @@ func newTestWorkflow(store domain.Store, delivery domain.DeliveryService, events
 	wf := &domain.OrchestrationWorkflowSpec{
 		Store:      store,
 		Delivery:   delivery,
-		Strategies: domain.DefaultStrategyFactory{},
+		Strategies: domain.StrategyFactory{Store: store},
 		Registry:   reg,
 	}
 	for _, opt := range opts {
@@ -1544,8 +1556,8 @@ func TestOrchestration_DeleteWithProvenance_AssemblesRemoveAttestation(t *testin
 	}
 
 	// Orchestration cleans up delivery data but leaves the fulfillment
-	// row; the DeleteCleanupWorkflow deletes both rows after receiving
-	// the signal.
+	// row; the DeleteDeploymentCleanupWorkflow deletes both rows after
+	// receiving the signal.
 	tx, err := store.BeginReadOnly(context.Background())
 	if err != nil {
 		t.Fatal(err)

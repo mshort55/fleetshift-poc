@@ -35,7 +35,7 @@ func TestKindAddon_EndToEnd(t *testing.T) {
 	orchSpec := &domain.OrchestrationWorkflowSpec{
 		Store:      store,
 		Delivery:   router,
-		Strategies: domain.DefaultStrategyFactory{},
+		Strategies: domain.StrategyFactory{Store: store},
 		Registry:   reg,
 	}
 	orchWf, err := reg.RegisterOrchestration(orchSpec)
@@ -52,10 +52,10 @@ func TestKindAddon_EndToEnd(t *testing.T) {
 		t.Fatalf("RegisterCreateDeployment: %v", err)
 	}
 
-	cleanupSpec := &domain.DeleteCleanupWorkflowSpec{Store: store}
-	cleanupWf, err := reg.RegisterDeleteCleanup(cleanupSpec)
+	cleanupSpec := &domain.DeleteDeploymentCleanupWorkflowSpec{Store: store}
+	cleanupWf, err := reg.RegisterDeleteDeploymentCleanup(cleanupSpec)
 	if err != nil {
-		t.Fatalf("RegisterDeleteCleanup: %v", err)
+		t.Fatalf("RegisterDeleteDeploymentCleanup: %v", err)
 	}
 
 	deleteSpec := &domain.DeleteDeploymentWorkflowSpec{

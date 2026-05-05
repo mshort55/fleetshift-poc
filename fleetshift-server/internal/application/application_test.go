@@ -41,7 +41,7 @@ func setupWithStoreAndAgent(t *testing.T, store domain.Store, agent domain.Deliv
 	orchSpec := &domain.OrchestrationWorkflowSpec{
 		Store:      store,
 		Delivery:   router,
-		Strategies: domain.DefaultStrategyFactory{},
+		Strategies: domain.StrategyFactory{Store: store},
 		Registry:   reg,
 	}
 	orchWf, err := reg.RegisterOrchestration(orchSpec)
@@ -66,12 +66,12 @@ func setupWithStoreAndAgent(t *testing.T, store domain.Store, agent domain.Deliv
 		},
 	}
 
-	cleanupSpec := &domain.DeleteCleanupWorkflowSpec{
+	cleanupSpec := &domain.DeleteDeploymentCleanupWorkflowSpec{
 		Store: store,
 	}
-	cleanupWf, err := reg.RegisterDeleteCleanup(cleanupSpec)
+	cleanupWf, err := reg.RegisterDeleteDeploymentCleanup(cleanupSpec)
 	if err != nil {
-		t.Fatalf("RegisterDeleteCleanup: %v", err)
+		t.Fatalf("RegisterDeleteDeploymentCleanup: %v", err)
 	}
 
 	deleteSpec := &domain.DeleteDeploymentWorkflowSpec{
@@ -561,7 +561,7 @@ func seedDeployment(t *testing.T, store domain.Store, depID domain.DeploymentID,
 		t.Fatalf("Begin: %v", err)
 	}
 	defer tx.Rollback()
-	if err := tx.Fulfillments().Create(ctx, f); err != nil {
+	if err := tx.Fulfillments().Create(ctx, &f); err != nil {
 		t.Fatalf("Create fulfillment: %v", err)
 	}
 	d := domain.Deployment{
