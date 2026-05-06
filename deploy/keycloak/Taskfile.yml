@@ -31,6 +31,15 @@ tasks:
     cmds:
       - ./scripts/add-base-domain.sh --base-domain {{.BASE_DOMAIN}} --cluster-name {{.CLUSTER_NAME}}
 
+  reset-realm:
+    desc: Reset the FleetShift realm to match the realm config file (Keycloak stays up)
+    interactive: true
+    preconditions:
+      - sh: oc get namespace keycloak-prod &>/dev/null
+        msg: "Namespace 'keycloak-prod' not found — Keycloak does not appear to be deployed on this cluster."
+    cmds:
+      - ./scripts/reset-realm.sh
+
   add-user:
     desc: Add or update a user in the FleetShift Keycloak realm
     requires:
