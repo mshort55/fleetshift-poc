@@ -204,3 +204,170 @@ def authenticate(config: dict) -> tuple[str, str]:
     workforce_token = sts_exchange(keycloak_jwt, config)
     broker_token = generate_broker_id_token(workforce_token, config)
     return broker_token, email
+
+
+def api_request(method: str, path: str, token: str, email: str, config: dict, json_data: dict = None) -> requests.Response:
+    """Make an authenticated request to the CLS Backend API."""
+    url = f"{config['gateway_url'].rstrip('/')}{path}"
+    resp = requests.request(
+        method,
+        url,
+        headers={
+            "Authorization": f"Bearer {token}",
+            "X-User-Email": email,
+            "Content-Type": "application/json",
+        },
+        json=json_data,
+    )
+    return resp
+
+
+def build_cluster_spec(
+    cluster_name: str,
+    config: dict,
+    iam_config: dict,
+    infra_config: dict,
+    signing_key_base64: str,
+) -> dict:
+    """Build the cluster creation request body."""
+    wif_spec = iam_config_to_wif_spec(iam_config)
+    return {
+        "name": cluster_name,
+        "target_project_id": config["project"],
+        "spec": {
+            "infraID": infra_config["infraId"],
+            "issuerURL": f"https://hypershift-{infra_config['infraId']}-oidc",
+            "serviceAccountSigningKey": signing_key_base64,
+            "platform": {
+                "type": "GCP",
+                "gcp": {
+                    "projectID": config["project"],
+                    "region": config["region"],
+                    "network": infra_config["networkName"],
+                    "subnet": infra_config["subnetName"],
+                    "endpointAccess": config.get("endpoint_access", "PublicAndPrivate"),
+                    "workloadIdentity": wif_spec,
+                },
+            },
+        },
+    }
+
+
+def build_nodepool_spec(cluster_name: str, cluster_id: str, config: dict) -> dict:
+    """Build the nodepool creation request body."""
+    return {
+        "name": f"{cluster_name}-nodepool-1",
+        "cluster_id": cluster_id,
+        "spec": {
+            "replicas": config.get("replicas", 2),
+            "platform": {
+                "type": "GCP",
+                "gcp": {
+                    "instanceType": "n1-standard-4",
+                    "rootVolume": {
+                        "size": 128,
+                        "type": "pd-standard",
+                    },
+                },
+            },
+            "management": {
+                "autoRepair": True,
+                "upgradeType": "Replace",
+            },
+        },
+    }
+
+
+def poll_cluster_ready(cluster_id: str, token: str, email: str, config: dict) -> None:
+    """Poll until cluster reaches Ready or Failed. Timeout after 20 minutes."""
+    max_polls = 80
+    interval = 15
+    print(f"\nPolling cluster {cluster_id} every {interval}s (timeout: {max_polls * interval // 60} min)...")
+
+    for i in range(max_polls):
+        resp = api_request("GET", f"/api/v1/clusters/{cluster_id}", token, email, config)
+        if resp.status_code == 404:
+            print("Error: cluster disappeared (404)")
+            sys.exit(1)
+        if resp.status_code >= 400:
+            print(f"Warning: poll returned HTTP {resp.status_code}, retrying...")
+            time.sleep(interval)
+            continue
+
+        data = resp.json()
+        phase = data.get("status", {}).get("phase", "Unknown")
+        message = data.get("status", {}).get("message", "")
+
+        status_line = f"  [{i+1}/{max_polls}] Phase: {phase}"
+        if message:
+            status_line += f" — {message}"
+        print(status_line)
+
+        if phase == "Ready":
+            print(f"\nCluster {cluster_id} is Ready!")
+            return
+        if phase == "Failed":
+            reason = data.get("status", {}).get("reason", "unknown")
+            print(f"\nError: cluster creation failed. Reason: {reason}")
+            if message:
+                print(f"  Message: {message}")
+            sys.exit(1)
+
+        time.sleep(interval)
+
+    print("\nError: timed out waiting for cluster to become Ready")
+    sys.exit(1)
+
+
+def cmd_create(cluster_name: str, config: dict) -> None:
+    """Create a cluster end-to-end: infra → cluster → nodepool → poll."""
+    token, email = authenticate(config)
+
+    infra_id = cluster_name
+    validate_infra_id(infra_id)
+
+    print("\n=== Generating RSA Keypair ===")
+    keypair = generate_cluster_keypair()
+    print(f"Generated keypair (kid: {keypair.kid})")
+
+    jwks_tmp = None
+    try:
+        jwks_fd, jwks_tmp = tempfile.mkstemp(suffix=".json", prefix="jwks-")
+        os.write(jwks_fd, keypair.jwks_json.encode("utf-8"))
+        os.close(jwks_fd)
+
+        print("\n=== Creating IAM Infrastructure ===")
+        iam_config = create_iam_gcp(infra_id, config["project"], jwks_tmp)
+
+        print("\n=== Creating Network Infrastructure ===")
+        infra_config = create_infra_gcp(infra_id, config["project"], config["region"])
+    finally:
+        if jwks_tmp and os.path.exists(jwks_tmp):
+            os.unlink(jwks_tmp)
+
+    print("\n=== Creating Cluster ===")
+    cluster_data = build_cluster_spec(
+        cluster_name, config, iam_config, infra_config, keypair.private_key_pem_base64,
+    )
+    resp = api_request("POST", "/api/v1/clusters", token, email, config, json_data=cluster_data)
+    if resp.status_code >= 400:
+        print(f"Error: cluster create failed (HTTP {resp.status_code})")
+        print(resp.text)
+        sys.exit(1)
+
+    cluster = resp.json()
+    cluster_id = cluster["id"]
+    print(f"Cluster created: {cluster_name} (ID: {cluster_id})")
+
+    print("\n=== Creating NodePool ===")
+    nodepool_data = build_nodepool_spec(cluster_name, cluster_id, config)
+    resp = api_request("POST", "/api/v1/nodepools", token, email, config, json_data=nodepool_data)
+    if resp.status_code >= 400:
+        print(f"Error: nodepool create failed (HTTP {resp.status_code})")
+        print(resp.text)
+        sys.exit(1)
+
+    nodepool = resp.json()
+    print(f"NodePool created: {nodepool.get('name', 'unknown')} (ID: {nodepool.get('id', 'unknown')})")
+
+    poll_cluster_ready(cluster_id, token, email, config)
