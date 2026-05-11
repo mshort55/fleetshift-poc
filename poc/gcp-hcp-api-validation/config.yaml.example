@@ -1,0 +1,26 @@
+# HCP Lifecycle Script Configuration
+# Copy to config.yaml and fill in your values.
+
+# Keycloak OIDC
+keycloak_url: "https://your-keycloak.example.com"
+keycloak_realm: "your-realm"
+keycloak_client_id: "your-client-id"
+
+# GCP Workforce Identity Federation
+gcp_project: "your-broker-project"
+gcp_org_id: "your-org-id"
+workforce_pool: "your-workforce-pool"
+workforce_provider: "your-provider"
+
+# Broker Service Account
+broker_sa_email: "broker-sa@your-project.iam.gserviceaccount.com"
+
+# CLS Backend API Gateway
+gateway_url: "https://your-gateway.uc.gateway.dev"
+gateway_audience: "your-oauth-client-id.apps.googleusercontent.com"
+
+# Cluster Defaults
+project: "your-target-gcp-project"
+region: "us-central1"
+endpoint_access: "PublicAndPrivate"
+replicas: 2
