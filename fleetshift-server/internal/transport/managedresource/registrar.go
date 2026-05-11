@@ -92,7 +92,7 @@ func Build(cfg *ResourceTypeConfig, deps Deps) (*RegisteredService, error) {
 				Handler:    handler.handleGet,
 			},
 			{
-				MethodName: "List" + strings.ToUpper(cfg.Plural[:1]) + cfg.Plural[1:],
+				MethodName: "List" + cfg.Plural,
 				Handler:    handler.handleList,
 			},
 			{
@@ -101,7 +101,7 @@ func Build(cfg *ResourceTypeConfig, deps Deps) (*RegisteredService, error) {
 			},
 		},
 		Streams:  []grpc.StreamDesc{},
-		Metadata: "dynamic/" + strings.ToLower(cfg.Singular) + "_service.proto",
+		Metadata: "dynamic/" + strings.ToLower(cfg.Singular[:1]) + cfg.Singular[1:] + "_service.proto",
 	}
 
 	return &RegisteredService{
@@ -283,7 +283,7 @@ func (h *dynamicHandler) handleList(
 
 	if interceptor != nil {
 		info := &grpc.UnaryServerInfo{
-			FullMethod: "/" + h.cfg.ServiceName() + "/List" + strings.ToUpper(h.cfg.Plural[:1]) + h.cfg.Plural[1:],
+			FullMethod: "/" + h.cfg.ServiceName() + "/List" + h.cfg.Plural,
 		}
 		return interceptor(ctx, req, info, func(ctx context.Context, r any) (any, error) {
 			return h.doList(ctx, r.(proto.Message))
@@ -390,10 +390,10 @@ func (h *dynamicHandler) viewToResource(v domain.ManagedResourceView) (proto.Mes
 	versionField := h.descs.Resource.Fields().ByName("intent_version")
 	resource.Set(versionField, protoreflect.ValueOfInt64(int64(mr.CurrentVersion)))
 
-	// state (int32 encoding of lifecycle enum)
+	// state
 	stateField := h.descs.Resource.Fields().ByName("state")
 	stateNum := int32(stateFromFulfillment(f.State))
-	resource.Set(stateField, protoreflect.ValueOfInt32(stateNum))
+	resource.Set(stateField, protoreflect.ValueOfEnum(protoreflect.EnumNumber(stateNum)))
 
 	// reconciling
 	reconcilingField := h.descs.Resource.Fields().ByName("reconciling")
