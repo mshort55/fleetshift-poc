@@ -13,6 +13,7 @@ import sys
 import tempfile
 import time
 import os
+import webbrowser
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 
@@ -76,7 +77,6 @@ def keycloak_login(config: dict) -> tuple[str, str]:
     )
 
     print("Opening browser for Keycloak login...")
-    import webbrowser
     webbrowser.open(uri)
 
     print("Waiting for login callback on http://localhost:8888/callback ...")
@@ -324,7 +324,11 @@ def cmd_create(cluster_name: str, config: dict) -> None:
     token, email = authenticate(config)
 
     infra_id = cluster_name
-    validate_infra_id(infra_id)
+    try:
+        validate_infra_id(infra_id)
+    except ValueError as e:
+        print(f"Error: {e}")
+        sys.exit(1)
 
     print("\n=== Generating RSA Keypair ===")
     keypair = generate_cluster_keypair()

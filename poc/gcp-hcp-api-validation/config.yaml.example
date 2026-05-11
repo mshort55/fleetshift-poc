@@ -8,7 +8,6 @@ keycloak_client_id: "your-client-id"
 
 # GCP Workforce Identity Federation
 gcp_project: "your-broker-project"
-gcp_org_id: "your-org-id"
 workforce_pool: "your-workforce-pool"
 workforce_provider: "your-provider"
 
