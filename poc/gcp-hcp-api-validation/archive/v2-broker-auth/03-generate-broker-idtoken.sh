@@ -69,7 +69,7 @@ if [[ "${ID_HTTP_CODE}" -ge 400 ]]; then
         echo ""
         echo "  gcloud iam service-accounts create $(echo "${BROKER_SA_EMAIL}" | cut -d@ -f1) \\"
         echo "    --project=$(echo "${BROKER_SA_EMAIL}" | cut -d@ -f2 | cut -d. -f1) \\"
-        echo "    --display-name=\"OME POC ID Token Broker\""
+        echo "    --display-name=\"ID Token Broker\""
     fi
     exit 1
 fi

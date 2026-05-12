@@ -28,6 +28,8 @@ Config = dict[str, str]
 IamConfig = dict[str, str | dict[str, str]]
 InfraConfig = dict[str, str]
 ClusterSpec = dict[str, Any]
+OIDC_CALLBACK_URL = "http://localhost:8888/callback"
+OIDC_CALLBACK_PORT = 8888
 
 def load_config(config_path: str = "config.yaml") -> Config:
     path = Path(config_path)
@@ -65,6 +67,21 @@ def discover_oidc_endpoints(issuer_url: str) -> tuple[str, str]:
     return authorize, token
 
 
+def open_browser_for_login(uri: str) -> None:
+    """Open the login URL in a browser and always print a manual fallback."""
+    print("Opening browser for OIDC login...")
+    print("If the browser does not open automatically, open this URL manually:")
+    print(uri)
+    try:
+        opened = webbrowser.open(uri)
+    except Exception as e:
+        print(f"Warning: automatic browser launch failed: {e}")
+        return
+
+    if not opened:
+        print("Warning: automatic browser launch did not report success.")
+
+
 def oidc_login(config: Config) -> tuple[str, str]:
     """OIDC PKCE login. Opens browser, returns (id_token_jwt, user_email)."""
     authorize_url, token_url = discover_oidc_endpoints(config["oidc_issuer_url"])
@@ -81,14 +98,14 @@ def oidc_login(config: Config) -> tuple[str, str]:
         session.create_authorization_url(
             authorize_url,
             code_verifier=code_verifier,
+            redirect_uri=OIDC_CALLBACK_URL,
             scope="openid email",
         ),
     )
 
-    print("Opening browser for OIDC login...")
-    webbrowser.open(uri)
+    open_browser_for_login(uri)
 
-    print("Waiting for login callback on http://localhost:8888/callback ...")
+    print(f"Waiting for login callback on {OIDC_CALLBACK_URL} ...")
     callback_url = _wait_for_callback()
 
     token_response = cast(
@@ -97,6 +114,7 @@ def oidc_login(config: Config) -> tuple[str, str]:
             token_url,
             authorization_response=callback_url,
             code_verifier=code_verifier,
+            redirect_uri=OIDC_CALLBACK_URL,
         ),
     )
 
@@ -118,7 +136,7 @@ def oidc_login(config: Config) -> tuple[str, str]:
     return id_token, email
 
 
-def _wait_for_callback(port: int = 8888, timeout: int = 120) -> str:
+def _wait_for_callback(port: int = OIDC_CALLBACK_PORT, timeout: int = 120) -> str:
     """Run a one-shot HTTP server to catch the OAuth callback."""
     callback_url = None
 

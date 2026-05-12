@@ -20,7 +20,7 @@ else
     gcloud iam workforce-pools create "${WORKFORCE_POOL}" \
         --location="global" \
         --organization="${GCP_ORG_ID}" \
-        --display-name="OME POC Workforce Pool" \
+        --display-name="Workforce Pool" \
         --description="POC: test Keycloak-to-GCP token exchange for OME"
     log_ok "Pool created"
 fi

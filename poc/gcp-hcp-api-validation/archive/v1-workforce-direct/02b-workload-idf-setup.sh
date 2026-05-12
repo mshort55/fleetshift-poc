@@ -11,9 +11,9 @@ source "${SCRIPT_DIR}/lib.sh"
 load_config GCP_PROJECT KEYCLOAK_URL KEYCLOAK_REALM KEYCLOAK_CLIENT_ID
 
 ISSUER_URI="${KEYCLOAK_URL}/realms/${KEYCLOAK_REALM}"
-WORKLOAD_POOL="ome-poc-workload-pool"
+WORKLOAD_POOL="fallback-workload-pool"
 WORKLOAD_PROVIDER="keycloak-workload"
-SA_NAME="ome-poc-gateway-sa"
+SA_NAME="fallback-gateway-sa"
 SA_EMAIL="${SA_NAME}@${GCP_PROJECT}.iam.gserviceaccount.com"
 
 log_header "Fallback Stage 2b: Workload Identity Federation Setup"
@@ -36,7 +36,7 @@ else
     gcloud iam workload-identity-pools create "${WORKLOAD_POOL}" \
         --location="global" \
         --project="${GCP_PROJECT}" \
-        --display-name="OME POC Workload Pool (fallback)"
+        --display-name="Workload Pool (fallback)"
     log_ok "Pool created"
 fi
 
@@ -68,7 +68,7 @@ if gcloud iam service-accounts describe "${SA_EMAIL}" \
 else
     gcloud iam service-accounts create "${SA_NAME}" \
         --project="${GCP_PROJECT}" \
-        --display-name="OME POC Gateway SA (fallback)"
+        --display-name="Gateway SA (fallback)"
     log_ok "Service account created: ${SA_EMAIL}"
 fi
 
