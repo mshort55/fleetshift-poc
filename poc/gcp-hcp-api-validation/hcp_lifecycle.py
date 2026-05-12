@@ -37,7 +37,7 @@ def load_config(config_path: str = "config.yaml") -> Config:
     with open(path) as f:
         config: Config = yaml.safe_load(f)
     required = [
-        "keycloak_url", "keycloak_realm", "keycloak_client_id",
+        "oidc_authorize_url", "oidc_token_url", "oidc_client_id",
         "gcp_project", "workforce_pool", "workforce_provider",
         "broker_sa_email", "gateway_url", "gateway_audience",
         "project", "region",
@@ -49,19 +49,15 @@ def load_config(config_path: str = "config.yaml") -> Config:
     return config
 
 
-def keycloak_login(config: Config) -> tuple[str, str]:
-    """Keycloak PKCE login. Opens browser, returns (id_token_jwt, user_email)."""
-    base_url = config["keycloak_url"]
-    realm = config["keycloak_realm"]
-    client_id = config["keycloak_client_id"]
-
-    authorize_url = f"{base_url}/realms/{realm}/protocol/openid-connect/auth"
-    token_url = f"{base_url}/realms/{realm}/protocol/openid-connect/token"
+def oidc_login(config: Config) -> tuple[str, str]:
+    """OIDC PKCE login. Opens browser, returns (id_token_jwt, user_email)."""
+    authorize_url = config["oidc_authorize_url"]
+    token_url = config["oidc_token_url"]
 
     code_verifier = generate_token(48)
 
     session = OAuth2Session(
-        client_id=client_id,
+        client_id=config["oidc_client_id"],
         code_challenge_method="S256",
     )
 
@@ -74,7 +70,7 @@ def keycloak_login(config: Config) -> tuple[str, str]:
         ),
     )
 
-    print("Opening browser for Keycloak login...")
+    print("Opening browser for OIDC login...")
     webbrowser.open(uri)
 
     print("Waiting for login callback on http://localhost:8888/callback ...")
@@ -91,7 +87,7 @@ def keycloak_login(config: Config) -> tuple[str, str]:
 
     id_token_val: str | None = token_response.get("id_token")
     if not id_token_val:
-        print("Error: no id_token in Keycloak response")
+        print("Error: no id_token in OIDC token response")
         sys.exit(1)
     id_token: str = str(id_token_val)
 
@@ -100,7 +96,7 @@ def keycloak_login(config: Config) -> tuple[str, str]:
     )
     email: str | None = payload.get("email")
     if not email:
-        print("Error: no email claim in Keycloak token. Add an email mapper to the Keycloak client.")
+        print("Error: no email claim in OIDC token. Ensure the IdP includes an email claim.")
         sys.exit(1)
 
     print(f"Logged in as: {email}")
@@ -135,8 +131,8 @@ def _wait_for_callback(port: int = 8888, timeout: int = 120) -> str:
     return callback_url
 
 
-def sts_exchange(keycloak_jwt: str, config: Config) -> str:
-    """Exchange Keycloak JWT for a Google Workforce access token via STS."""
+def sts_exchange(oidc_jwt: str, config: Config) -> str:
+    """Exchange an OIDC JWT for a Google Workforce access token via STS."""
     audience = (
         f"//iam.googleapis.com/locations/global/workforcePools/"
         f"{config['workforce_pool']}/providers/{config['workforce_provider']}"
@@ -149,7 +145,7 @@ def sts_exchange(keycloak_jwt: str, config: Config) -> str:
             "requested_token_type": "urn:ietf:params:oauth:token-type:access_token",
             "scope": "https://www.googleapis.com/auth/cloud-platform",
             "subject_token_type": "urn:ietf:params:oauth:token-type:jwt",
-            "subject_token": keycloak_jwt,
+            "subject_token": oidc_jwt,
         },
         headers={"Content-Type": "application/x-www-form-urlencoded"},
     )
@@ -204,8 +200,8 @@ def generate_broker_id_token(workforce_token: str, config: Config) -> str:
 def authenticate(config: Config) -> tuple[str, str]:
     """Full auth chain. Returns (broker_id_token, user_email)."""
     print("\n=== Authentication ===")
-    keycloak_jwt, email = keycloak_login(config)
-    workforce_token = sts_exchange(keycloak_jwt, config)
+    oidc_jwt, email = oidc_login(config)
+    workforce_token = sts_exchange(oidc_jwt, config)
     broker_token = generate_broker_id_token(workforce_token, config)
     return broker_token, email
 

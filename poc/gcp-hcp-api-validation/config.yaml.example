@@ -1,10 +1,10 @@
 # HCP Lifecycle Script Configuration
 # Copy to config.yaml and fill in your values.
 
-# Keycloak OIDC
-keycloak_url: "https://your-keycloak.example.com"
-keycloak_realm: "your-realm"
-keycloak_client_id: "your-client-id"
+# OIDC Identity Provider
+oidc_authorize_url: "https://your-idp.example.com/realms/your-realm/protocol/openid-connect/auth"
+oidc_token_url: "https://your-idp.example.com/realms/your-realm/protocol/openid-connect/token"
+oidc_client_id: "your-client-id"
 
 # GCP Workforce Identity Federation
 gcp_project: "your-broker-project"
