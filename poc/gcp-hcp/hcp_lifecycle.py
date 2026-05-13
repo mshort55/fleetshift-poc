@@ -9,6 +9,8 @@ Usage:
 import argparse
 import base64
 import json
+import shutil
+import subprocess
 import sys
 import tempfile
 import time
@@ -30,6 +32,102 @@ InfraConfig = dict[str, str]
 ClusterSpec = dict[str, Any]
 OIDC_CALLBACK_URL = "http://localhost:8888/callback"
 OIDC_CALLBACK_PORT = 8888
+
+
+class GCloudError(Exception):
+    """Raised when gcloud inspection fails unexpectedly."""
+
+
+def get_gcloud_binary() -> str:
+    env_path = os.environ.get("GCLOUD_BINARY")
+    if env_path:
+        return env_path
+    found = shutil.which("gcloud")
+    if found:
+        return found
+    raise GCloudError("gcloud CLI not found. Set GCLOUD_BINARY or add gcloud to PATH.")
+
+
+def gcloud_regional_resource_exists(
+    resource_type: str,
+    resource_name: str,
+    project_id: str,
+    region: str,
+) -> bool:
+    """Return True if the named regional GCP resource exists."""
+    cmd = [
+        get_gcloud_binary(),
+        "compute",
+        resource_type,
+        "describe",
+        resource_name,
+        "--region",
+        region,
+        "--project",
+        project_id,
+        "--format=json",
+    ]
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+    except FileNotFoundError as e:
+        raise GCloudError(f"failed to run gcloud: {e}") from e
+    except subprocess.TimeoutExpired as e:
+        raise GCloudError(f"gcloud timed out while describing {resource_type} {resource_name}") from e
+
+    if result.returncode == 0:
+        return True
+
+    stderr = result.stderr.lower()
+    if "could not fetch resource" in stderr or "was not found" in stderr or "not found" in stderr:
+        return False
+
+    raise GCloudError(
+        f"gcloud describe failed for {resource_type} {resource_name} "
+        f"(exit {result.returncode}):\n{result.stderr}"
+    )
+
+
+def wait_for_psc_cleanup(
+    cluster_id: str,
+    project_id: str,
+    region: str,
+    max_retries: int = 40,
+    interval: int = 30,
+) -> None:
+    """Wait until cluster-scoped PSC endpoint artifacts are gone from the tenant project."""
+    endpoint_name = f"psc-{cluster_id}-endpoint"
+    ip_name = f"psc-{cluster_id}-ip"
+
+    print("\n=== Waiting for PSC Endpoint Cleanup ===")
+    print(
+        f"Checking GCP PSC artifacts every {interval}s "
+        f"(timeout: {max_retries * interval // 60} min)..."
+    )
+
+    for i in range(max_retries):
+        endpoint_exists = gcloud_regional_resource_exists(
+            "forwarding-rules", endpoint_name, project_id, region
+        )
+        ip_exists = gcloud_regional_resource_exists(
+            "addresses", ip_name, project_id, region
+        )
+
+        remaining = []
+        if endpoint_exists:
+            remaining.append(f"forwarding rule {endpoint_name}")
+        if ip_exists:
+            remaining.append(f"address {ip_name}")
+
+        if not remaining:
+            print("PSC endpoint artifacts cleaned up.")
+            return
+
+        print(f"  [{i+1}/{max_retries}] Waiting on: {', '.join(remaining)}")
+        if i < max_retries - 1:
+            time.sleep(interval)
+
+    print("Error: timed out waiting for PSC endpoint cleanup")
+    sys.exit(1)
 
 def load_config(config_path: str = "config.yaml") -> Config:
     path = Path(config_path)
@@ -485,14 +583,16 @@ def cmd_delete(cluster_name: str, config: Config) -> None:
         print(f"Cluster deletion initiated (HTTP {resp.status_code})")
         poll_cluster_deleted(cluster_id, token, email, config)
 
+    wait_for_psc_cleanup(cluster_id, config["project"], config["region"])
+
+    print("\n=== Destroying Network Infrastructure ===")
+    destroy_infra_with_retry(cluster_name, config["project"], config["region"])
+
     print("\n=== Destroying IAM Infrastructure ===")
     try:
         destroy_iam_gcp(cluster_name, config["project"])
     except HypershiftError as e:
         print(f"Warning: IAM destroy failed: {e}")
-
-    print("\n=== Destroying Network Infrastructure ===")
-    destroy_infra_with_retry(cluster_name, config["project"], config["region"])
 
     print(f"\nCluster {cluster_name} fully deleted.")
 
