@@ -1,0 +1,28 @@
+# HCP Lifecycle Script Configuration
+# Copy to config.yaml and fill in your values.
+
+# OIDC identity provider used for browser login.
+# The issuer must publish .well-known/openid-configuration and the id_token must include email.
+oidc_issuer_url: "https://your-idp.example.com/realms/your-realm"
+oidc_client_id: "your-client-id"
+
+# Broker/workforce project.
+# This project holds the Workforce pool/provider and the broker service account.
+gcp_project: "your-broker-project"
+workforce_pool: "your-workforce-pool"
+workforce_provider: "your-provider"
+
+# Broker service account in the broker/workforce project.
+broker_sa_email: "broker-sa@your-project.iam.gserviceaccount.com"
+
+# Set the real gateway URL only in your local git-ignored config.yaml.
+gateway_url: "https://your-gateway.example.com"
+# Set the real gateway audience only in your local git-ignored config.yaml.
+gateway_audience: "your-gateway-audience"
+
+# Target HCP project.
+# This is where hypershift creates IAM and network resources for the hosted cluster.
+project: "your-target-gcp-project"
+region: "us-central1"
+endpoint_access: "PublicAndPrivate"
+replicas: 2
