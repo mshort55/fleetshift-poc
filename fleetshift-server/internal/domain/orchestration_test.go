@@ -165,6 +165,20 @@ func getTarget(t *testing.T, store domain.Store, id domain.TargetID) domain.Targ
 	return tgt
 }
 
+func getInventoryItem(t *testing.T, store domain.Store, id domain.InventoryItemID) domain.InventoryItem {
+	t.Helper()
+	tx, err := store.BeginReadOnly(context.Background())
+	if err != nil {
+		t.Fatalf("begin tx: %v", err)
+	}
+	defer tx.Rollback()
+	item, err := tx.Inventory().Get(context.Background(), id)
+	if err != nil {
+		t.Fatalf("get inventory item %q: %v", id, err)
+	}
+	return item
+}
+
 func getDeliveries(t *testing.T, store domain.Store, depID domain.DeploymentID) []domain.Delivery {
 	t.Helper()
 	tx, err := store.BeginReadOnly(context.Background())
@@ -896,6 +910,11 @@ func TestOrchestration_DeliveryOutputs_RegistersTargetAndStoresSecret(t *testing
 		t.Errorf("target type = %q, want kubernetes", tgt.Type)
 	}
 
+	item := getInventoryItem(t, store, "target:k8s-new-cluster")
+	if item.SourceDeliveryID == nil || *item.SourceDeliveryID != "d1:provisioner" {
+		t.Fatalf("inventory SourceDeliveryID = %v, want d1:provisioner", item.SourceDeliveryID)
+	}
+
 	if vault != nil {
 		secret, err := vault.Get(context.Background(), "targets/k8s-new-cluster/kubeconfig")
 		if err != nil {
@@ -1130,6 +1149,124 @@ func TestOrchestration_DeletePipeline_NoTargets_HardDeletes(t *testing.T) {
 	}
 	if f.State != domain.FulfillmentStateDeleting {
 		t.Errorf("fulfillment state = %q, want deleting", f.State)
+	}
+}
+
+func TestOrchestration_DeletePipeline_CleansUpOwnedOutputsAndSecrets(t *testing.T) {
+	store, vault := setupStore(t)
+	seedFulfillmentAndDeployment(t, store, "d1", domain.Fulfillment{
+		Generation:      2,
+		ResolvedTargets: []domain.TargetID{"gcphcp-provider"},
+		ManifestStrategy: domain.ManifestStrategySpec{
+			Type: domain.ManifestStrategyInline,
+			Manifests: []domain.Manifest{{
+				ResourceType: "api.gcphcp.cluster",
+				Raw:          json.RawMessage(`{"name":"guest-cluster"}`),
+			}},
+		},
+		PlacementStrategy: domain.PlacementStrategySpec{
+			Type:    domain.PlacementStrategyStatic,
+			Targets: []domain.TargetID{"gcphcp-provider"},
+		},
+		State: domain.FulfillmentStateDeleting,
+	})
+	seedTargets(t, store, domain.TargetInfo{ID: "gcphcp-provider", Name: "gcphcp-provider", Type: "gcphcp"})
+
+	deliveryID := domain.DeliveryID("d1:gcphcp-provider")
+	seedDelivery(t, store, domain.Delivery{
+		ID:            deliveryID,
+		FulfillmentID: domain.FulfillmentID("d1"),
+		TargetID:      "gcphcp-provider",
+		Manifests: []domain.Manifest{{
+			ResourceType: "api.gcphcp.cluster",
+			Raw:          json.RawMessage(`{"name":"guest-cluster"}`),
+		}},
+		State: domain.DeliveryStateDelivered,
+	})
+
+	ctx := context.Background()
+	if err := vault.Put(ctx, "targets/k8s-guest-cluster/sa-token", []byte("fake-sa-token")); err != nil {
+		t.Fatalf("vault put: %v", err)
+	}
+
+	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	tx, err := store.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin tx: %v", err)
+	}
+	defer tx.Rollback()
+
+	if err := tx.Inventory().Create(ctx, domain.InventoryItem{
+		ID:               "target:k8s-guest-cluster",
+		Type:             "kubernetes",
+		Name:             "guest-cluster",
+		Properties:       json.RawMessage(`{"api_server":"https://guest.example:6443","service_account_token_ref":"targets/k8s-guest-cluster/sa-token"}`),
+		SourceDeliveryID: &deliveryID,
+		CreatedAt:        now,
+		UpdatedAt:        now,
+	}); err != nil {
+		t.Fatalf("seed inventory item: %v", err)
+	}
+	if err := tx.Targets().Create(ctx, domain.TargetInfo{
+		ID:              "k8s-guest-cluster",
+		InventoryItemID: "target:k8s-guest-cluster",
+		Type:            "kubernetes",
+		Name:            "guest-cluster",
+		Properties: map[string]string{
+			"api_server":                "https://guest.example:6443",
+			"service_account_token_ref": "targets/k8s-guest-cluster/sa-token",
+		},
+	}); err != nil {
+		t.Fatalf("seed target: %v", err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("commit seeded output: %v", err)
+	}
+
+	events := make(chan domain.FulfillmentEvent, 16)
+	wf := newTestWorkflow(store, noopDelivery{}, events, func(wf *domain.OrchestrationWorkflowSpec) {
+		wf.Vault = vault
+	})
+
+	rec := &simpleRecord{ctx: ctx, events: events}
+	_, err = wf.Run(rec, domain.FulfillmentID("d1"))
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	_ = getTarget(t, store, "gcphcp-provider")
+
+	readTx, err := store.BeginReadOnly(ctx)
+	if err != nil {
+		t.Fatalf("begin read tx: %v", err)
+	}
+
+	if _, err := readTx.Targets().Get(ctx, "k8s-guest-cluster"); !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("expected guest target to be deleted, got err=%v", err)
+	}
+	if _, err := readTx.Inventory().Get(ctx, "target:k8s-guest-cluster"); !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("expected guest inventory item to be deleted, got err=%v", err)
+	}
+	deliveries, err := readTx.Deliveries().ListByFulfillment(ctx, domain.FulfillmentID("d1"))
+	if err != nil {
+		t.Fatalf("list deliveries: %v", err)
+	}
+	if len(deliveries) != 0 {
+		t.Fatalf("expected delivery records to be deleted, got %d", len(deliveries))
+	}
+	f, err := readTx.Fulfillments().Get(ctx, domain.FulfillmentID("d1"))
+	if err != nil {
+		t.Fatalf("expected fulfillment to still exist, got: %v", err)
+	}
+	if f.State != domain.FulfillmentStateDeleting {
+		t.Errorf("fulfillment state = %q, want deleting", f.State)
+	}
+	if err := readTx.Rollback(); err != nil {
+		t.Fatalf("close read tx: %v", err)
+	}
+
+	if _, err := vault.Get(ctx, "targets/k8s-guest-cluster/sa-token"); !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("expected owned vault secret to be deleted, got err=%v", err)
 	}
 }
 

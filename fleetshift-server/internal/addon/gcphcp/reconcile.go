@@ -243,6 +243,8 @@ func (r *Reconciler) Reconcile(
 		Message:   fmt.Sprintf("Guest API endpoint: %s", guestEndpoint),
 	})
 
+	guestTargetID := GuestTargetID(spec.Name)
+
 	// Bootstrap guest cluster with retry loop
 	var bootstrapResult BootstrapResult
 	var bootstrapErr error
@@ -260,7 +262,7 @@ func (r *Reconciler) Reconcile(
 			ctx,
 			guestEndpoint,
 			authResult.BrokerToken,
-			domain.TargetID(target.ID),
+			guestTargetID,
 		)
 
 		if bootstrapErr == nil {
@@ -294,7 +296,7 @@ func (r *Reconciler) Reconcile(
 
 	// Build ClusterOutput with trust bundles
 	output := &ClusterOutput{
-		TargetID:     domain.TargetID(target.ID),
+		TargetID:     guestTargetID,
 		Name:         spec.Name,
 		APIServer:    guestEndpoint,
 		CACert:       bootstrapResult.CACert,
