@@ -34,6 +34,7 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 
 	pb "github.com/fleetshift/fleetshift-poc/fleetshift-server/gen/fleetshift/v1"
+	gcphcpaddon "github.com/fleetshift/fleetshift-poc/fleetshift-server/internal/addon/gcphcp"
 	kindaddon "github.com/fleetshift/fleetshift-poc/fleetshift-server/internal/addon/kind"
 	kubernetesaddon "github.com/fleetshift/fleetshift-poc/fleetshift-server/internal/addon/kubernetes"
 	ocpaddon "github.com/fleetshift/fleetshift-poc/fleetshift-server/internal/addon/ocp"
@@ -66,6 +67,7 @@ type serveFlags struct {
 	oidcUIAuthority  string
 	oidcUIClientID   string
 	addons           string
+	gcphcpConfig     string
 }
 
 func newServeCmd() *cobra.Command {
@@ -89,7 +91,8 @@ func newServeCmd() *cobra.Command {
 	cmd.Flags().StringVar(&f.webDir, "web-dir", "", "directory containing frontend assets to serve (empty = API only)")
 	cmd.Flags().StringVar(&f.oidcUIAuthority, "oidc-ui-authority", os.Getenv("OIDC_ISSUER_URL"), "OIDC authority URL for the frontend UI")
 	cmd.Flags().StringVar(&f.oidcUIClientID, "oidc-ui-client-id", envOrDefault("OIDC_UI_CLIENT_ID", "fleetshift-ui"), "OIDC client ID for the frontend UI")
-	cmd.Flags().StringVar(&f.addons, "addons", "kind,ocp,kubernetes", "comma-separated list of addons to enable (default: all)")
+	cmd.Flags().StringVar(&f.addons, "addons", "kind,ocp,kubernetes,gcphcp", "comma-separated list of addons to enable (default: all)")
+	cmd.Flags().StringVar(&f.gcphcpConfig, "gcphcp-config", "", "path to gcphcp addon config file (or GCPHCP_CONFIG env)")
 	return cmd
 }
 
@@ -208,6 +211,29 @@ func runServe(ctx context.Context, f *serveFlags) error {
 		}
 		defer ocpAgent.Shutdown(ctx)
 		logger.Info("OCP addon callback server listening", "addr", ocpAgent.CallbackAddr())
+	}
+
+	var gcphcpAgent domain.DeliveryAgent
+	var gcphcpCfg gcphcpaddon.Config
+	if enabledAddons["gcphcp"] {
+		configPath := f.gcphcpConfig
+		if configPath == "" {
+			configPath = os.Getenv("GCPHCP_CONFIG")
+		}
+		if configPath != "" {
+			var err error
+			gcphcpCfg, err = gcphcpaddon.ParseConfig(configPath)
+			if err != nil {
+				return fmt.Errorf("parse gcphcp config: %w", err)
+			}
+			gcphcpAgent = gcphcpaddon.NewAgent(gcphcpaddon.AgentDeps{
+				Gateway:  gcphcpCfg.Gateway,
+				Observer: gcphcpaddon.NewSlogAgentObserver(logger),
+			})
+		} else {
+			logger.Warn("gcphcp addon enabled but no config provided, skipping")
+			delete(enabledAddons, "gcphcp")
+		}
 	}
 
 	var wfBackend wfbackend.Backend
@@ -530,6 +556,11 @@ func runServe(ctx context.Context, f *serveFlags) error {
 			return fmt.Errorf("enable kubernetes addon: %w", err)
 		}
 	}
+	if enabledAddons["gcphcp"] {
+		if err := addonMgr.Enable(ctx, gcphcpaddon.Descriptor()); err != nil {
+			return fmt.Errorf("enable gcphcp addon: %w", err)
+		}
+	}
 
 	// --- start ---
 
@@ -584,6 +615,24 @@ func runServe(ctx context.Context, f *serveFlags) error {
 			Agent: kubeAgent,
 		}); err != nil {
 			return fmt.Errorf("connect kubernetes addon: %w", err)
+		}
+	}
+
+	if enabledAddons["gcphcp"] {
+		activeTarget := gcphcpCfg.Targets[0]
+		targetID := domain.TargetID(activeTarget.ID)
+		if err := addonMgr.Connect(ctx, "gcphcp", application.ConnectInput{
+			Agent: gcphcpAgent,
+			Targets: []domain.TargetInfo{{
+				ID:                    targetID,
+				Type:                  gcphcpaddon.TargetType,
+				Name:                  fmt.Sprintf("GCP HCP %s/%s", activeTarget.GCPProject, activeTarget.Region),
+				Properties:            activeTarget.TargetProperties(),
+				AcceptedResourceTypes: []domain.ResourceType{gcphcpaddon.ClusterResourceType, domain.TrustBundleResourceType},
+			}},
+			Schemas: []domain.ManagedResourceSchema{gcphcpaddon.Schema(targetID)},
+		}); err != nil {
+			return fmt.Errorf("connect gcphcp addon: %w", err)
 		}
 	}
 
