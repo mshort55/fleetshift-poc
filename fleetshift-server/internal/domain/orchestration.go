@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -78,6 +80,14 @@ type RemoveInput struct {
 	Manifests     []Manifest
 	Auth          DeliveryAuth
 	Attestation   *Attestation // nil for token-passthrough deliveries
+}
+
+// DeliveryOutputsInput carries the delivery identity alongside the
+// produced outputs so inventory registration can retain output
+// ownership metadata.
+type DeliveryOutputsInput struct {
+	DeliveryID DeliveryID
+	Result     DeliveryResult
 }
 
 // ResolvePlacementInput is the input to the resolve-placement activity.
@@ -301,42 +311,62 @@ func (s *OrchestrationWorkflowSpec) RemoveFromTarget() Activity[RemoveInput, str
 	})
 }
 
-// CleanupDeliveryData cleans up provisioned targets (e.g. kind
-// clusters) and hard-deletes delivery records for a fulfillment. The
-// fulfillment row itself is NOT deleted here; that responsibility
-// belongs to an abstraction-specific cleanup workflow such as
+// CleanupDeliveryData cleans up delivery-owned outputs (provisioned
+// targets, inventory items, and referenced vault secrets) and
+// hard-deletes delivery records for a fulfillment. The fulfillment row
+// itself is NOT deleted here; that responsibility belongs to an
+// abstraction-specific cleanup workflow such as
 // [DeleteDeploymentCleanupWorkflow] or
 // [DeleteManagedResourceCleanupWorkflow], which runs after receiving a
 // [DeleteCleanupCompleteSignal].
 func (s *OrchestrationWorkflowSpec) CleanupDeliveryData() Activity[FulfillmentID, struct{}] {
 	return NewActivity("cleanup-delivery-data", func(ctx context.Context, id FulfillmentID) (struct{}, error) {
+		readTx, err := s.Store.BeginReadOnly(ctx)
+		if err != nil {
+			return struct{}{}, fmt.Errorf("begin tx: %w", err)
+		}
+		defer readTx.Rollback()
+
+		deliveries, err := readTx.Deliveries().ListByFulfillment(ctx, id)
+		if err != nil {
+			return struct{}{}, fmt.Errorf("list deliveries: %w", err)
+		}
+
+		items, err := readTx.Inventory().List(ctx)
+		if err != nil {
+			return struct{}{}, fmt.Errorf("list inventory items: %w", err)
+		}
+
+		plan, err := buildOutputCleanupPlan(deliveries, items)
+		if err != nil {
+			return struct{}{}, err
+		}
+		if err := readTx.Rollback(); err != nil {
+			return struct{}{}, fmt.Errorf("close read tx: %w", err)
+		}
+
+		if s.Vault != nil {
+			for _, ref := range plan.secretRefs {
+				if err := s.Vault.Delete(ctx, ref); err != nil && !errors.Is(err, ErrNotFound) {
+					return struct{}{}, fmt.Errorf("delete secret %q: %w", ref, err)
+				}
+			}
+		}
+
 		tx, err := s.Store.Begin(ctx)
 		if err != nil {
 			return struct{}{}, fmt.Errorf("begin tx: %w", err)
 		}
 		defer tx.Rollback()
 
-		deliveries, err := tx.Deliveries().ListByFulfillment(ctx, id)
-		if err != nil {
-			return struct{}{}, fmt.Errorf("list deliveries: %w", err)
+		for _, targetID := range plan.targetIDs {
+			if err := tx.Targets().Delete(ctx, targetID); err != nil && !errors.Is(err, ErrNotFound) {
+				return struct{}{}, fmt.Errorf("delete provisioned target %s: %w", targetID, err)
+			}
 		}
-		for _, d := range deliveries {
-			target, err := tx.Targets().Get(ctx, d.TargetID)
-			if err != nil {
-				continue
-			}
-			if target.Type != "kind" {
-				continue
-			}
-			for _, m := range d.Manifests {
-				var spec struct{ Name string }
-				if err := json.Unmarshal(m.Raw, &spec); err != nil || spec.Name == "" {
-					continue
-				}
-				provID := TargetID("k8s-" + spec.Name)
-				if err := tx.Targets().Delete(ctx, provID); err != nil && !errors.Is(err, ErrNotFound) {
-					return struct{}{}, fmt.Errorf("delete provisioned target %s: %w", provID, err)
-				}
+		for _, inventoryID := range plan.inventoryIDs {
+			if err := tx.Inventory().Delete(ctx, inventoryID); err != nil && !errors.Is(err, ErrNotFound) {
+				return struct{}{}, fmt.Errorf("delete inventory item %s: %w", inventoryID, err)
 			}
 		}
 
@@ -404,19 +434,21 @@ func (s *OrchestrationWorkflowSpec) PersistAndCompleteReconciliation() Activity[
 // ProcessDeliveryOutputs stores produced secrets in the [Vault] and
 // registers provisioned targets. Secrets are stored first so that
 // target properties referencing vault refs are valid at registration
-// time. Results with no outputs are skipped.
+// time. Inventory items retain the originating delivery identity so
+// delete-time cleanup can remove delivery-owned outputs generically.
+// Results with no outputs are skipped.
 //
 // All writes use upsert semantics so the activity is replay-safe:
 // delivery agents may be re-invoked after a transient failure and
 // produce the same outputs on each attempt.
-func (s *OrchestrationWorkflowSpec) ProcessDeliveryOutputs() Activity[DeliveryResult, struct{}] {
-	return NewActivity("process-delivery-outputs", func(ctx context.Context, result DeliveryResult) (struct{}, error) {
-		if len(result.ProducedSecrets) == 0 && len(result.ProvisionedTargets) == 0 {
+func (s *OrchestrationWorkflowSpec) ProcessDeliveryOutputs() Activity[DeliveryOutputsInput, struct{}] {
+	return NewActivity("process-delivery-outputs", func(ctx context.Context, in DeliveryOutputsInput) (struct{}, error) {
+		if len(in.Result.ProducedSecrets) == 0 && len(in.Result.ProvisionedTargets) == 0 {
 			return struct{}{}, nil
 		}
 
 		if s.Vault != nil {
-			for _, secret := range result.ProducedSecrets {
+			for _, secret := range in.Result.ProducedSecrets {
 				if err := s.Vault.Put(ctx, secret.Ref, secret.Value); err != nil {
 					return struct{}{}, fmt.Errorf("store secret %q: %w", secret.Ref, err)
 				}
@@ -431,18 +463,19 @@ func (s *OrchestrationWorkflowSpec) ProcessDeliveryOutputs() Activity[DeliveryRe
 
 		// TODO: revisit the "TargetRegistrar" thing – should we make that upsert instead? remove that?
 		now := s.now()
-		for _, pt := range result.ProvisionedTargets {
+		for _, pt := range in.Result.ProvisionedTargets {
 			invID := InventoryItemID("target:" + string(pt.ID))
 
 			props, _ := json.Marshal(pt.Properties)
 			if err := tx.Inventory().CreateOrUpdate(ctx, InventoryItem{
-				ID:         invID,
-				Type:       InventoryType(pt.Type),
-				Name:       pt.Name,
-				Properties: props,
-				Labels:     pt.Labels,
-				CreatedAt:  now,
-				UpdatedAt:  now,
+				ID:               invID,
+				Type:             InventoryType(pt.Type),
+				Name:             pt.Name,
+				Properties:       props,
+				Labels:           pt.Labels,
+				SourceDeliveryID: &in.DeliveryID,
+				CreatedAt:        now,
+				UpdatedAt:        now,
 			}); err != nil {
 				return struct{}{}, fmt.Errorf("upsert inventory item for target %q: %w", pt.ID, err)
 			}
@@ -699,16 +732,16 @@ func (s *OrchestrationWorkflowSpec) executeRolloutPlan(
 	for i, step := range plan.Steps {
 		if step.Remove != nil {
 			for _, target := range step.Remove.Targets {
-			// TODO: need to call the manifest generator on remove hook
-			in := RemoveInput{
-				Target:        target,
-				DeliveryID:    deliveryIDFor(fulfillmentID, target.ID),
-				FulfillmentID: fulfillmentID,
-				Auth:          f.Auth,
-			}
-			if evidence != nil {
-				in.Attestation = assembleRemoveAttestation(f, evidence)
-			}
+				// TODO: need to call the manifest generator on remove hook
+				in := RemoveInput{
+					Target:        target,
+					DeliveryID:    deliveryIDFor(fulfillmentID, target.ID),
+					FulfillmentID: fulfillmentID,
+					Auth:          f.Auth,
+				}
+				if evidence != nil {
+					in.Attestation = assembleRemoveAttestation(f, evidence)
+				}
 				if _, err := RunActivity(record, s.RemoveFromTarget(), in); err != nil {
 					return fmt.Errorf("remove delivery for target %s: %w", target.ID, err)
 				}
@@ -716,7 +749,7 @@ func (s *OrchestrationWorkflowSpec) executeRolloutPlan(
 		}
 		if step.Deliver != nil {
 			var pending []DeliveryID
-			var syncResults []DeliveryResult
+			var syncResults []DeliveryCompletionEvent
 			for _, target := range step.Deliver.Targets {
 				manifests, err := RunActivity(record, s.GenerateManifests(), GenerateManifestsInput{
 					Spec:   f.ManifestStrategy,
@@ -759,7 +792,10 @@ func (s *OrchestrationWorkflowSpec) executeRolloutPlan(
 					return fmt.Errorf("delivery %s failed: %s",
 						did, result.Message)
 				default:
-					syncResults = append(syncResults, result)
+					syncResults = append(syncResults, DeliveryCompletionEvent{
+						DeliveryID: did,
+						Result:     result,
+					})
 				}
 			}
 			results, err := s.awaitDeliveries(record, pending)
@@ -768,11 +804,14 @@ func (s *OrchestrationWorkflowSpec) executeRolloutPlan(
 			}
 			results = append(results, syncResults...)
 			for _, result := range results {
-				if len(result.ProvisionedTargets) > 0 || len(result.ProducedSecrets) > 0 {
-					if _, err := RunActivity(record, s.ProcessDeliveryOutputs(), result); err != nil {
+				if len(result.Result.ProvisionedTargets) > 0 || len(result.Result.ProducedSecrets) > 0 {
+					if _, err := RunActivity(record, s.ProcessDeliveryOutputs(), DeliveryOutputsInput{
+						DeliveryID: result.DeliveryID,
+						Result:     result.Result,
+					}); err != nil {
 						return fmt.Errorf("process delivery outputs: %w", err)
 					}
-					probe.DeliveryOutputsProcessed(result.ProvisionedTargets, len(result.ProducedSecrets))
+					probe.DeliveryOutputsProcessed(result.Result.ProvisionedTargets, len(result.Result.ProducedSecrets))
 				}
 			}
 		}
@@ -791,11 +830,11 @@ func (s *OrchestrationWorkflowSpec) executeRolloutPlan(
 }
 
 // awaitDeliveries blocks until every delivery in pending has completed
-// and returns the completed results.
+// and returns the completed results along with their delivery IDs.
 func (s *OrchestrationWorkflowSpec) awaitDeliveries(
 	record Record,
 	pending []DeliveryID,
-) (results []DeliveryResult, err error) {
+) (results []DeliveryCompletionEvent, err error) {
 	remaining := make(map[DeliveryID]struct{}, len(pending))
 	for _, id := range pending {
 		remaining[id] = struct{}{}
@@ -821,9 +860,93 @@ func (s *OrchestrationWorkflowSpec) awaitDeliveries(
 				event.DeliveryCompleted.DeliveryID,
 				event.DeliveryCompleted.Result.Message)
 		}
-		results = append(results, event.DeliveryCompleted.Result)
+		results = append(results, *event.DeliveryCompleted)
 	}
 	return results, nil
+}
+
+type outputCleanupPlan struct {
+	targetIDs    []TargetID
+	inventoryIDs []InventoryItemID
+	secretRefs   []SecretRef
+}
+
+func buildOutputCleanupPlan(deliveries []Delivery, items []InventoryItem) (outputCleanupPlan, error) {
+	deliveryIDs := make(map[DeliveryID]struct{}, len(deliveries))
+	for _, delivery := range deliveries {
+		deliveryIDs[delivery.ID] = struct{}{}
+	}
+
+	targetIDs := make(map[TargetID]struct{})
+	inventoryIDs := make(map[InventoryItemID]struct{})
+	secretRefs := make(map[SecretRef]struct{})
+
+	for _, item := range items {
+		if item.SourceDeliveryID == nil {
+			continue
+		}
+		if _, ok := deliveryIDs[*item.SourceDeliveryID]; !ok {
+			continue
+		}
+
+		inventoryIDs[item.ID] = struct{}{}
+		refs, err := secretRefsFromProperties(item.ID, item.Properties)
+		if err != nil {
+			return outputCleanupPlan{}, err
+		}
+		for _, ref := range refs {
+			secretRefs[ref] = struct{}{}
+		}
+		if targetID, ok := targetIDFromInventoryItem(item.ID); ok {
+			targetIDs[targetID] = struct{}{}
+		}
+	}
+
+	return outputCleanupPlan{
+		targetIDs:    sortedKeys(targetIDs),
+		inventoryIDs: sortedKeys(inventoryIDs),
+		secretRefs:   sortedKeys(secretRefs),
+	}, nil
+}
+
+func targetIDFromInventoryItem(id InventoryItemID) (TargetID, bool) {
+	const prefix = "target:"
+	if !strings.HasPrefix(string(id), prefix) {
+		return "", false
+	}
+	return TargetID(strings.TrimPrefix(string(id), prefix)), true
+}
+
+func secretRefsFromProperties(id InventoryItemID, raw json.RawMessage) ([]SecretRef, error) {
+	if len(raw) == 0 {
+		return nil, nil
+	}
+
+	var props map[string]string
+	if err := json.Unmarshal(raw, &props); err != nil {
+		return nil, fmt.Errorf("parse properties for inventory item %q: %w", id, err)
+	}
+
+	refs := make([]SecretRef, 0)
+	for key, value := range props {
+		if strings.HasSuffix(key, "_ref") && value != "" {
+			refs = append(refs, SecretRef(value))
+		}
+	}
+	return refs, nil
+}
+
+func sortedKeys[K ~string](set map[K]struct{}) []K {
+	keys := make([]K, 0, len(set))
+	for key := range set {
+		keys = append(keys, key)
+	}
+	// Map iteration order is non-deterministic; stable ordering keeps the
+	// cleanup activity deterministic under replay.
+	if len(keys) > 1 {
+		slices.Sort(keys)
+	}
+	return keys
 }
 
 // deliveryIDFor produces a deterministic [DeliveryID] for a
