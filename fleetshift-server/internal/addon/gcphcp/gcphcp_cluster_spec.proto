@@ -1,0 +1,50 @@
+syntax = "proto3";
+
+package addons.gcphcp.v1;
+
+import "buf/validate/validate.proto";
+
+option go_package = "github.com/fleetshift/fleetshift-poc/fleetshift-server/internal/addon/gcphcp";
+
+// GCPHCPClusterSpec defines the desired state of a GCP Hosted Control Plane cluster.
+// This is the canonical spec used by both the managed resource API and the delivery agent.
+message GCPHCPClusterSpec {
+  // Name of the GCP HCP cluster.
+  string name = 1 [(buf.validate.field).required = true];
+
+  // Endpoint access configuration for the cluster API server.
+  string endpoint_access = 2;
+
+  // Release version of the cluster (e.g., "4.18.0").
+  string release_version = 3;
+
+  // Channel group for the cluster (e.g., "stable", "fast", "candidate").
+  string channel_group = 4;
+
+  // Nodepools to provision for the cluster.
+  repeated Nodepool nodepools = 5;
+}
+
+// Nodepool describes a node pool in the GCP HCP cluster.
+message Nodepool {
+  // Name of the nodepool.
+  string name = 1;
+
+  // Number of replicas (nodes) in the pool.
+  int32 replicas = 2;
+
+  // Instance type for the nodes (e.g., "n1-standard-4").
+  string instance_type = 3;
+
+  // Root volume size in GB.
+  int32 root_volume_size = 4;
+
+  // Root volume type (e.g., "pd-standard", "pd-ssd").
+  string root_volume_type = 5;
+
+  // Enable auto-repair for nodes in this pool.
+  bool auto_repair = 6;
+
+  // Upgrade type strategy (e.g., "Replace", "InPlace").
+  string upgrade_type = 7;
+}
