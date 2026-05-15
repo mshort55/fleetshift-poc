@@ -554,7 +554,7 @@ All cluster shape fields (`endpointAccess`, `replicas`, `instanceType`, `rootVol
 `release_version`, `channel_group`, management config) live in the managed resource spec with
 hard-coded fallback defaults. The target carries no cluster shape configuration.
 
-### 6.6 Target config drift
+### 6.7 Target config drift
 
 If an operator changes a target's `gcp_project` or `region` in the config file and restarts the
 addon, existing clusters provisioned under the old values will break — the addon will attempt to
@@ -563,7 +563,7 @@ reconcile against the wrong project/region.
 V1 does not guard against this. Target config drift detection and `RequiresReplacement` conditions
 are deferred (see section 14.5).
 
-### 6.7 Cluster naming and idempotency
+### 6.8 Cluster naming and idempotency
 
 Cluster names are user-specified in the managed resource spec. The addon uses the name as the
 infrastructure identity.
