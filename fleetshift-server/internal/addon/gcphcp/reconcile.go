@@ -513,7 +513,16 @@ func (r *Reconciler) Delete(
 		Message:   "Destroying infrastructure",
 	})
 
-	if err := cleanupDeleteResources(ctx, r.infra, spec, target, hypershiftEnv, signaler); err != nil {
+	if err := cleanupDeleteResources(
+		ctx,
+		r.infra,
+		clusterID,
+		spec,
+		target,
+		authResult.WorkforceToken,
+		hypershiftEnv,
+		signaler,
+	); err != nil {
 		return err
 	}
 

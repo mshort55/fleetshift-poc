@@ -11,11 +11,48 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"fmt"
+	"io"
 	"math/big"
+	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"strings"
+	"time"
+)
+
+const (
+	defaultPSCCleanupPollInterval = 30 * time.Second
+	defaultPSCCleanupWaitTimeout  = 20 * time.Minute
+	defaultPSCComputeAPIEndpoint  = "https://compute.googleapis.com/compute/v1"
+)
+
+type pscResourceLookup interface {
+	ForwardingRuleExists(ctx context.Context, projectID, region, name string) (bool, error)
+	AddressExists(ctx context.Context, projectID, region, name string) (bool, error)
+}
+
+type httpPSCResourceLookup struct {
+	client         *http.Client
+	endpoint       string
+	workforceToken string
+}
+
+var (
+	pscCleanupPollInterval = defaultPSCCleanupPollInterval
+	pscCleanupWaitTimeout  = defaultPSCCleanupWaitTimeout
+	newPSCResourceLookup   = func(_ context.Context, workforceToken string) (pscResourceLookup, error) {
+		if workforceToken == "" {
+			return nil, fmt.Errorf("missing workforce token")
+		}
+		return &httpPSCResourceLookup{
+			client:         &http.Client{Timeout: defaultBrokerHTTPTimeout},
+			endpoint:       defaultPSCComputeAPIEndpoint,
+			workforceToken: workforceToken,
+		}, nil
+	}
 )
 
 // ClusterKeypair holds an RSA keypair for cluster authentication.
@@ -217,6 +254,126 @@ func (r *InfraRunner) DestroyInfra(ctx context.Context, infraID, projectID, regi
 	return nil
 }
 
+// WaitForPSCCleanup waits until PSC endpoint artifacts for the deleted
+// cluster are gone from the tenant project before infra destroy begins.
+func (r *InfraRunner) WaitForPSCCleanup(
+	ctx context.Context,
+	clusterID, projectID, region, workforceToken string,
+) error {
+	lookup, err := newPSCResourceLookup(ctx, workforceToken)
+	if err != nil {
+		return fmt.Errorf("create PSC cleanup lookup: %w", err)
+	}
+
+	endpointName := fmt.Sprintf("psc-%s-endpoint", clusterID)
+	ipName := fmt.Sprintf("psc-%s-ip", clusterID)
+
+	pollInterval := pscCleanupPollInterval
+	if pollInterval <= 0 {
+		pollInterval = time.Millisecond
+	}
+	ticker := time.NewTicker(pollInterval)
+	defer ticker.Stop()
+
+	waitTimeout := pscCleanupWaitTimeout
+	if waitTimeout <= 0 {
+		waitTimeout = time.Millisecond
+	}
+	timeout := time.NewTimer(waitTimeout)
+	defer timeout.Stop()
+
+	for {
+		endpointExists, err := lookup.ForwardingRuleExists(ctx, projectID, region, endpointName)
+		if err != nil {
+			return err
+		}
+		ipExists, err := lookup.AddressExists(ctx, projectID, region, ipName)
+		if err != nil {
+			return err
+		}
+		if !endpointExists && !ipExists {
+			return nil
+		}
+
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-timeout.C:
+			return fmt.Errorf("timeout waiting for PSC endpoint cleanup")
+		case <-ticker.C:
+		}
+	}
+}
+
+func (l *httpPSCResourceLookup) ForwardingRuleExists(
+	ctx context.Context,
+	projectID, region, name string,
+) (bool, error) {
+	resourcePath := fmt.Sprintf(
+		"projects/%s/regions/%s/forwardingRules/%s",
+		url.PathEscape(projectID),
+		url.PathEscape(region),
+		url.PathEscape(name),
+	)
+	return l.regionalResourceExists(ctx, projectID, resourcePath, "forwarding rule")
+}
+
+func (l *httpPSCResourceLookup) AddressExists(
+	ctx context.Context,
+	projectID, region, name string,
+) (bool, error) {
+	resourcePath := fmt.Sprintf(
+		"projects/%s/regions/%s/addresses/%s",
+		url.PathEscape(projectID),
+		url.PathEscape(region),
+		url.PathEscape(name),
+	)
+	return l.regionalResourceExists(ctx, projectID, resourcePath, "address")
+}
+
+func (l *httpPSCResourceLookup) regionalResourceExists(
+	ctx context.Context,
+	projectID, resourcePath, resourceKind string,
+) (bool, error) {
+	req, err := http.NewRequestWithContext(
+		ctx,
+		http.MethodGet,
+		fmt.Sprintf("%s/%s", strings.TrimRight(l.endpoint, "/"), resourcePath),
+		nil,
+	)
+	if err != nil {
+		return false, fmt.Errorf("create %s request: %w", resourceKind, err)
+	}
+	req.Header.Set("Authorization", "Bearer "+l.workforceToken)
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("x-goog-user-project", projectID)
+
+	resp, err := l.client.Do(req)
+	if err != nil {
+		return false, fmt.Errorf("request %s: %w", resourceKind, err)
+	}
+	defer resp.Body.Close()
+
+	switch resp.StatusCode {
+	case http.StatusOK:
+		return true, nil
+	case http.StatusNotFound:
+		return false, nil
+	default:
+		body, readErr := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		if readErr != nil {
+			return false, fmt.Errorf(
+				"%s request returned status %d and response body could not be read: %w",
+				resourceKind, resp.StatusCode, readErr,
+			)
+		}
+		return false, fmt.Errorf(
+			"%s request returned status %d: %s",
+			resourceKind, resp.StatusCode, strings.TrimSpace(string(body)),
+		)
+	}
+}
+
 // DestroyIAM runs hypershift destroy iam gcp.
 func (r *InfraRunner) DestroyIAM(ctx context.Context, infraID, projectID string, env []string) error {
 	args := []string{
@@ -311,10 +468,10 @@ func IAMConfigToWIFSpec(iamConfig map[string]any) (map[string]any, error) {
 	}
 
 	return map[string]any{
-		"projectNumber":       projectNumber,
-		"poolID":              poolID,
-		"providerID":          providerID,
-		"serviceAccountsRef":  serviceAccountsRef,
+		"projectNumber":      projectNumber,
+		"poolID":             poolID,
+		"providerID":         providerID,
+		"serviceAccountsRef": serviceAccountsRef,
 	}, nil
 }
 
@@ -333,10 +490,10 @@ func PrepareHypershiftEnv(callerToken string, target TargetConfig, tempDir strin
 		target.WorkforcePool, target.WorkforceProvider)
 
 	credConfig := map[string]interface{}{
-		"type":                           "external_account",
-		"audience":                       audience,
-		"subject_token_type":             "urn:ietf:params:oauth:token-type:jwt",
-		"token_url":                      "https://sts.googleapis.com/v1/token",
+		"type":               "external_account",
+		"audience":           audience,
+		"subject_token_type": "urn:ietf:params:oauth:token-type:jwt",
+		"token_url":          "https://sts.googleapis.com/v1/token",
 		"credential_source": map[string]interface{}{
 			"file": subjectTokenPath,
 		},
