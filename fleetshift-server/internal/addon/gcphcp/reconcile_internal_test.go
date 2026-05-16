@@ -27,15 +27,20 @@ type createAttemptResult struct {
 }
 
 type fakeCleanupInfra struct {
-	ops                []string
-	createIAMErr       error
-	createInfraErr     error
-	destroyIAMErr      error
-	destroyInfraErr    error
-	createIAMResults   []createAttemptResult
-	createInfraResults []createAttemptResult
-	createIAMCalls     int
-	createInfraCalls   int
+	ops                   []string
+	createIAMErr          error
+	createInfraErr        error
+	waitPSCErr            error
+	waitPSCWorkforceToken string
+	destroyIAMErr         error
+	destroyInfraErr       error
+	createIAMResults      []createAttemptResult
+	createInfraResults    []createAttemptResult
+	destroyInfraResults   []error
+	createIAMCalls        int
+	createInfraCalls      int
+	waitPSCCalls          int
+	destroyInfraCalls     int
 }
 
 func (f *fakeCleanupInfra) CreateIAM(_ context.Context, infraID, projectID, jwksPath string, _ []string) (map[string]any, error) {
@@ -92,12 +97,33 @@ func (f *fakeCleanupInfra) CreateInfra(_ context.Context, infraID, projectID, re
 
 func (f *fakeCleanupInfra) DestroyInfra(_ context.Context, infraID, projectID, region string, _ []string) error {
 	f.ops = append(f.ops, "infra:"+infraID+":"+projectID+":"+region)
+	attempt := f.destroyInfraCalls
+	f.destroyInfraCalls++
+	if len(f.destroyInfraResults) > 0 {
+		if attempt >= len(f.destroyInfraResults) {
+			attempt = len(f.destroyInfraResults) - 1
+		}
+		if err := f.destroyInfraResults[attempt]; err != nil {
+			return err
+		}
+		return nil
+	}
 	return f.destroyInfraErr
 }
 
 func (f *fakeCleanupInfra) DestroyIAM(_ context.Context, infraID, projectID string, _ []string) error {
 	f.ops = append(f.ops, "iam:"+infraID+":"+projectID)
 	return f.destroyIAMErr
+}
+
+func (f *fakeCleanupInfra) WaitForPSCCleanup(
+	_ context.Context,
+	clusterID, projectID, region, workforceToken string,
+) error {
+	f.ops = append(f.ops, "psc:"+clusterID+":"+projectID+":"+region)
+	f.waitPSCCalls++
+	f.waitPSCWorkforceToken = workforceToken
+	return f.waitPSCErr
 }
 
 type fakeClusterDeleteClient struct {
@@ -278,7 +304,45 @@ func TestCleanupCreateResources_DestroysCreatedInfraAndIAM(t *testing.T) {
 	}
 }
 
-func TestCleanupDeleteResources_ReturnsIAMFailure(t *testing.T) {
+func TestCleanupDeleteResources_RetriesInfraAfterPSCWait(t *testing.T) {
+	origInterval := deleteInfraRetryInterval
+	origAttempts := deleteInfraMaxAttempts
+	deleteInfraRetryInterval = 0
+	deleteInfraMaxAttempts = 2
+	defer func() {
+		deleteInfraRetryInterval = origInterval
+		deleteInfraMaxAttempts = origAttempts
+	}()
+
+	infra := &fakeCleanupInfra{
+		destroyInfraResults: []error{
+			errors.New("infra not ready"),
+			nil,
+		},
+	}
+
+	err := cleanupDeleteResources(
+		context.Background(),
+		infra,
+		"cluster-123",
+		ClusterSpec{Name: "test-cluster"},
+		TargetConfig{GCPProject: "project-123", Region: "us-central1"},
+		"workforce-token",
+		[]string{"EXAMPLE=1"},
+		&domain.DeliverySignaler{},
+	)
+	if err != nil {
+		t.Fatalf("cleanupDeleteResources() error = %v", err)
+	}
+	if got := strings.Join(infra.ops, ","); got != "psc:cluster-123:project-123:us-central1,infra:test-cluster:project-123:us-central1,infra:test-cluster:project-123:us-central1,iam:test-cluster:project-123" {
+		t.Fatalf("unexpected cleanup operations: %s", got)
+	}
+	if infra.waitPSCWorkforceToken != "workforce-token" {
+		t.Fatalf("PSC wait token = %q, want workforce-token", infra.waitPSCWorkforceToken)
+	}
+}
+
+func TestCleanupDeleteResources_ReturnsIAMFailureWithDeleteSuccessContext(t *testing.T) {
 	infra := &fakeCleanupInfra{
 		destroyIAMErr: errors.New("iam destroy failed"),
 	}
@@ -286,18 +350,61 @@ func TestCleanupDeleteResources_ReturnsIAMFailure(t *testing.T) {
 	err := cleanupDeleteResources(
 		context.Background(),
 		infra,
+		"cluster-123",
 		ClusterSpec{Name: "test-cluster"},
 		TargetConfig{GCPProject: "project-123", Region: "us-central1"},
+		"workforce-token",
 		[]string{"EXAMPLE=1"},
 		&domain.DeliverySignaler{},
 	)
 	if err == nil {
 		t.Fatal("expected IAM destroy failure")
 	}
-	if !strings.Contains(err.Error(), "destroy IAM") || !strings.Contains(err.Error(), "iam destroy failed") {
+	if !strings.Contains(err.Error(), "cluster deletion succeeded") ||
+		!strings.Contains(err.Error(), "infrastructure cleanup completed") ||
+		!strings.Contains(err.Error(), "iam destroy failed") {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if got := strings.Join(infra.ops, ","); got != "infra:test-cluster:project-123:us-central1,iam:test-cluster:project-123" {
+	if got := strings.Join(infra.ops, ","); got != "psc:cluster-123:project-123:us-central1,infra:test-cluster:project-123:us-central1,iam:test-cluster:project-123" {
+		t.Fatalf("unexpected cleanup operations: %s", got)
+	}
+}
+
+func TestCleanupDeleteResources_ReturnsInfraFailureAfterRetries(t *testing.T) {
+	origInterval := deleteInfraRetryInterval
+	origAttempts := deleteInfraMaxAttempts
+	deleteInfraRetryInterval = 0
+	deleteInfraMaxAttempts = 3
+	defer func() {
+		deleteInfraRetryInterval = origInterval
+		deleteInfraMaxAttempts = origAttempts
+	}()
+
+	infra := &fakeCleanupInfra{
+		destroyInfraResults: []error{
+			errors.New("infra not ready"),
+			errors.New("infra not ready"),
+			errors.New("infra still not ready"),
+		},
+	}
+
+	err := cleanupDeleteResources(
+		context.Background(),
+		infra,
+		"cluster-123",
+		ClusterSpec{Name: "test-cluster"},
+		TargetConfig{GCPProject: "project-123", Region: "us-central1"},
+		"workforce-token",
+		[]string{"EXAMPLE=1"},
+		&domain.DeliverySignaler{},
+	)
+	if err == nil {
+		t.Fatal("expected infra destroy failure")
+	}
+	if !strings.Contains(err.Error(), "destroy infra") || !strings.Contains(err.Error(), "after 3 attempts") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got := strings.Join(infra.ops, ","); got != "psc:cluster-123:project-123:us-central1,infra:test-cluster:project-123:us-central1,infra:test-cluster:project-123:us-central1,infra:test-cluster:project-123:us-central1" {
 		t.Fatalf("unexpected cleanup operations: %s", got)
 	}
 }
