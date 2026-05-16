@@ -22,11 +22,11 @@ type ProvisionIdPInput struct {
 // Pass this spec to [Registry.RegisterProvisionIdP] to obtain a
 // [ProvisionIdPWorkflow] that can start instances.
 type ProvisionIdPWorkflowSpec struct {
-	AuthMethods            AuthMethodRepository
-	Discovery              OIDCDiscoveryClient
-	CreateDeployment       CreateDeploymentWorkflow
-	TrustBundlePlacement   PlacementStrategySpec
-	Now                    func() time.Time
+	AuthMethods          AuthMethodRepository
+	Discovery            OIDCDiscoveryClient
+	CreateDeployment     CreateDeploymentWorkflow
+	TrustBundlePlacement PlacementStrategySpec
+	Now                  func() time.Time
 }
 
 func (s *ProvisionIdPWorkflowSpec) now() time.Time {
@@ -81,13 +81,16 @@ func (s *ProvisionIdPWorkflowSpec) DeployTrustBundle() Activity[AuthMethod, stru
 		if method.Type != AuthMethodTypeOIDC || method.OIDC == nil {
 			return struct{}{}, nil
 		}
+		if s.TrustBundlePlacement.Type == "" {
+			return struct{}{}, nil
+		}
 
 		entry := TrustBundleEntry{
-			IssuerURL:              method.OIDC.IssuerURL,
-			JWKSURI:                method.OIDC.JWKSURI,
-			EnrollmentAudience:     method.OIDC.KeyEnrollmentAudience,
+			IssuerURL:                method.OIDC.IssuerURL,
+			JWKSURI:                  method.OIDC.JWKSURI,
+			EnrollmentAudience:       method.OIDC.KeyEnrollmentAudience,
 			PublicKeyClaimExpression: method.OIDC.PublicKeyClaimExpression,
-			RegistrySubjectMapping: method.OIDC.RegistrySubjectMapping,
+			RegistrySubjectMapping:   method.OIDC.RegistrySubjectMapping,
 		}
 
 		raw, err := json.Marshal(entry)

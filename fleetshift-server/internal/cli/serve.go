@@ -367,11 +367,12 @@ func runServe(ctx context.Context, f *serveFlags) error {
 		Discovery:        discoveryClient,
 		CreateDeployment: createWf,
 	}
-	if enabledAddons["kind"] {
-		provSpec.TrustBundlePlacement = domain.PlacementStrategySpec{
-			Type:    domain.PlacementStrategyStatic,
-			Targets: []domain.TargetID{"kind-local"},
-		}
+	var gcphcpTargetID string
+	if enabledAddons["gcphcp"] {
+		gcphcpTargetID = gcphcpCfg.Targets[0].ID
+	}
+	if placement := buildTrustBundlePlacement(enabledAddons, gcphcpTargetID); placement.Type != "" {
+		provSpec.TrustBundlePlacement = placement
 	}
 	provWf, err := reg.RegisterProvisionIdP(provSpec)
 	if err != nil {
@@ -636,7 +637,6 @@ func runServe(ctx context.Context, f *serveFlags) error {
 		}
 	}
 
-
 	// --- shutdown ---
 
 	select {
@@ -756,6 +756,23 @@ func parseAddons(spec string) map[string]bool {
 		}
 	}
 	return addons
+}
+
+func buildTrustBundlePlacement(enabledAddons map[string]bool, gcphcpTargetID string) domain.PlacementStrategySpec {
+	targets := make([]domain.TargetID, 0, 2)
+	if enabledAddons["kind"] {
+		targets = append(targets, "kind-local")
+	}
+	if enabledAddons["gcphcp"] && gcphcpTargetID != "" {
+		targets = append(targets, domain.TargetID(gcphcpTargetID))
+	}
+	if len(targets) == 0 {
+		return domain.PlacementStrategySpec{}
+	}
+	return domain.PlacementStrategySpec{
+		Type:    domain.PlacementStrategyStatic,
+		Targets: targets,
+	}
 }
 
 func resolveDatabaseURLFile(f *serveFlags) error {
