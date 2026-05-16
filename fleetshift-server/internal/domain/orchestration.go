@@ -152,6 +152,12 @@ type OrchestrationWorkflowSpec struct {
 	Now             func() time.Time
 }
 
+type outputCleanupPlan struct {
+	targetIDs    []TargetID
+	inventoryIDs []InventoryItemID
+	secretRefs   []SecretRef
+}
+
 func (s *OrchestrationWorkflowSpec) now() time.Time {
 	if s.Now != nil {
 		return s.Now()
@@ -1104,12 +1110,6 @@ func (s *OrchestrationWorkflowSpec) processDeliveryEvent(
 		*results = append(*results, *event.DeliveryCompleted)
 	}
 	return nil
-}
-
-type outputCleanupPlan struct {
-	targetIDs    []TargetID
-	inventoryIDs []InventoryItemID
-	secretRefs   []SecretRef
 }
 
 func buildOutputCleanupPlan(deliveries []Delivery, items []InventoryItem) (outputCleanupPlan, error) {
