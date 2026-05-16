@@ -176,7 +176,7 @@ func (r *Reconciler) Reconcile(
 		})
 
 		// Create IAM
-		iamConfig, err := r.infra.CreateIAM(ctx, spec.Name, target.GCPProject, jwksPath, hypershiftEnv)
+		iamConfig, err := ensureIAMWithRecovery(ctx, r.infra, spec, target, jwksPath, hypershiftEnv, signaler)
 		if err != nil {
 			return nil, fmt.Errorf("create IAM: %w", err)
 		}
@@ -189,9 +189,9 @@ func (r *Reconciler) Reconcile(
 		})
 
 		// Create infrastructure
-		infraConfig, err := r.infra.CreateInfra(ctx, spec.Name, target.GCPProject, target.Region, hypershiftEnv)
+		infraConfig, err := ensureInfraWithRecovery(ctx, r.infra, spec, target, hypershiftEnv, signaler)
 		if err != nil {
-			return nil, cleanupCreateFailure(fmt.Errorf("create infra: %w", err))
+			return nil, fmt.Errorf("create infra: %w", err)
 		}
 		createdInfra = true
 

@@ -19,14 +19,37 @@ type fakeNodepoolClient struct {
 	deletedIDs   []string
 }
 
+type createAttemptResult struct {
+	result map[string]any
+	err    error
+}
+
 type fakeCleanupInfra struct {
-	ops            []string
-	createIAMErr   error
-	createInfraErr error
+	ops                []string
+	createIAMErr       error
+	createInfraErr     error
+	createIAMResults   []createAttemptResult
+	createInfraResults []createAttemptResult
+	createIAMCalls     int
+	createInfraCalls   int
 }
 
 func (f *fakeCleanupInfra) CreateIAM(_ context.Context, infraID, projectID, jwksPath string, _ []string) (map[string]any, error) {
 	f.ops = append(f.ops, "create-iam:"+infraID+":"+projectID+":"+jwksPath)
+	attempt := f.createIAMCalls
+	f.createIAMCalls++
+	if len(f.createIAMResults) > 0 {
+		if attempt >= len(f.createIAMResults) {
+			attempt = len(f.createIAMResults) - 1
+		}
+		result := f.createIAMResults[attempt]
+		if result.err != nil {
+			return nil, result.err
+		}
+		if result.result != nil {
+			return result.result, nil
+		}
+	}
 	if f.createIAMErr != nil {
 		return nil, f.createIAMErr
 	}
@@ -39,6 +62,20 @@ func (f *fakeCleanupInfra) CreateIAM(_ context.Context, infraID, projectID, jwks
 
 func (f *fakeCleanupInfra) CreateInfra(_ context.Context, infraID, projectID, region string, _ []string) (map[string]any, error) {
 	f.ops = append(f.ops, "create-infra:"+infraID+":"+projectID+":"+region)
+	attempt := f.createInfraCalls
+	f.createInfraCalls++
+	if len(f.createInfraResults) > 0 {
+		if attempt >= len(f.createInfraResults) {
+			attempt = len(f.createInfraResults) - 1
+		}
+		result := f.createInfraResults[attempt]
+		if result.err != nil {
+			return nil, result.err
+		}
+		if result.result != nil {
+			return result.result, nil
+		}
+	}
 	if f.createInfraErr != nil {
 		return nil, f.createInfraErr
 	}
@@ -262,6 +299,97 @@ func TestDeleteClusterIfPresent_SkipsMissingCluster(t *testing.T) {
 	}
 }
 
+func TestEnsureIAMWithRecovery_RetriesAmbiguousFailure(t *testing.T) {
+	origInterval := ambiguousPrereqRetryInterval
+	origAttempts := ambiguousPrereqMaxAttempts
+	ambiguousPrereqRetryInterval = 0
+	ambiguousPrereqMaxAttempts = 2
+	defer func() {
+		ambiguousPrereqRetryInterval = origInterval
+		ambiguousPrereqMaxAttempts = origAttempts
+	}()
+
+	infra := &fakeCleanupInfra{
+		createIAMResults: []createAttemptResult{
+			{err: errors.New("iam partially created before cli failure")},
+			{
+				result: map[string]any{
+					"workloadIdentityPool": map[string]any{
+						"audience": "recovered-audience",
+					},
+				},
+			},
+		},
+	}
+
+	iamConfig, err := ensureIAMWithRecovery(
+		context.Background(),
+		infra,
+		ClusterSpec{Name: "test-cluster"},
+		TargetConfig{GCPProject: "project-123"},
+		"/tmp/jwks.json",
+		[]string{"EXAMPLE=1"},
+		&domain.DeliverySignaler{},
+	)
+	if err != nil {
+		t.Fatalf("ensureIAMWithRecovery() error = %v", err)
+	}
+	if infra.createIAMCalls != 2 {
+		t.Fatalf("expected 2 IAM attempts, got %d", infra.createIAMCalls)
+	}
+	if got := strings.Join(infra.ops, ","); got != "create-iam:test-cluster:project-123:/tmp/jwks.json,create-iam:test-cluster:project-123:/tmp/jwks.json" {
+		t.Fatalf("unexpected IAM recovery operations: %s", got)
+	}
+	wip, ok := iamConfig["workloadIdentityPool"].(map[string]any)
+	if !ok {
+		t.Fatal("expected workloadIdentityPool in IAM config")
+	}
+	if audience := wip["audience"]; audience != "recovered-audience" {
+		t.Fatalf("audience = %v, want recovered-audience", audience)
+	}
+}
+
+func TestEnsureInfraWithRecovery_ReturnsErrorAfterAmbiguousRetries(t *testing.T) {
+	origInterval := ambiguousPrereqRetryInterval
+	origAttempts := ambiguousPrereqMaxAttempts
+	ambiguousPrereqRetryInterval = 0
+	ambiguousPrereqMaxAttempts = 3
+	defer func() {
+		ambiguousPrereqRetryInterval = origInterval
+		ambiguousPrereqMaxAttempts = origAttempts
+	}()
+
+	infra := &fakeCleanupInfra{
+		createInfraResults: []createAttemptResult{
+			{err: errors.New("infra partially created before cli failure")},
+		},
+	}
+
+	infraConfig, err := ensureInfraWithRecovery(
+		context.Background(),
+		infra,
+		ClusterSpec{Name: "test-cluster"},
+		TargetConfig{GCPProject: "project-123", Region: "us-central1"},
+		[]string{"EXAMPLE=1"},
+		&domain.DeliverySignaler{},
+	)
+	if err == nil {
+		t.Fatal("expected ambiguous infra error after retries")
+	}
+	if infraConfig != nil {
+		t.Fatalf("expected nil infra config, got %#v", infraConfig)
+	}
+	if infra.createInfraCalls != 3 {
+		t.Fatalf("expected 3 infra attempts, got %d", infra.createInfraCalls)
+	}
+	if strings.Contains(strings.Join(infra.ops, ","), "iam:test-cluster") {
+		t.Fatalf("expected no cleanup operations during infra retry path, got %v", infra.ops)
+	}
+	if !strings.Contains(err.Error(), "infrastructure creation remained ambiguous after 3 attempts") {
+		t.Fatalf("expected ambiguous retry error, got %v", err)
+	}
+}
+
 func TestRecoverFromAmbiguousCreateFailure_AdoptsClusterWhenItAppears(t *testing.T) {
 	origInterval := ambiguousCreateProbeInterval
 	origTimeout := ambiguousCreateProbeTimeout
@@ -346,11 +474,17 @@ func TestRecoverFromAmbiguousCreateFailure_AdoptsClusterWhenItAppears(t *testing
 func TestRecoverFromAmbiguousCreateFailure_ReturnsErrorWithoutCleanupWhenReensureFails(t *testing.T) {
 	origInterval := ambiguousCreateProbeInterval
 	origTimeout := ambiguousCreateProbeTimeout
+	origPrereqInterval := ambiguousPrereqRetryInterval
+	origPrereqAttempts := ambiguousPrereqMaxAttempts
 	ambiguousCreateProbeInterval = 5 * time.Millisecond
 	ambiguousCreateProbeTimeout = 20 * time.Millisecond
+	ambiguousPrereqRetryInterval = 0
+	ambiguousPrereqMaxAttempts = 2
 	defer func() {
 		ambiguousCreateProbeInterval = origInterval
 		ambiguousCreateProbeTimeout = origTimeout
+		ambiguousPrereqRetryInterval = origPrereqInterval
+		ambiguousPrereqMaxAttempts = origPrereqAttempts
 	}()
 
 	client := &fakeClusterResolveClient{
@@ -381,7 +515,7 @@ func TestRecoverFromAmbiguousCreateFailure_ReturnsErrorWithoutCleanupWhenReensur
 	if clusterID != "" {
 		t.Fatalf("expected no adopted cluster ID on failed re-ensure, got %q", clusterID)
 	}
-	if got := strings.Join(infra.ops, ","); got != "create-iam:test-cluster:project-123:/tmp/jwks.json,create-infra:test-cluster:project-123:us-central1" {
+	if got := strings.Join(infra.ops, ","); got != "create-iam:test-cluster:project-123:/tmp/jwks.json,create-infra:test-cluster:project-123:us-central1,create-infra:test-cluster:project-123:us-central1" {
 		t.Fatalf("unexpected repair operations: %s", got)
 	}
 	if len(client.updatedIDs) != 0 {
