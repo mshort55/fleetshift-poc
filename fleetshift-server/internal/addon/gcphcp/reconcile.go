@@ -216,13 +216,45 @@ func (r *Reconciler) Reconcile(
 		// Create cluster
 		clusterData, err := clsClient.CreateCluster(ctx, clsClusterSpec)
 		if err != nil {
-			return nil, cleanupCreateFailure(fmt.Errorf("create cluster: %w", err))
+			clusterID, err = recoverFromAmbiguousCreateFailure(
+				ctx,
+				clsClient,
+				r.infra,
+				spec,
+				target,
+				jwksPath,
+				hypershiftEnv,
+				createdInfra,
+				createdIAM,
+				fmt.Errorf("create cluster: %w", err),
+				signaler,
+			)
+			if err != nil {
+				return nil, err
+			}
+			break
 		}
 
 		var ok bool
 		clusterID, ok = clusterData["id"].(string)
 		if !ok || clusterID == "" {
-			return nil, cleanupCreateFailure(fmt.Errorf("cluster creation response missing id field"))
+			clusterID, err = recoverFromAmbiguousCreateFailure(
+				ctx,
+				clsClient,
+				r.infra,
+				spec,
+				target,
+				jwksPath,
+				hypershiftEnv,
+				createdInfra,
+				createdIAM,
+				fmt.Errorf("cluster creation response missing id field"),
+				signaler,
+			)
+			if err != nil {
+				return nil, err
+			}
+			break
 		}
 
 		signaler.Emit(ctx, domain.DeliveryEvent{
