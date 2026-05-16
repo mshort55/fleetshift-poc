@@ -2,8 +2,11 @@ package gcphcp
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/fleetshift/fleetshift-poc/fleetshift-server/internal/domain"
 )
@@ -17,7 +20,33 @@ type fakeNodepoolClient struct {
 }
 
 type fakeCleanupInfra struct {
-	ops []string
+	ops            []string
+	createIAMErr   error
+	createInfraErr error
+}
+
+func (f *fakeCleanupInfra) CreateIAM(_ context.Context, infraID, projectID, jwksPath string, _ []string) (map[string]any, error) {
+	f.ops = append(f.ops, "create-iam:"+infraID+":"+projectID+":"+jwksPath)
+	if f.createIAMErr != nil {
+		return nil, f.createIAMErr
+	}
+	return map[string]any{
+		"workloadIdentityPool": map[string]any{
+			"audience": "test-audience",
+		},
+	}, nil
+}
+
+func (f *fakeCleanupInfra) CreateInfra(_ context.Context, infraID, projectID, region string, _ []string) (map[string]any, error) {
+	f.ops = append(f.ops, "create-infra:"+infraID+":"+projectID+":"+region)
+	if f.createInfraErr != nil {
+		return nil, f.createInfraErr
+	}
+	return map[string]any{
+		"infraId":     infraID,
+		"networkName": infraID + "-network",
+		"subnetName":  infraID + "-subnet",
+	}, nil
 }
 
 func (f *fakeCleanupInfra) DestroyInfra(_ context.Context, infraID, projectID, region string, _ []string) error {
@@ -36,6 +65,21 @@ type fakeClusterDeleteClient struct {
 	deleteIDs  []string
 }
 
+type resolveResult struct {
+	clusterID string
+	err       error
+}
+
+type fakeClusterResolveClient struct {
+	results         []resolveResult
+	calls           int
+	observedCluster map[string]any
+	getClusterErr   error
+	updateErr       error
+	updatedIDs      []string
+	updatedSpecs    []map[string]any
+}
+
 func (f *fakeClusterDeleteClient) ResolveClusterID(_ context.Context, _ string) (string, error) {
 	return f.clusterID, f.resolveErr
 }
@@ -43,6 +87,31 @@ func (f *fakeClusterDeleteClient) ResolveClusterID(_ context.Context, _ string) 
 func (f *fakeClusterDeleteClient) DeleteCluster(_ context.Context, clusterID string) error {
 	f.deleteIDs = append(f.deleteIDs, clusterID)
 	return nil
+}
+
+func (f *fakeClusterResolveClient) ResolveClusterID(_ context.Context, _ string) (string, error) {
+	idx := f.calls
+	if idx >= len(f.results) {
+		idx = len(f.results) - 1
+	}
+	f.calls++
+	return f.results[idx].clusterID, f.results[idx].err
+}
+
+func (f *fakeClusterResolveClient) GetCluster(_ context.Context, _ string) (map[string]any, error) {
+	if f.getClusterErr != nil {
+		return nil, f.getClusterErr
+	}
+	return f.observedCluster, nil
+}
+
+func (f *fakeClusterResolveClient) UpdateCluster(_ context.Context, clusterID string, spec map[string]any) (map[string]any, error) {
+	f.updatedIDs = append(f.updatedIDs, clusterID)
+	f.updatedSpecs = append(f.updatedSpecs, spec)
+	if f.updateErr != nil {
+		return nil, f.updateErr
+	}
+	return map[string]any{"id": clusterID}, nil
 }
 
 func (f *fakeNodepoolClient) ListNodepools(_ context.Context, _ string) ([]map[string]any, error) {
@@ -190,5 +259,223 @@ func TestDeleteClusterIfPresent_SkipsMissingCluster(t *testing.T) {
 	}
 	if len(client.deleteIDs) != 0 {
 		t.Fatalf("expected no delete calls, got %v", client.deleteIDs)
+	}
+}
+
+func TestRecoverFromAmbiguousCreateFailure_AdoptsClusterWhenItAppears(t *testing.T) {
+	origInterval := ambiguousCreateProbeInterval
+	origTimeout := ambiguousCreateProbeTimeout
+	ambiguousCreateProbeInterval = 5 * time.Millisecond
+	ambiguousCreateProbeTimeout = 25 * time.Millisecond
+	defer func() {
+		ambiguousCreateProbeInterval = origInterval
+		ambiguousCreateProbeTimeout = origTimeout
+	}()
+
+	client := &fakeClusterResolveClient{
+		results: []resolveResult{
+			{err: fmt.Errorf("%w: %q", ErrClusterNotFound, "test-cluster")},
+			{clusterID: "cluster-123"},
+		},
+		observedCluster: map[string]any{
+			"target_project_id": "project-123",
+			"spec": map[string]any{
+				"infraID":                  "test-cluster",
+				"issuerURL":                "https://hypershift-test-cluster-oidc",
+				"serviceAccountSigningKey": "signing-key",
+				"platform": map[string]any{
+					"gcp": map[string]any{
+						"projectID":        "project-123",
+						"region":           "us-central1",
+						"network":          "test-cluster-network",
+						"subnet":           "test-cluster-subnet",
+						"endpointAccess":   "PublicAndPrivate",
+						"workloadIdentity": map[string]any{"audience": "test-audience"},
+					},
+				},
+			},
+		},
+	}
+	infra := &fakeCleanupInfra{}
+
+	clusterID, err := recoverFromAmbiguousCreateFailure(
+		context.Background(),
+		client,
+		infra,
+		ClusterSpec{Name: "test-cluster", EndpointAccess: "Private"},
+		TargetConfig{GCPProject: "project-123", Region: "us-central1"},
+		"/tmp/jwks.json",
+		[]string{"EXAMPLE=1"},
+		true,
+		true,
+		fmt.Errorf("create cluster: request timeout"),
+		&domain.DeliverySignaler{},
+	)
+	if err != nil {
+		t.Fatalf("recoverFromAmbiguousCreateFailure() error = %v", err)
+	}
+	if clusterID != "cluster-123" {
+		t.Fatalf("expected adopted cluster ID cluster-123, got %q", clusterID)
+	}
+	if got := strings.Join(infra.ops, ","); got != "create-iam:test-cluster:project-123:/tmp/jwks.json,create-infra:test-cluster:project-123:us-central1" {
+		t.Fatalf("unexpected repair operations: %s", got)
+	}
+	if len(client.updatedIDs) != 1 || client.updatedIDs[0] != "cluster-123" {
+		t.Fatalf("expected one update for adopted cluster, got ids %v", client.updatedIDs)
+	}
+	if len(client.updatedSpecs) != 1 {
+		t.Fatalf("expected one updated spec, got %d", len(client.updatedSpecs))
+	}
+	updatedSpec, ok := client.updatedSpecs[0]["spec"].(map[string]any)
+	if !ok {
+		t.Fatal("updated cluster spec is not a map")
+	}
+	platform, ok := updatedSpec["platform"].(map[string]any)
+	if !ok {
+		t.Fatal("updated cluster spec missing platform map")
+	}
+	gcp, ok := platform["gcp"].(map[string]any)
+	if !ok {
+		t.Fatal("updated cluster platform missing gcp map")
+	}
+	if endpointAccess := gcp["endpointAccess"]; endpointAccess != "Private" {
+		t.Fatalf("updated endpointAccess = %v, want Private", endpointAccess)
+	}
+}
+
+func TestRecoverFromAmbiguousCreateFailure_ReturnsErrorWithoutCleanupWhenReensureFails(t *testing.T) {
+	origInterval := ambiguousCreateProbeInterval
+	origTimeout := ambiguousCreateProbeTimeout
+	ambiguousCreateProbeInterval = 5 * time.Millisecond
+	ambiguousCreateProbeTimeout = 20 * time.Millisecond
+	defer func() {
+		ambiguousCreateProbeInterval = origInterval
+		ambiguousCreateProbeTimeout = origTimeout
+	}()
+
+	client := &fakeClusterResolveClient{
+		results: []resolveResult{
+			{clusterID: "cluster-123"},
+		},
+	}
+	infra := &fakeCleanupInfra{
+		createInfraErr: errors.New("infra rerun failed"),
+	}
+
+	clusterID, err := recoverFromAmbiguousCreateFailure(
+		context.Background(),
+		client,
+		infra,
+		ClusterSpec{Name: "test-cluster"},
+		TargetConfig{GCPProject: "project-123", Region: "us-central1"},
+		"/tmp/jwks.json",
+		[]string{"EXAMPLE=1"},
+		true,
+		true,
+		fmt.Errorf("create cluster: request timeout"),
+		&domain.DeliverySignaler{},
+	)
+	if err == nil {
+		t.Fatal("expected re-ensure failure")
+	}
+	if clusterID != "" {
+		t.Fatalf("expected no adopted cluster ID on failed re-ensure, got %q", clusterID)
+	}
+	if got := strings.Join(infra.ops, ","); got != "create-iam:test-cluster:project-123:/tmp/jwks.json,create-infra:test-cluster:project-123:us-central1" {
+		t.Fatalf("unexpected repair operations: %s", got)
+	}
+	if len(client.updatedIDs) != 0 {
+		t.Fatalf("expected no cluster update after failed re-ensure, got %v", client.updatedIDs)
+	}
+	if !strings.Contains(err.Error(), "request timeout") || !strings.Contains(err.Error(), "re-ensure infrastructure for adopted cluster") {
+		t.Fatalf("expected combined create/re-ensure error, got %v", err)
+	}
+}
+
+func TestRecoverFromAmbiguousCreateFailure_CleansUpAfterTimeout(t *testing.T) {
+	origInterval := ambiguousCreateProbeInterval
+	origTimeout := ambiguousCreateProbeTimeout
+	ambiguousCreateProbeInterval = 5 * time.Millisecond
+	ambiguousCreateProbeTimeout = 20 * time.Millisecond
+	defer func() {
+		ambiguousCreateProbeInterval = origInterval
+		ambiguousCreateProbeTimeout = origTimeout
+	}()
+
+	client := &fakeClusterResolveClient{
+		results: []resolveResult{
+			{err: fmt.Errorf("%w: %q", ErrClusterNotFound, "test-cluster")},
+		},
+	}
+	infra := &fakeCleanupInfra{}
+
+	clusterID, err := recoverFromAmbiguousCreateFailure(
+		context.Background(),
+		client,
+		infra,
+		ClusterSpec{Name: "test-cluster"},
+		TargetConfig{GCPProject: "project-123", Region: "us-central1"},
+		"/tmp/jwks.json",
+		[]string{"EXAMPLE=1"},
+		true,
+		true,
+		fmt.Errorf("cluster creation response missing id field"),
+		&domain.DeliverySignaler{},
+	)
+	if err == nil {
+		t.Fatal("expected create failure after timeout")
+	}
+	if clusterID != "" {
+		t.Fatalf("expected no adopted cluster ID, got %q", clusterID)
+	}
+	if got := strings.Join(infra.ops, ","); got != "infra:test-cluster:project-123:us-central1,iam:test-cluster:project-123" {
+		t.Fatalf("unexpected cleanup operations: %s", got)
+	}
+	if !strings.Contains(err.Error(), "cluster creation response missing id field") {
+		t.Fatalf("expected original create failure, got %v", err)
+	}
+}
+
+func TestRecoverFromAmbiguousCreateFailure_SkipsCleanupWhenProbeFails(t *testing.T) {
+	origInterval := ambiguousCreateProbeInterval
+	origTimeout := ambiguousCreateProbeTimeout
+	ambiguousCreateProbeInterval = 5 * time.Millisecond
+	ambiguousCreateProbeTimeout = 20 * time.Millisecond
+	defer func() {
+		ambiguousCreateProbeInterval = origInterval
+		ambiguousCreateProbeTimeout = origTimeout
+	}()
+
+	client := &fakeClusterResolveClient{
+		results: []resolveResult{
+			{err: errors.New("list clusters: temporary backend error")},
+		},
+	}
+	infra := &fakeCleanupInfra{}
+
+	clusterID, err := recoverFromAmbiguousCreateFailure(
+		context.Background(),
+		client,
+		infra,
+		ClusterSpec{Name: "test-cluster"},
+		TargetConfig{GCPProject: "project-123", Region: "us-central1"},
+		"/tmp/jwks.json",
+		[]string{"EXAMPLE=1"},
+		true,
+		true,
+		fmt.Errorf("create cluster: request timeout"),
+		&domain.DeliverySignaler{},
+	)
+	if err == nil {
+		t.Fatal("expected combined probe error")
+	}
+	if clusterID != "" {
+		t.Fatalf("expected no adopted cluster ID, got %q", clusterID)
+	}
+	if len(infra.ops) != 0 {
+		t.Fatalf("expected no cleanup when probe is inconclusive, got %v", infra.ops)
+	}
+	if !strings.Contains(err.Error(), "request timeout") || !strings.Contains(err.Error(), "probe for cluster after ambiguous create") {
+		t.Fatalf("expected combined create/probe error, got %v", err)
 	}
 }

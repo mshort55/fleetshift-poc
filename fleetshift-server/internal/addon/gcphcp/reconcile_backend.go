@@ -28,6 +28,27 @@ type clusterDeleteClient interface {
 	DeleteCluster(ctx context.Context, clusterID string) error
 }
 
+type clusterResolveClient interface {
+	ResolveClusterID(ctx context.Context, clusterName string) (string, error)
+}
+
+type ambiguousCreateRecoveryClient interface {
+	clusterResolveClient
+	GetCluster(ctx context.Context, clusterID string) (map[string]any, error)
+	UpdateCluster(ctx context.Context, clusterID string, spec map[string]any) (map[string]any, error)
+}
+
+type ambiguousCreateRecoveryInfra interface {
+	createCleanupInfra
+	CreateIAM(ctx context.Context, infraID, projectID, jwksFile string, env []string) (map[string]any, error)
+	CreateInfra(ctx context.Context, infraID, projectID, region string, env []string) (map[string]any, error)
+}
+
+var (
+	ambiguousCreateProbeInterval = 2 * time.Second
+	ambiguousCreateProbeTimeout  = 30 * time.Second
+)
+
 // BuildCLSClusterUpdateSpec preserves observed bootstrap/infra fields while
 // overlaying the desired mutable cluster fields from the addon spec.
 func BuildCLSClusterUpdateSpec(spec ClusterSpec, observed map[string]any) (map[string]any, error) {
@@ -162,6 +183,121 @@ func cleanupCreateResources(
 	}
 
 	return cleanupErr
+}
+
+func recoverFromAmbiguousCreateFailure(
+	ctx context.Context,
+	client ambiguousCreateRecoveryClient,
+	infra ambiguousCreateRecoveryInfra,
+	spec ClusterSpec,
+	target TargetConfig,
+	jwksPath string,
+	hypershiftEnv []string,
+	createdInfra bool,
+	createdIAM bool,
+	createErr error,
+	signaler *domain.DeliverySignaler,
+) (string, error) {
+	clusterID, adopted, probeErr := resolveClusterAfterAmbiguousCreate(ctx, client, spec.Name, signaler)
+	switch {
+	case probeErr != nil:
+		return "", errors.Join(createErr, probeErr)
+	case adopted:
+		if err := repairAdoptedClusterAfterAmbiguousCreate(
+			ctx,
+			client,
+			infra,
+			clusterID,
+			spec,
+			target,
+			jwksPath,
+			hypershiftEnv,
+			signaler,
+		); err != nil {
+			return "", errors.Join(createErr, err)
+		}
+		return clusterID, nil
+	default:
+		emitProgress(signaler, ctx, "Ambiguous create did not surface a cluster; cleaning up partial IAM/infra resources")
+		cleanupErr := cleanupCreateResources(ctx, infra, spec, target, hypershiftEnv, createdInfra, createdIAM)
+		if cleanupErr != nil {
+			return "", errors.Join(createErr, cleanupErr)
+		}
+		return "", createErr
+	}
+}
+
+func repairAdoptedClusterAfterAmbiguousCreate(
+	ctx context.Context,
+	client ambiguousCreateRecoveryClient,
+	infra ambiguousCreateRecoveryInfra,
+	clusterID string,
+	spec ClusterSpec,
+	target TargetConfig,
+	jwksPath string,
+	hypershiftEnv []string,
+	signaler *domain.DeliverySignaler,
+) error {
+	emitProgress(signaler, ctx, fmt.Sprintf("Re-ensuring IAM resources for adopted cluster %s", clusterID))
+	if _, err := infra.CreateIAM(ctx, spec.Name, target.GCPProject, jwksPath, hypershiftEnv); err != nil {
+		return fmt.Errorf("re-ensure IAM for adopted cluster: %w", err)
+	}
+
+	emitProgress(signaler, ctx, fmt.Sprintf("Re-ensuring infrastructure for adopted cluster %s", clusterID))
+	if _, err := infra.CreateInfra(ctx, spec.Name, target.GCPProject, target.Region, hypershiftEnv); err != nil {
+		return fmt.Errorf("re-ensure infrastructure for adopted cluster: %w", err)
+	}
+
+	emitProgress(signaler, ctx, fmt.Sprintf("Refreshing adopted cluster %s before update", clusterID))
+	observedCluster, err := client.GetCluster(ctx, clusterID)
+	if err != nil {
+		return fmt.Errorf("get adopted cluster %s: %w", clusterID, err)
+	}
+
+	updateSpec, err := BuildCLSClusterUpdateSpec(spec, observedCluster)
+	if err != nil {
+		return fmt.Errorf("build adopted cluster update spec: %w", err)
+	}
+
+	if _, err := client.UpdateCluster(ctx, clusterID, updateSpec); err != nil {
+		return fmt.Errorf("update adopted cluster %s: %w", clusterID, err)
+	}
+
+	emitProgress(signaler, ctx, fmt.Sprintf("Adopted cluster %s repaired and updated", clusterID))
+	return nil
+}
+
+func resolveClusterAfterAmbiguousCreate(
+	ctx context.Context,
+	client clusterResolveClient,
+	clusterName string,
+	signaler *domain.DeliverySignaler,
+) (string, bool, error) {
+	emitProgress(signaler, ctx, fmt.Sprintf("Create result for cluster %s was ambiguous; probing for adoption", clusterName))
+
+	ticker := time.NewTicker(ambiguousCreateProbeInterval)
+	defer ticker.Stop()
+
+	timeout := time.After(ambiguousCreateProbeTimeout)
+
+	for {
+		clusterID, err := client.ResolveClusterID(ctx, clusterName)
+		switch {
+		case err == nil:
+			emitProgress(signaler, ctx, fmt.Sprintf("Adopted cluster %s after ambiguous create result", clusterID))
+			return clusterID, true, nil
+		case !errors.Is(err, ErrClusterNotFound):
+			return "", false, fmt.Errorf("probe for cluster after ambiguous create: %w", err)
+		}
+
+		select {
+		case <-ctx.Done():
+			return "", false, ctx.Err()
+		case <-timeout:
+			return "", false, nil
+		case <-ticker.C:
+		}
+	}
 }
 
 func deleteClusterIfPresent(
