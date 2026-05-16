@@ -13,6 +13,7 @@ import (
 	authv1 "k8s.io/api/authentication/v1"
 	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
+	"k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
@@ -113,7 +114,7 @@ func createPlatformSA(ctx context.Context, client kubernetes.Interface) error {
 // the fleetshift-platform ServiceAccount. It ignores AlreadyExists errors to
 // make the operation idempotent.
 func createPlatformRBAC(ctx context.Context, client kubernetes.Interface) error {
-	_, err := client.RbacV1().ClusterRoleBindings().Create(ctx, &rbacv1.ClusterRoleBinding{
+	desired := &rbacv1.ClusterRoleBinding{
 		ObjectMeta: metav1.ObjectMeta{Name: platformSAName + "-cluster-admin"},
 		RoleRef: rbacv1.RoleRef{
 			APIGroup: "rbac.authorization.k8s.io",
@@ -125,9 +126,40 @@ func createPlatformRBAC(ctx context.Context, client kubernetes.Interface) error 
 			Name:      platformSAName,
 			Namespace: platformSANamespace,
 		}},
-	}, metav1.CreateOptions{})
-	if err != nil && !apierrors.IsAlreadyExists(err) {
+	}
+
+	bindings := client.RbacV1().ClusterRoleBindings()
+	_, err := bindings.Create(ctx, desired, metav1.CreateOptions{})
+	if err == nil {
+		return nil
+	}
+	if !apierrors.IsAlreadyExists(err) {
 		return fmt.Errorf("create ClusterRoleBinding for %s: %w", platformSAName, err)
+	}
+
+	existing, err := bindings.Get(ctx, desired.Name, metav1.GetOptions{})
+	if err != nil {
+		return fmt.Errorf("get existing ClusterRoleBinding for %s: %w", platformSAName, err)
+	}
+
+	if !equality.Semantic.DeepEqual(existing.RoleRef, desired.RoleRef) {
+		if err := bindings.Delete(ctx, desired.Name, metav1.DeleteOptions{}); err != nil {
+			return fmt.Errorf("delete conflicting ClusterRoleBinding for %s: %w", platformSAName, err)
+		}
+		if _, err := bindings.Create(ctx, desired, metav1.CreateOptions{}); err != nil {
+			return fmt.Errorf("recreate ClusterRoleBinding for %s: %w", platformSAName, err)
+		}
+		return nil
+	}
+
+	if equality.Semantic.DeepEqual(existing.Subjects, desired.Subjects) {
+		return nil
+	}
+
+	updated := existing.DeepCopy()
+	updated.Subjects = desired.Subjects
+	if _, err := bindings.Update(ctx, updated, metav1.UpdateOptions{}); err != nil {
+		return fmt.Errorf("update ClusterRoleBinding for %s: %w", platformSAName, err)
 	}
 	return nil
 }
