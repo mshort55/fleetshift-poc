@@ -32,6 +32,11 @@ type clusterResolveClient interface {
 	ResolveClusterID(ctx context.Context, clusterName string) (string, error)
 }
 
+type prereqRecoveryInfra interface {
+	CreateIAM(ctx context.Context, infraID, projectID, jwksFile string, env []string) (map[string]any, error)
+	CreateInfra(ctx context.Context, infraID, projectID, region string, env []string) (map[string]any, error)
+}
+
 type ambiguousCreateRecoveryClient interface {
 	clusterResolveClient
 	GetCluster(ctx context.Context, clusterID string) (map[string]any, error)
@@ -39,14 +44,15 @@ type ambiguousCreateRecoveryClient interface {
 }
 
 type ambiguousCreateRecoveryInfra interface {
+	prereqRecoveryInfra
 	createCleanupInfra
-	CreateIAM(ctx context.Context, infraID, projectID, jwksFile string, env []string) (map[string]any, error)
-	CreateInfra(ctx context.Context, infraID, projectID, region string, env []string) (map[string]any, error)
 }
 
 var (
 	ambiguousCreateProbeInterval = 2 * time.Second
 	ambiguousCreateProbeTimeout  = 30 * time.Second
+	ambiguousPrereqRetryInterval = 2 * time.Second
+	ambiguousPrereqMaxAttempts   = 3
 )
 
 // BuildCLSClusterUpdateSpec preserves observed bootstrap/infra fields while
@@ -185,6 +191,83 @@ func cleanupCreateResources(
 	return cleanupErr
 }
 
+func ensureIAMWithRecovery(
+	ctx context.Context,
+	infra prereqRecoveryInfra,
+	spec ClusterSpec,
+	target TargetConfig,
+	jwksPath string,
+	hypershiftEnv []string,
+	signaler *domain.DeliverySignaler,
+) (map[string]any, error) {
+	return retryAmbiguousPrereqCreate(ctx, signaler, "IAM resource creation", func() (map[string]any, error) {
+		return infra.CreateIAM(ctx, spec.Name, target.GCPProject, jwksPath, hypershiftEnv)
+	})
+}
+
+func ensureInfraWithRecovery(
+	ctx context.Context,
+	infra prereqRecoveryInfra,
+	spec ClusterSpec,
+	target TargetConfig,
+	hypershiftEnv []string,
+	signaler *domain.DeliverySignaler,
+) (map[string]any, error) {
+	return retryAmbiguousPrereqCreate(ctx, signaler, "infrastructure creation", func() (map[string]any, error) {
+		return infra.CreateInfra(ctx, spec.Name, target.GCPProject, target.Region, hypershiftEnv)
+	})
+}
+
+func retryAmbiguousPrereqCreate(
+	ctx context.Context,
+	signaler *domain.DeliverySignaler,
+	resourceName string,
+	create func() (map[string]any, error),
+) (map[string]any, error) {
+	totalAttempts := ambiguousPrereqMaxAttempts
+	if totalAttempts < 1 {
+		totalAttempts = 1
+	}
+
+	attemptErrs := make([]error, 0, totalAttempts)
+	for attempt := 1; attempt <= totalAttempts; attempt++ {
+		if err := ctx.Err(); err != nil {
+			return nil, errors.Join(append(attemptErrs, err)...)
+		}
+
+		result, err := create()
+		if err == nil {
+			if attempt > 1 {
+				emitProgress(signaler, ctx, fmt.Sprintf("Recovered %s on attempt %d", resourceName, attempt))
+			}
+			return result, nil
+		}
+
+		attemptErrs = append(attemptErrs, fmt.Errorf("attempt %d: %w", attempt, err))
+		if attempt == totalAttempts {
+			attemptErrs = append(attemptErrs, fmt.Errorf("%s remained ambiguous after %d attempts", resourceName, totalAttempts))
+			return nil, errors.Join(attemptErrs...)
+		}
+
+		emitProgress(signaler, ctx, fmt.Sprintf("%s may have partially succeeded; retrying (%d/%d)", resourceName, attempt+1, totalAttempts))
+		if ambiguousPrereqRetryInterval <= 0 {
+			continue
+		}
+
+		timer := time.NewTimer(ambiguousPrereqRetryInterval)
+		select {
+		case <-ctx.Done():
+			if !timer.Stop() {
+				<-timer.C
+			}
+			return nil, errors.Join(append(attemptErrs, ctx.Err())...)
+		case <-timer.C:
+		}
+	}
+
+	return nil, fmt.Errorf("unreachable prereq recovery state")
+}
+
 func recoverFromAmbiguousCreateFailure(
 	ctx context.Context,
 	client ambiguousCreateRecoveryClient,
@@ -239,12 +322,12 @@ func repairAdoptedClusterAfterAmbiguousCreate(
 	signaler *domain.DeliverySignaler,
 ) error {
 	emitProgress(signaler, ctx, fmt.Sprintf("Re-ensuring IAM resources for adopted cluster %s", clusterID))
-	if _, err := infra.CreateIAM(ctx, spec.Name, target.GCPProject, jwksPath, hypershiftEnv); err != nil {
+	if _, err := ensureIAMWithRecovery(ctx, infra, spec, target, jwksPath, hypershiftEnv, signaler); err != nil {
 		return fmt.Errorf("re-ensure IAM for adopted cluster: %w", err)
 	}
 
 	emitProgress(signaler, ctx, fmt.Sprintf("Re-ensuring infrastructure for adopted cluster %s", clusterID))
-	if _, err := infra.CreateInfra(ctx, spec.Name, target.GCPProject, target.Region, hypershiftEnv); err != nil {
+	if _, err := ensureInfraWithRecovery(ctx, infra, spec, target, hypershiftEnv, signaler); err != nil {
 		return fmt.Errorf("re-ensure infrastructure for adopted cluster: %w", err)
 	}
 
