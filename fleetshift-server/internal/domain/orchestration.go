@@ -313,7 +313,16 @@ func (s *OrchestrationWorkflowSpec) RemoveFromTarget() Activity[RemoveInput, str
 			return struct{}{}, fmt.Errorf("load delivery record for target %s: %w", in.Target.ID, err)
 		}
 
-		return struct{}{}, s.Delivery.Remove(ctx, in.Target, in.DeliveryID, delivery.Manifests, in.Auth, in.Attestation, &DeliverySignaler{})
+		signaler := NewDeliverySignaler(
+			in.FulfillmentID,
+			in.DeliveryID,
+			in.Target,
+			nil,
+			nil,
+			s.DeliveryObserver,
+		)
+
+		return struct{}{}, s.Delivery.Remove(ctx, in.Target, in.DeliveryID, delivery.Manifests, in.Auth, in.Attestation, signaler)
 	})
 }
 
