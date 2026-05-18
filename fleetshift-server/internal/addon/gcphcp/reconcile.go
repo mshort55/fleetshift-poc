@@ -69,29 +69,54 @@ func completeGuestRegistration(
 		Message:   "Resolving guest API endpoint",
 	})
 
-	statusData, err := clsClient.GetClusterStatus(ctx, clusterID)
-	if err != nil {
-		return "", BootstrapResult{}, newPostProvisionRegistrationError(
-			fmt.Errorf("get cluster status: %w", err),
-		)
-	}
-
-	guestEndpoint, err := ResolveGuestAPIEndpoint(statusData)
-	if err != nil {
-		return "", BootstrapResult{}, newPostProvisionRegistrationError(
-			fmt.Errorf("resolve guest API endpoint: %w", err),
-		)
-	}
-
-	signaler.Emit(ctx, domain.DeliveryEvent{
-		Timestamp: time.Now(),
-		Kind:      domain.DeliveryEventProgress,
-		Message:   fmt.Sprintf("Guest API endpoint: %s", guestEndpoint),
-	})
-
 	var bootstrapResult BootstrapResult
 	var bootstrapErr error
+	var guestEndpoint string
+	endpointAnnounced := false
 	for attempt := 1; attempt <= guestBootstrapMaxAttempts; attempt++ {
+		statusData, err := clsClient.GetClusterStatus(ctx, clusterID)
+		if err != nil {
+			return "", BootstrapResult{}, newPostProvisionRegistrationError(
+				fmt.Errorf("get cluster status: %w", err),
+			)
+		}
+
+		guestEndpoint, err = ResolveGuestAPIEndpoint(statusData)
+		if err != nil {
+			if attempt < guestBootstrapMaxAttempts {
+				signaler.Emit(ctx, domain.DeliveryEvent{
+					Timestamp: time.Now(),
+					Kind:      domain.DeliveryEventWarning,
+					Message:   fmt.Sprintf("Guest API endpoint not yet available, retrying in %v: %v", guestBootstrapRetryDelay, err),
+				})
+				select {
+				case <-ctx.Done():
+					return "", BootstrapResult{}, newPostProvisionRegistrationError(ctx.Err())
+				case <-time.After(guestBootstrapRetryDelay):
+				}
+				continue
+			}
+
+			signaler.Emit(ctx, domain.DeliveryEvent{
+				Timestamp: time.Now(),
+				Kind:      domain.DeliveryEventWarning,
+				Message:   fmt.Sprintf("Hosted cluster is ready, but guest target registration did not complete: %v", err),
+			})
+
+			return "", BootstrapResult{}, newPostProvisionRegistrationError(
+				fmt.Errorf("resolve guest API endpoint after %d attempts: %w", guestBootstrapMaxAttempts, err),
+			)
+		}
+
+		if !endpointAnnounced {
+			signaler.Emit(ctx, domain.DeliveryEvent{
+				Timestamp: time.Now(),
+				Kind:      domain.DeliveryEventProgress,
+				Message:   fmt.Sprintf("Guest API endpoint: %s", guestEndpoint),
+			})
+			endpointAnnounced = true
+		}
+
 		signaler.Emit(ctx, domain.DeliveryEvent{
 			Timestamp: time.Now(),
 			Kind:      domain.DeliveryEventProgress,

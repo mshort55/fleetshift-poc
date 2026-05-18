@@ -778,3 +778,120 @@ func TestCompleteGuestRegistration_ReturnsPostProvisionRegistrationErrorAfterBoo
 		t.Fatalf("error = %v, want retry exhaustion context", err)
 	}
 }
+
+func TestCompleteGuestRegistration_RetriesUntilGuestAPIEndpointAppears(t *testing.T) {
+	origAttempts := guestBootstrapMaxAttempts
+	origDelay := guestBootstrapRetryDelay
+	origBootstrap := bootstrapGuestCluster
+	guestBootstrapMaxAttempts = 3
+	guestBootstrapRetryDelay = 0
+	defer func() {
+		guestBootstrapMaxAttempts = origAttempts
+		guestBootstrapRetryDelay = origDelay
+		bootstrapGuestCluster = origBootstrap
+	}()
+
+	bootstrapCalls := 0
+	bootstrapGuestCluster = func(_ context.Context, endpoint, _ string, _ domain.TargetID) (BootstrapResult, error) {
+		bootstrapCalls++
+		if endpoint != "https://guest.example:6443" {
+			t.Fatalf("bootstrap endpoint = %q, want https://guest.example:6443", endpoint)
+		}
+		return BootstrapResult{SATokenRef: "secret-ref"}, nil
+	}
+
+	statusCalls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/clusters/c-123/status" {
+			t.Fatalf("unexpected path %q", r.URL.Path)
+		}
+		statusCalls++
+		if statusCalls == 1 {
+			fmt.Fprint(w, `{"controller_status":[{"conditions":[{"type":"SomeOtherCondition","message":"still provisioning"}]}]}`)
+			return
+		}
+		fmt.Fprint(w, `{"controller_status":[{"conditions":[{"type":"APIServer","message":"https://guest.example:6443"}]}]}`)
+	}))
+	defer server.Close()
+
+	client := NewCLSClient(server.URL, "broker-token", "broker@example.com", nil)
+
+	endpoint, result, err := completeGuestRegistration(
+		context.Background(),
+		client,
+		"c-123",
+		"broker-token",
+		domain.TargetID("guest-target"),
+		&domain.DeliverySignaler{},
+	)
+	if err != nil {
+		t.Fatalf("completeGuestRegistration() error = %v", err)
+	}
+	if endpoint != "https://guest.example:6443" {
+		t.Fatalf("endpoint = %q, want https://guest.example:6443", endpoint)
+	}
+	if result.SATokenRef != "secret-ref" {
+		t.Fatalf("SATokenRef = %q, want secret-ref", result.SATokenRef)
+	}
+	if statusCalls != 2 {
+		t.Fatalf("status calls = %d, want 2", statusCalls)
+	}
+	if bootstrapCalls != 1 {
+		t.Fatalf("bootstrap calls = %d, want 1", bootstrapCalls)
+	}
+}
+
+func TestCompleteGuestRegistration_ReturnsRetryExhaustedWhenGuestAPIEndpointNeverAppears(t *testing.T) {
+	origAttempts := guestBootstrapMaxAttempts
+	origDelay := guestBootstrapRetryDelay
+	origBootstrap := bootstrapGuestCluster
+	guestBootstrapMaxAttempts = 3
+	guestBootstrapRetryDelay = 0
+	defer func() {
+		guestBootstrapMaxAttempts = origAttempts
+		guestBootstrapRetryDelay = origDelay
+		bootstrapGuestCluster = origBootstrap
+	}()
+
+	bootstrapCalls := 0
+	bootstrapGuestCluster = func(context.Context, string, string, domain.TargetID) (BootstrapResult, error) {
+		bootstrapCalls++
+		return BootstrapResult{}, nil
+	}
+
+	statusCalls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/clusters/c-123/status" {
+			t.Fatalf("unexpected path %q", r.URL.Path)
+		}
+		statusCalls++
+		fmt.Fprint(w, `{"controller_status":[{"conditions":[{"type":"SomeOtherCondition","message":"still provisioning"}]}]}`)
+	}))
+	defer server.Close()
+
+	client := NewCLSClient(server.URL, "broker-token", "broker@example.com", nil)
+
+	_, _, err := completeGuestRegistration(
+		context.Background(),
+		client,
+		"c-123",
+		"broker-token",
+		domain.TargetID("guest-target"),
+		&domain.DeliverySignaler{},
+	)
+	if err == nil {
+		t.Fatal("expected guest registration error")
+	}
+	if !isPostProvisionRegistrationError(err) {
+		t.Fatalf("expected post-provision registration error, got %T: %v", err, err)
+	}
+	if !strings.Contains(err.Error(), "resolve guest API endpoint after 3 attempts") {
+		t.Fatalf("error = %v, want endpoint retry exhaustion context", err)
+	}
+	if statusCalls != 3 {
+		t.Fatalf("status calls = %d, want 3", statusCalls)
+	}
+	if bootstrapCalls != 0 {
+		t.Fatalf("bootstrap calls = %d, want 0", bootstrapCalls)
+	}
+}
