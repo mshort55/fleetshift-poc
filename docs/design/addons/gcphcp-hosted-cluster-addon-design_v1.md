@@ -454,8 +454,7 @@ into four tiers with distinct lifecycles:
 | Caller identity | OIDC token for GCP STS exchange | `DeliveryAuth.Token` from FleetShift | Platform (transparent to addon) |
 | Gateway config | HCP backend service endpoint and audience | Addon config file, `gateway:` section | Operator at addon startup |
 | Target config | Identity federation, broker SA, GCP project, region | Addon config file, `targets:` list; seeded as `TargetInfo.Properties` | Operator at addon startup |
-| Hard-coded defaults | Stable cluster shape defaults (instance type, replicas, etc.) | Addon Go source code | Addon developers |
-| Cluster spec | Name, optional overrides for defaults, optional release version | Managed resource spec (`api.gcphcp.cluster`) | User at cluster creation |
+| Cluster spec | Full cluster shape: name, endpoint access, release version, channel group, nodepools (all required) | Managed resource spec (`api.gcphcp.cluster`) | User at cluster creation |
 
 `oidc_issuer_url` and `oidc_client_id` from the PoC's config disappear entirely. The addon receives
 the caller's OIDC token via `DeliveryAuth.Token` and exchanges it directly with GCP Workforce STS.
@@ -493,33 +492,58 @@ Each target is strictly infrastructure wiring — identity federation path (work
 SA) and provisioning destination (GCP project, region). No cluster shape defaults live on the
 target.
 
-### 6.3 Hard-coded cluster defaults
+### 6.3 Cluster spec — all fields required
 
-Stable cluster shape defaults are hard-coded in the addon Go source:
+The addon does not apply any default values. Every field in the cluster spec must be explicitly
+provided by the user at creation time. This makes the contract explicit — what you send is what
+you get.
 
-| Field | Default | Notes |
-|-------|---------|-------|
-| `endpointAccess` | `"PublicAndPrivate"` | Control plane access mode |
-| `instanceType` | `"n1-standard-4"` | GCP machine type for nodepools |
-| `rootVolume.size` | `128` | Root disk size in GB |
-| `rootVolume.type` | `"pd-standard"` | Root disk type |
-| `replicas` | `2` | Nodepool replica count |
-| `autoRepair` | `true` | Node auto-repair |
-| `upgradeType` | `"Replace"` | Node upgrade strategy |
+**Cluster-level required fields:**
 
-These are product opinions about what a reasonable cluster looks like. The user overrides any of
-them per-cluster in the managed resource spec. If a field is omitted from the spec, the addon fills
-it from these constants before sending to the CLS backend.
+| Field | Description |
+|-------|-------------|
+| `name` | Cluster name (max 15 chars, lowercase alphanumeric + hyphens) |
+| `endpointAccess` | Control plane access mode (e.g. `"PublicAndPrivate"`, `"Private"`) |
+| `releaseVersion` | OCP release version (e.g. `"4.22.0"`) |
+| `channelGroup` | Release channel (e.g. `"stable"`, `"fast"`, `"candidate"`) |
+| `nodepools` | At least one nodepool (see below) |
 
-Volatile fields are not defaulted by the addon:
+**Per-nodepool required fields:**
 
-| Field | Addon behavior | Notes |
-|-------|---------------|-------|
-| `release_version` | Omitted if not specified | CLS backend resolves the latest version in the channel |
-| `channel_group` | Omitted if not specified | CLS backend uses its own default channel |
+| Field | Description |
+|-------|-------------|
+| `name` | Nodepool name |
+| `replicas` | Replica count (must be > 0) |
+| `instanceType` | GCP machine type (e.g. `"n1-standard-4"`) |
+| `rootVolumeSize` | Root disk size in GB (must be > 0) |
+| `rootVolumeType` | Root disk type (e.g. `"pd-standard"`, `"pd-ssd"`) |
+| `autoRepair` | Whether to enable node auto-repair (`true` or `false`) |
+| `upgradeType` | Node upgrade strategy (e.g. `"Replace"`, `"InPlace"`) |
 
-This avoids stale defaults — the addon does not need to track OCP release cadence, and the backend
-always resolves the current latest version.
+Validation is enforced at two layers: proto annotations (`buf.validate`) on the managed resource
+API surface, and Go validation in `ParseClusterSpec` for the internal delivery path.
+
+**Example: creating a cluster via fleetctl**
+
+```bash
+fleetctl managed-resource create api.gcphcp.cluster --spec '{
+  "name": "my-cluster",
+  "endpointAccess": "PublicAndPrivate",
+  "releaseVersion": "4.22.0",
+  "channelGroup": "stable",
+  "nodepools": [
+    {
+      "name": "my-cluster-nodepool-1",
+      "replicas": 2,
+      "instanceType": "n1-standard-4",
+      "rootVolumeSize": 128,
+      "rootVolumeType": "pd-standard",
+      "autoRepair": true,
+      "upgradeType": "Replace"
+    }
+  ]
+}'
+```
 
 ### 6.4 Startup sequence
 
@@ -551,8 +575,8 @@ pick a project or region when creating a cluster. In v1, those values are implic
 managed resource routes to the one active addon target, and that target carries the project/region.
 
 All cluster shape fields (`endpointAccess`, `replicas`, `instanceType`, `rootVolume`,
-`release_version`, `channel_group`, management config) live in the managed resource spec with
-hard-coded fallback defaults. The target carries no cluster shape configuration.
+`release_version`, `channel_group`, management config) live in the managed resource spec and are
+required at creation time. The target carries no cluster shape configuration.
 
 ### 6.7 Target config drift
 
@@ -618,7 +642,7 @@ The addon should derive or hide implementation details such as:
 The PoC demonstrates one concrete backend shape:
 
 - a single nodepool
-- hard-coded machine defaults
+- user-specified machine configuration (all fields required)
 - generated signing key material on the client side
 
 So the addon should treat those as implementation details, not as the long-term API shape.
@@ -1216,8 +1240,8 @@ If the next step is implementation planning, the v1 direction is:
 4. structure addon code for N targets from day one, even though v1 uses one
 5. expose one managed resource type: `api.gcphcp.cluster`
 6. keep nodepools nested in that cluster resource for v1
-7. hard-code sensible cluster defaults in addon code; let the CLS backend resolve volatile
-   fields like release version (see section 6.3)
+7. require all cluster shape fields explicitly in the managed resource spec — no addon-side
+   defaults (see section 6.3)
 8. reconcile all spec fields authoritatively — no blocked-field classification (see section 14.5)
 9. trigger reconciliation only from FleetShift-side spec changes; no addon-driven requeue
 10. register a `kubernetes` target only after cluster phase is `Ready`, the guest API is reachable

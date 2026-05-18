@@ -145,9 +145,6 @@ func (r *Reconciler) Reconcile(
 	callerToken string,
 	signaler *domain.DeliverySignaler,
 ) (*ClusterOutput, error) {
-	// Apply defaults
-	spec.ApplyDefaults()
-
 	signaler.Emit(ctx, domain.DeliveryEvent{
 		Timestamp: time.Now(),
 		Kind:      domain.DeliveryEventProgress,
@@ -583,8 +580,8 @@ func BuildCLSClusterSpec(
 			},
 		},
 	}
-	setOptionalString(clusterSpec, "releaseVersion", spec.ReleaseVersion)
-	setOptionalString(clusterSpec, "channelGroup", spec.ChannelGroup)
+	clusterSpec["releaseVersion"] = spec.ReleaseVersion
+	clusterSpec["channelGroup"] = spec.ChannelGroup
 
 	return map[string]any{
 		"name":              spec.Name,
@@ -612,7 +609,7 @@ func BuildCLSNodepoolSpec(np NodepoolSpec, clusterID string) map[string]any {
 				},
 			},
 			"management": map[string]any{
-				"autoRepair":  np.AutoRepair,
+				"autoRepair":  *np.AutoRepair,
 				"upgradeType": np.UpgradeType,
 			},
 		},

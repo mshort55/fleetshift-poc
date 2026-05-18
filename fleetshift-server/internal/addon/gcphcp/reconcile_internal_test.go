@@ -13,6 +13,8 @@ import (
 	"github.com/fleetshift/fleetshift-poc/fleetshift-server/internal/domain"
 )
 
+func boolPtr(b bool) *bool { return &b }
+
 type fakeNodepoolClient struct {
 	listedNodepools []map[string]any
 
@@ -218,7 +220,7 @@ func TestReconcileNodepools_CreatesUpdatesAndDeletesByName(t *testing.T) {
 			InstanceType:   "n1-standard-8",
 			RootVolumeSize: 256,
 			RootVolumeType: "pd-ssd",
-			AutoRepair:     true,
+			AutoRepair:     boolPtr(true),
 			UpgradeType:    "Replace",
 		},
 		{
@@ -227,7 +229,7 @@ func TestReconcileNodepools_CreatesUpdatesAndDeletesByName(t *testing.T) {
 			InstanceType:   "n1-standard-4",
 			RootVolumeSize: 128,
 			RootVolumeType: "pd-standard",
-			AutoRepair:     true,
+			AutoRepair:     boolPtr(true),
 			UpgradeType:    "Replace",
 		},
 	}

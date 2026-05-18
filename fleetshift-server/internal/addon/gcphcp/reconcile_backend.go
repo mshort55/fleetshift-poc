@@ -90,8 +90,8 @@ func BuildCLSClusterUpdateSpec(spec ClusterSpec, observed map[string]any) (map[s
 	}
 
 	gcpMap["endpointAccess"] = spec.EndpointAccess
-	setOptionalString(clonedSpec, "releaseVersion", spec.ReleaseVersion)
-	setOptionalString(clonedSpec, "channelGroup", spec.ChannelGroup)
+	clonedSpec["releaseVersion"] = spec.ReleaseVersion
+	clonedSpec["channelGroup"] = spec.ChannelGroup
 
 	return map[string]any{
 		"name":              spec.Name,
@@ -506,14 +506,6 @@ func cloneAnyMap(in map[string]any) (map[string]any, error) {
 		return nil, err
 	}
 	return out, nil
-}
-
-func setOptionalString(dst map[string]any, key, value string) {
-	if value == "" {
-		delete(dst, key)
-		return
-	}
-	dst[key] = value
 }
 
 func emitProgress(signaler *domain.DeliverySignaler, ctx context.Context, message string) {

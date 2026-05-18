@@ -231,7 +231,7 @@ func TestBuildCLSNodepoolSpec(t *testing.T) {
 		InstanceType:   "n1-standard-8",
 		RootVolumeSize: 256,
 		RootVolumeType: "pd-ssd",
-		AutoRepair:     true,
+		AutoRepair:     boolPtr(true),
 		UpgradeType:    "Replace",
 	}
 
