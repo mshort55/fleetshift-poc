@@ -13,38 +13,38 @@ message GCPHCPClusterSpec {
   string name = 1 [(buf.validate.field).required = true];
 
   // Endpoint access configuration for the cluster API server.
-  string endpoint_access = 2;
+  string endpoint_access = 2 [(buf.validate.field).string.min_len = 1];
 
   // Release version of the cluster (e.g., "4.18.0").
-  string release_version = 3;
+  string release_version = 3 [(buf.validate.field).string.min_len = 1];
 
   // Channel group for the cluster (e.g., "stable", "fast", "candidate").
-  string channel_group = 4;
+  string channel_group = 4 [(buf.validate.field).string.min_len = 1];
 
   // Nodepools to provision for the cluster.
-  repeated Nodepool nodepools = 5;
+  repeated Nodepool nodepools = 5 [(buf.validate.field).repeated.min_items = 1];
 }
 
 // Nodepool describes a node pool in the GCP HCP cluster.
 message Nodepool {
   // Name of the nodepool.
-  string name = 1;
+  string name = 1 [(buf.validate.field).string.min_len = 1];
 
   // Number of replicas (nodes) in the pool.
-  int32 replicas = 2 [(buf.validate.field).int32.gte = 0];
+  int32 replicas = 2 [(buf.validate.field).int32.gt = 0];
 
   // Instance type for the nodes (e.g., "n1-standard-4").
-  string instance_type = 3;
+  string instance_type = 3 [(buf.validate.field).string.min_len = 1];
 
   // Root volume size in GB.
-  int32 root_volume_size = 4 [(buf.validate.field).int32.gte = 0];
+  int32 root_volume_size = 4 [(buf.validate.field).int32.gt = 0];
 
   // Root volume type (e.g., "pd-standard", "pd-ssd").
-  string root_volume_type = 5;
+  string root_volume_type = 5 [(buf.validate.field).string.min_len = 1];
 
   // Enable auto-repair for nodes in this pool.
-  bool auto_repair = 6;
+  bool auto_repair = 6 [(buf.validate.field).required = true];
 
   // Upgrade type strategy (e.g., "Replace", "InPlace").
-  string upgrade_type = 7;
+  string upgrade_type = 7 [(buf.validate.field).string.min_len = 1];
 }
