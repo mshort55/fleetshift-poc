@@ -101,10 +101,12 @@ grants it `cluster-admin` inside the guest cluster.
 
 Additional auth clarifications:
 
-- tenant bootstrap (IAM/network setup via `hypershift`) uses direct Workforce-derived credentials,
-  not the broker service account
-- the Workforce STS subject token for bootstrap is the caller's OIDC access token, where the
-  FleetShift client role is carried
+- tenant bootstrap and teardown via `hypershift` do not use the broker service account
+- the current implementation writes the raw caller token into a temporary
+  `external_account` ADC workspace and lets Google ADC perform Workforce STS exchange inside the
+  `hypershift` subprocess
+- direct addon-owned GCP API calls that do not go through `hypershift` (for example delete-time
+  PSC cleanup waiting) can use the already-minted Workforce access token directly
 - authorization for tenant bootstrap is based on a role-derived Workforce `principalSet`, not
   per-email IAM bindings
 
@@ -138,20 +140,23 @@ authenticate
   -> generate 4096-bit RSA keypair + JWKS
   -> hypershift create iam gcp
   -> hypershift create infra gcp
-  -> POST /api/v1/clusters
-  -> POST /api/v1/nodepools
+  -> create or update cluster via CLS
+  -> reconcile desired nodepool set
   -> poll cluster phase until Ready
+  -> bootstrap guest registration with broker ID token
+  -> wait for desired nodepools to become healthy
 ```
 
 Important facts:
 
 - `hypershift` is invoked locally
-- `hypershift` should be pointed at explicit short-lived Workforce-derived Google credentials
+- `hypershift` is currently pointed at a temp `external_account` ADC workspace whose subject token
+  is the raw caller token
 - bootstrap must not fall back to ambient ADC from the workstation, pod, or node environment
-- the PoC creates exactly one nodepool
-- only nodepool `replicas` is configurable through `config.yaml`
-- instance type and root volume are currently hard-coded in `hcp_lifecycle.py`
-- create success is gated on **cluster phase**, not explicit nodepool readiness
+- the managed-resource spec can carry one or more desired nodepools, and the reconciler updates the
+  backend set by nodepool name
+- create success is gated on cluster phase, guest bootstrap/registration, and explicit desired
+  nodepool readiness
 
 ### 3.5 Delete flow
 
@@ -173,8 +178,11 @@ Important facts:
 - PSC cleanup keys off the backend cluster ID
 - infra destroy keys off the infra ID / cluster name
 - IAM cleanup failure is treated as a delete failure after infra cleanup succeeds
-- the initial auth exchange produces both the broker token for CLS requests and the Workforce access
-  token later materialized for `hypershift` teardown
+- delete auth is currently split three ways:
+  - broker token for CLS requests
+  - minted Workforce access token for direct PSC cleanup calls
+  - a temp `external_account` ADC workspace built from the raw caller token for `hypershift`
+    teardown
 
 ### 3.6 Guest-cluster login uses the broker token
 
@@ -713,10 +721,20 @@ the addon must write them to a temporary directory and register cleanup immediat
 fallible work — so files are removed even on error or panic. Temp directories must not be reused
 across reconcile passes.
 
-For delete specifically, the addon should reuse the Workforce access token minted during the
-initial auth exchange when materializing the `hypershift` credential source for teardown. It
-should not perform a second STS exchange from the raw caller token just to prepare destroy-time
-credential files.
+Current implementation detail:
+
+- direct management-plane auth stays in memory: `BrokerAuth.Exchange()` mints the Workforce access
+  token and broker ID token used for CLS requests
+- `hypershift` subprocesses are still driven through a temp `external_account` ADC workspace:
+  `subject_token.txt` contains the raw caller token, and `workforce-cred.json` tells Google ADC to
+  perform Workforce STS exchange inside the subprocess
+- create writes both that ADC material and a temporary JWKS file into the workspace; destroy writes
+  only the ADC material
+- delete currently uses the minted Workforce access token directly only for PSC cleanup waiting; it
+  does **not** reuse that token when materializing the `hypershift` teardown workspace
+
+So the current implementation still performs a second STS exchange in the `hypershift` path. That
+is a real implementation detail to document, not an intended long-term credential model.
 
 ### 8.5 Token lifetime concern
 
@@ -1338,12 +1356,13 @@ V1 should not implement addon-driven requeue or invalidation.
 
 ### 14.2 Token refresh and pause/resume
 
-V1 should not implement broker-token refresh or pause/resume semantics for long-running
+V1 should not implement mid-flight credential refresh or pause/resume semantics for long-running
 reconciliation.
 
 The implementation may assume one broker ID token per reconcile pass, minted immediately before
-management-plane API calls. However, this should be treated as an operational simplification, not
-as a hard platform guarantee.
+management-plane API calls, plus one caller-token-backed `external_account` workspace per
+`hypershift` subprocess. However, this should be treated as an operational simplification, not as a
+hard platform guarantee.
 
 What can be stated today:
 
@@ -1354,8 +1373,8 @@ What can be stated today:
 
 Practical v1 consequence:
 
-- create, delete, and future update flows are expected to complete within a single broker-token
-  lifetime window
+- create, delete, and future update flows are expected to complete within the lifetime window of
+  every credential they touch, not just the broker token
 - if a reconcile pass outlives that window, the pass should fail and be retried from FleetShift
   rather than attempting in-place refresh
 
@@ -1365,9 +1384,17 @@ Current implementation gap to revisit:
   back to `auth_failed` / `paused_auth`
 - those failures currently surface as generic delivery failure and are retried by FleetShift with
   the existing `DeliveryAuth`, rather than pausing for fresh credentials
+- create and delete `hypershift` subprocesses currently materialize the raw caller token into temp
+  `external_account` workspaces, so those paths have their own subject-token / STS lifetime
+  constraints in addition to the broker token used for CLS requests
+- delete-side PSC cleanup currently uses the minted Workforce access token directly, so one long
+  delete pass may span broker-token lifetime, caller-token lifetime for `hypershift` STS exchange,
+  and Workforce access-token lifetime for direct GCP API calls
 - follow-up work should detect post-accept auth expiry / unauthorized failures, preserve that
   distinction from ordinary provider errors, and add a managed-resource resume path before relying
   on outer retries for auth recovery
+- that follow-up should be designed across the board for create, delete, update, and any other
+  potentially long-lived flow rather than treating expired-token handling as a delete-only concern
 
 ### 14.3 Periodic resync
 
@@ -1415,7 +1442,7 @@ single-target `RegisteredSelfTarget` behavior.
 ### 14.7 Asynchronous delete
 
 V1 blocks and polls inside `Remove()` for the full delete sequence: CLS API delete, poll until 404,
-PSC cleanup wait, infra destroy with retry, and IAM destroy. This can take 10–20 minutes and ties
+PSC cleanup wait, infra destroy, and IAM destroy. This can take 10–20 minutes and ties
 up the delivery agent thread for the entire duration.
 
 The platform's `Deliver()` path already supports async completion via `signaler.Done()`, but
