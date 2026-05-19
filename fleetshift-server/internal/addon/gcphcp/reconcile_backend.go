@@ -200,14 +200,12 @@ func cleanupCreateResources(
 	return cleanupErr
 }
 
-func cleanupDeleteResources(
+func waitForDeleteCleanupPrereqs(
 	ctx context.Context,
 	infra deleteCleanupInfra,
 	clusterID string,
-	spec ClusterSpec,
 	target TargetConfig,
 	workforceToken string,
-	hypershiftEnv []string,
 	signaler *domain.DeliverySignaler,
 ) error {
 	if clusterID != "" {
@@ -222,7 +220,17 @@ func cleanupDeleteResources(
 			return fmt.Errorf("wait for PSC cleanup: %w", err)
 		}
 	}
+	return nil
+}
 
+func cleanupDeleteResources(
+	ctx context.Context,
+	infra createCleanupInfra,
+	spec ClusterSpec,
+	target TargetConfig,
+	hypershiftEnv []string,
+	signaler *domain.DeliverySignaler,
+) error {
 	emitProgress(signaler, ctx, "Destroying infrastructure")
 	if err := infra.DestroyInfra(ctx, spec.Name, target.GCPProject, target.Region, hypershiftEnv); err != nil {
 		return fmt.Errorf("destroy infra: %w", err)
