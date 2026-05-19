@@ -4,8 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
-	"path/filepath"
 	"sync"
 	"time"
 
@@ -13,12 +11,17 @@ import (
 )
 
 var (
-	guestBootstrapMaxAttempts = 10
-	guestBootstrapRetryDelay  = 15 * time.Second
-	bootstrapGuestCluster     = BootstrapGuestCluster
-	failureSnapshotTimeout    = 10 * time.Second
-	newBrokerAuth             = func(cfg BrokerAuthConfig) brokerAuthExchanger { return NewBrokerAuth(cfg) }
-	buildHypershiftEnv        = PrepareHypershiftEnv
+	guestBootstrapMaxAttempts       = 10
+	guestBootstrapRetryDelay        = 15 * time.Second
+	bootstrapGuestCluster           = BootstrapGuestCluster
+	failureSnapshotTimeout          = 10 * time.Second
+	newBrokerAuth                   = func(cfg BrokerAuthConfig) brokerAuthExchanger { return NewBrokerAuth(cfg) }
+	buildCreateHypershiftWorkspace  = PrepareCreateHypershiftWorkspace
+	buildDestroyHypershiftWorkspace = PrepareDestroyHypershiftWorkspace
+	reconcileNodepoolsFn            = reconcileNodepools
+	pollClusterReadyFn              = PollClusterReady
+	completeGuestRegistrationFn     = completeGuestRegistration
+	pollDesiredNodepoolsHealthyFn   = PollDesiredNodepoolsHealthy
 )
 
 type brokerAuthExchanger interface {
@@ -273,150 +276,149 @@ func (r *Reconciler) Reconcile(
 			Message:   "Generating cluster keypair",
 		})
 
-		// Create temp directory for workspace
-		tempDir, err := os.MkdirTemp("", "gcphcp-*")
-		if err != nil {
-			return nil, fmt.Errorf("create temp dir: %w", err)
-		}
-		defer os.RemoveAll(tempDir)
-
 		// Generate cluster keypair
 		keypair, err := GenerateClusterKeypair()
 		if err != nil {
 			return nil, fmt.Errorf("generate cluster keypair: %w", err)
 		}
 
-		// Write JWKS to temp file
-		jwksPath := filepath.Join(tempDir, "jwks.json")
-		if err := os.WriteFile(jwksPath, keypair.JWKSJSON, 0600); err != nil {
-			return nil, fmt.Errorf("write JWKS file: %w", err)
-		}
+		if err := func() (retErr error) {
+			signaler.Emit(ctx, domain.DeliveryEvent{
+				Timestamp: time.Now(),
+				Kind:      domain.DeliveryEventProgress,
+				Message:   "Preparing hypershift workspace",
+			})
 
-		signaler.Emit(ctx, domain.DeliveryEvent{
-			Timestamp: time.Now(),
-			Kind:      domain.DeliveryEventProgress,
-			Message:   "Preparing hypershift environment",
-		})
+			workspace, err := buildCreateHypershiftWorkspace(callerToken, target, keypair.JWKSJSON)
+			if err != nil {
+				return fmt.Errorf("prepare hypershift workspace: %w", err)
+			}
+			defer func() {
+				if cleanupErr := workspace.Cleanup(); cleanupErr != nil {
+					if retErr == nil {
+						retErr = fmt.Errorf("cleanup hypershift workspace: %w", cleanupErr)
+					} else {
+						retErr = errors.Join(retErr, fmt.Errorf("cleanup hypershift workspace: %w", cleanupErr))
+					}
+				}
+			}()
 
-		// Prepare hypershift environment
-		hypershiftEnv, err := buildHypershiftEnv(callerToken, target, tempDir)
-		if err != nil {
-			return nil, fmt.Errorf("prepare hypershift env: %w", err)
-		}
-
-		var createdIAM bool
-		var createdInfra bool
-		cleanupCreateFailure := func(createErr error) error {
-			if !createdIAM && !createdInfra {
+			var createdIAM bool
+			var createdInfra bool
+			cleanupCreateFailure := func(createErr error) error {
+				if !createdIAM && !createdInfra {
+					return createErr
+				}
+				emitProgress(signaler, ctx, "Create flow failed; cleaning up partial IAM/infra resources")
+				cleanupErr := cleanupCreateResources(ctx, r.infra, spec, target, workspace.Env, createdInfra, createdIAM)
+				if cleanupErr != nil {
+					return errors.Join(createErr, cleanupErr)
+				}
 				return createErr
 			}
-			emitProgress(signaler, ctx, "Create flow failed; cleaning up partial IAM/infra resources")
-			cleanupErr := cleanupCreateResources(ctx, r.infra, spec, target, hypershiftEnv, createdInfra, createdIAM)
-			if cleanupErr != nil {
-				return errors.Join(createErr, cleanupErr)
-			}
-			return createErr
-		}
 
-		signaler.Emit(ctx, domain.DeliveryEvent{
-			Timestamp: time.Now(),
-			Kind:      domain.DeliveryEventProgress,
-			Message:   "Creating IAM resources",
-		})
+			signaler.Emit(ctx, domain.DeliveryEvent{
+				Timestamp: time.Now(),
+				Kind:      domain.DeliveryEventProgress,
+				Message:   "Creating IAM resources",
+			})
 
-		// Create IAM
-		iamConfig, err := ensureIAMWithRecovery(ctx, r.infra, spec, target, jwksPath, hypershiftEnv, signaler)
-		if err != nil {
-			return nil, fmt.Errorf("create IAM: %w", err)
-		}
-		createdIAM = true
-
-		signaler.Emit(ctx, domain.DeliveryEvent{
-			Timestamp: time.Now(),
-			Kind:      domain.DeliveryEventProgress,
-			Message:   "Creating infrastructure",
-		})
-
-		// Create infrastructure
-		infraConfig, err := ensureInfraWithRecovery(ctx, r.infra, spec, target, hypershiftEnv, signaler)
-		if err != nil {
-			return nil, fmt.Errorf("create infra: %w", err)
-		}
-		createdInfra = true
-
-		signaler.Emit(ctx, domain.DeliveryEvent{
-			Timestamp: time.Now(),
-			Kind:      domain.DeliveryEventProgress,
-			Message:   "Building CLS cluster spec",
-		})
-
-		// Build CLS cluster spec
-		clsClusterSpec, err := BuildCLSClusterSpec(spec, target, infraConfig, iamConfig, keypair.PrivateKeyPEMBase64)
-		if err != nil {
-			return nil, cleanupCreateFailure(fmt.Errorf("build CLS cluster spec: %w", err))
-		}
-
-		signaler.Emit(ctx, domain.DeliveryEvent{
-			Timestamp: time.Now(),
-			Kind:      domain.DeliveryEventProgress,
-			Message:   "Creating cluster via CLS API",
-		})
-
-		// Create cluster
-		clusterData, err := clsClient.CreateCluster(ctx, clsClusterSpec)
-		if err != nil {
-			clusterID, err = recoverFromAmbiguousCreateFailure(
+			iamConfig, err := ensureIAMWithRecovery(
 				ctx,
-				clsClient,
 				r.infra,
 				spec,
 				target,
-				jwksPath,
-				hypershiftEnv,
-				createdInfra,
-				createdIAM,
-				fmt.Errorf("create cluster: %w", err),
+				workspace.JWKSPath,
+				workspace.Env,
 				signaler,
 			)
 			if err != nil {
-				return nil, err
+				return fmt.Errorf("create IAM: %w", err)
 			}
-			break
-		}
+			createdIAM = true
 
-		var ok bool
-		clusterID, ok = clusterData["id"].(string)
-		if !ok || clusterID == "" {
-			clusterID, err = recoverFromAmbiguousCreateFailure(
-				ctx,
-				clsClient,
-				r.infra,
-				spec,
-				target,
-				jwksPath,
-				hypershiftEnv,
-				createdInfra,
-				createdIAM,
-				fmt.Errorf("cluster creation response missing id field"),
-				signaler,
-			)
+			signaler.Emit(ctx, domain.DeliveryEvent{
+				Timestamp: time.Now(),
+				Kind:      domain.DeliveryEventProgress,
+				Message:   "Creating infrastructure",
+			})
+
+			infraConfig, err := ensureInfraWithRecovery(ctx, r.infra, spec, target, workspace.Env, signaler)
 			if err != nil {
-				return nil, err
+				return fmt.Errorf("create infra: %w", err)
 			}
-			break
-		}
+			createdInfra = true
 
-		signaler.Emit(ctx, domain.DeliveryEvent{
-			Timestamp: time.Now(),
-			Kind:      domain.DeliveryEventProgress,
-			Message:   fmt.Sprintf("Cluster created with ID: %s", clusterID),
-		})
+			signaler.Emit(ctx, domain.DeliveryEvent{
+				Timestamp: time.Now(),
+				Kind:      domain.DeliveryEventProgress,
+				Message:   "Building CLS cluster spec",
+			})
+
+			clsClusterSpec, err := BuildCLSClusterSpec(spec, target, infraConfig, iamConfig, keypair.PrivateKeyPEMBase64)
+			if err != nil {
+				return cleanupCreateFailure(fmt.Errorf("build CLS cluster spec: %w", err))
+			}
+
+			signaler.Emit(ctx, domain.DeliveryEvent{
+				Timestamp: time.Now(),
+				Kind:      domain.DeliveryEventProgress,
+				Message:   "Creating cluster via CLS API",
+			})
+
+			clusterData, err := clsClient.CreateCluster(ctx, clsClusterSpec)
+			if err != nil {
+				clusterID, err = recoverFromAmbiguousCreateFailure(
+					ctx,
+					clsClient,
+					r.infra,
+					spec,
+					target,
+					workspace.JWKSPath,
+					workspace.Env,
+					createdInfra,
+					createdIAM,
+					fmt.Errorf("create cluster: %w", err),
+					signaler,
+				)
+				return err
+			}
+
+			var ok bool
+			clusterID, ok = clusterData["id"].(string)
+			if !ok || clusterID == "" {
+				clusterID, err = recoverFromAmbiguousCreateFailure(
+					ctx,
+					clsClient,
+					r.infra,
+					spec,
+					target,
+					workspace.JWKSPath,
+					workspace.Env,
+					createdInfra,
+					createdIAM,
+					fmt.Errorf("cluster creation response missing id field"),
+					signaler,
+				)
+				return err
+			}
+
+			signaler.Emit(ctx, domain.DeliveryEvent{
+				Timestamp: time.Now(),
+				Kind:      domain.DeliveryEventProgress,
+				Message:   fmt.Sprintf("Cluster created with ID: %s", clusterID),
+			})
+
+			return nil
+		}(); err != nil {
+			return nil, err
+		}
 
 	default:
 		return nil, fmt.Errorf("resolve cluster ID: %w", err)
 	}
 
-	if err := reconcileNodepools(ctx, clsClient, clusterID, spec.Nodepools, signaler); err != nil {
+	if err := reconcileNodepoolsFn(ctx, clsClient, clusterID, spec.Nodepools, signaler); err != nil {
 		return nil, err
 	}
 
@@ -427,14 +429,14 @@ func (r *Reconciler) Reconcile(
 	})
 
 	// Poll until cluster is ready
-	if err := PollClusterReady(ctx, clsClient, clusterID, signaler); err != nil {
+	if err := pollClusterReadyFn(ctx, clsClient, clusterID, signaler); err != nil {
 		return nil, fmt.Errorf("poll cluster ready: %w", err)
 	}
 
 	emitClusterReadyTransition(ctx, signaler)
 
 	guestTargetID := GuestTargetID(spec.Name)
-	guestEndpoint, bootstrapResult, err := completeGuestRegistration(
+	guestEndpoint, bootstrapResult, err := completeGuestRegistrationFn(
 		ctx,
 		clsClient,
 		clusterID,
@@ -452,7 +454,7 @@ func (r *Reconciler) Reconcile(
 		Message:   "Waiting for desired nodepools to become healthy",
 	})
 
-	if err := PollDesiredNodepoolsHealthy(ctx, clsClient, clusterID, spec.Nodepools, signaler); err != nil {
+	if err := pollDesiredNodepoolsHealthyFn(ctx, clsClient, clusterID, spec.Nodepools, signaler); err != nil {
 		return nil, fmt.Errorf("wait for desired nodepools healthy: %w", err)
 	}
 
@@ -557,34 +559,41 @@ func (r *Reconciler) Delete(
 		Message:   "Preparing to destroy infrastructure",
 	})
 
-	// Create temp directory and prepare hypershift env for destroy operations
-	tempDir, err := os.MkdirTemp("", "gcphcp-destroy-*")
-	if err != nil {
-		return fmt.Errorf("create temp dir: %w", err)
-	}
-	defer os.RemoveAll(tempDir)
-
-	hypershiftEnv, err := buildHypershiftEnv(callerToken, target, tempDir)
-	if err != nil {
-		return fmt.Errorf("prepare hypershift env: %w", err)
-	}
-
-	signaler.Emit(ctx, domain.DeliveryEvent{
-		Timestamp: time.Now(),
-		Kind:      domain.DeliveryEventProgress,
-		Message:   "Destroying infrastructure",
-	})
-
-	if err := cleanupDeleteResources(
+	if err := waitForDeleteCleanupPrereqs(
 		ctx,
 		r.infra,
 		clusterID,
-		spec,
 		target,
 		authResult.WorkforceToken,
-		hypershiftEnv,
 		signaler,
 	); err != nil {
+		return err
+	}
+
+	if err := func() (retErr error) {
+		workspace, err := buildDestroyHypershiftWorkspace(callerToken, target)
+		if err != nil {
+			return fmt.Errorf("prepare hypershift workspace: %w", err)
+		}
+		defer func() {
+			if cleanupErr := workspace.Cleanup(); cleanupErr != nil {
+				if retErr == nil {
+					retErr = fmt.Errorf("cleanup hypershift workspace: %w", cleanupErr)
+				} else {
+					retErr = errors.Join(retErr, fmt.Errorf("cleanup hypershift workspace: %w", cleanupErr))
+				}
+			}
+		}()
+
+		return cleanupDeleteResources(
+			ctx,
+			r.infra,
+			spec,
+			target,
+			workspace.Env,
+			signaler,
+		)
+	}(); err != nil {
 		return err
 	}
 

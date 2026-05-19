@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -45,7 +46,11 @@ type fakeCleanupInfra struct {
 	destroyInfraCalls     int
 }
 
-func (f *fakeCleanupInfra) CreateIAM(_ context.Context, infraID, projectID, jwksPath string, _ []string) (map[string]any, error) {
+func (f *fakeCleanupInfra) CreateIAM(
+	_ context.Context,
+	infraID, projectID, jwksPath string,
+	_ []string,
+) (map[string]any, error) {
 	f.ops = append(f.ops, "create-iam:"+infraID+":"+projectID+":"+jwksPath)
 	attempt := f.createIAMCalls
 	f.createIAMCalls++
@@ -71,7 +76,11 @@ func (f *fakeCleanupInfra) CreateIAM(_ context.Context, infraID, projectID, jwks
 	}, nil
 }
 
-func (f *fakeCleanupInfra) CreateInfra(_ context.Context, infraID, projectID, region string, _ []string) (map[string]any, error) {
+func (f *fakeCleanupInfra) CreateInfra(
+	_ context.Context,
+	infraID, projectID, region string,
+	_ []string,
+) (map[string]any, error) {
 	f.ops = append(f.ops, "create-infra:"+infraID+":"+projectID+":"+region)
 	attempt := f.createInfraCalls
 	f.createInfraCalls++
@@ -97,7 +106,11 @@ func (f *fakeCleanupInfra) CreateInfra(_ context.Context, infraID, projectID, re
 	}, nil
 }
 
-func (f *fakeCleanupInfra) DestroyInfra(_ context.Context, infraID, projectID, region string, _ []string) error {
+func (f *fakeCleanupInfra) DestroyInfra(
+	_ context.Context,
+	infraID, projectID, region string,
+	_ []string,
+) error {
 	f.ops = append(f.ops, "infra:"+infraID+":"+projectID+":"+region)
 	attempt := f.destroyInfraCalls
 	f.destroyInfraCalls++
@@ -113,7 +126,11 @@ func (f *fakeCleanupInfra) DestroyInfra(_ context.Context, infraID, projectID, r
 	return f.destroyInfraErr
 }
 
-func (f *fakeCleanupInfra) DestroyIAM(_ context.Context, infraID, projectID string, _ []string) error {
+func (f *fakeCleanupInfra) DestroyIAM(
+	_ context.Context,
+	infraID, projectID string,
+	_ []string,
+) error {
 	f.ops = append(f.ops, "iam:"+infraID+":"+projectID)
 	return f.destroyIAMErr
 }
@@ -307,29 +324,46 @@ func TestCleanupCreateResources_DestroysCreatedInfraAndIAM(t *testing.T) {
 	}
 }
 
-func TestCleanupDeleteResources_DestroysInfraOnceAfterPSCWait(t *testing.T) {
+func TestWaitForDeleteCleanupPrereqs_WaitsForPSC(t *testing.T) {
 	infra := &fakeCleanupInfra{
 		destroyInfraResults: []error{nil},
 	}
 
-	err := cleanupDeleteResources(
+	err := waitForDeleteCleanupPrereqs(
 		context.Background(),
 		infra,
 		"cluster-123",
-		ClusterSpec{Name: "test-cluster"},
 		TargetConfig{GCPProject: "project-123", Region: "us-central1"},
 		"workforce-token",
+		&domain.DeliverySignaler{},
+	)
+	if err != nil {
+		t.Fatalf("waitForDeleteCleanupPrereqs() error = %v", err)
+	}
+	if got := strings.Join(infra.ops, ","); got != "psc:cluster-123:project-123:us-central1" {
+		t.Fatalf("unexpected cleanup operations: %s", got)
+	}
+	if infra.waitPSCWorkforceToken != "workforce-token" {
+		t.Fatalf("PSC wait token = %q, want workforce-token", infra.waitPSCWorkforceToken)
+	}
+}
+
+func TestCleanupDeleteResources_DestroysInfraAndIAM(t *testing.T) {
+	infra := &fakeCleanupInfra{}
+
+	err := cleanupDeleteResources(
+		context.Background(),
+		infra,
+		ClusterSpec{Name: "test-cluster"},
+		TargetConfig{GCPProject: "project-123", Region: "us-central1"},
 		[]string{"EXAMPLE=1"},
 		&domain.DeliverySignaler{},
 	)
 	if err != nil {
 		t.Fatalf("cleanupDeleteResources() error = %v", err)
 	}
-	if got := strings.Join(infra.ops, ","); got != "psc:cluster-123:project-123:us-central1,infra:test-cluster:project-123:us-central1,iam:test-cluster:project-123" {
+	if got := strings.Join(infra.ops, ","); got != "infra:test-cluster:project-123:us-central1,iam:test-cluster:project-123" {
 		t.Fatalf("unexpected cleanup operations: %s", got)
-	}
-	if infra.waitPSCWorkforceToken != "workforce-token" {
-		t.Fatalf("PSC wait token = %q, want workforce-token", infra.waitPSCWorkforceToken)
 	}
 }
 
@@ -341,10 +375,8 @@ func TestCleanupDeleteResources_ReturnsIAMFailureWithDeleteSuccessContext(t *tes
 	err := cleanupDeleteResources(
 		context.Background(),
 		infra,
-		"cluster-123",
 		ClusterSpec{Name: "test-cluster"},
 		TargetConfig{GCPProject: "project-123", Region: "us-central1"},
-		"workforce-token",
 		[]string{"EXAMPLE=1"},
 		&domain.DeliverySignaler{},
 	)
@@ -356,7 +388,7 @@ func TestCleanupDeleteResources_ReturnsIAMFailureWithDeleteSuccessContext(t *tes
 		!strings.Contains(err.Error(), "iam destroy failed") {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if got := strings.Join(infra.ops, ","); got != "psc:cluster-123:project-123:us-central1,infra:test-cluster:project-123:us-central1,iam:test-cluster:project-123" {
+	if got := strings.Join(infra.ops, ","); got != "infra:test-cluster:project-123:us-central1,iam:test-cluster:project-123" {
 		t.Fatalf("unexpected cleanup operations: %s", got)
 	}
 }
@@ -369,10 +401,8 @@ func TestCleanupDeleteResources_ReturnsInfraFailureWithoutRetry(t *testing.T) {
 	err := cleanupDeleteResources(
 		context.Background(),
 		infra,
-		"cluster-123",
 		ClusterSpec{Name: "test-cluster"},
 		TargetConfig{GCPProject: "project-123", Region: "us-central1"},
-		"workforce-token",
 		[]string{"EXAMPLE=1"},
 		&domain.DeliverySignaler{},
 	)
@@ -382,7 +412,7 @@ func TestCleanupDeleteResources_ReturnsInfraFailureWithoutRetry(t *testing.T) {
 	if !strings.Contains(err.Error(), "destroy infra") || !strings.Contains(err.Error(), "infra not ready") {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if got := strings.Join(infra.ops, ","); got != "psc:cluster-123:project-123:us-central1,infra:test-cluster:project-123:us-central1" {
+	if got := strings.Join(infra.ops, ","); got != "infra:test-cluster:project-123:us-central1" {
 		t.Fatalf("unexpected cleanup operations: %s", got)
 	}
 	if infra.destroyInfraCalls != 1 {
@@ -911,12 +941,237 @@ func (f *fakeBrokerAuth) Exchange(_ context.Context, callerToken string) (Broker
 	return f.result, nil
 }
 
-func TestReconcilerDelete_UsesCallerTokenForHypershiftEnvAndWorkforceTokenForPSCCleanup(t *testing.T) {
+func validIAMConfigForReconcileTest() map[string]any {
+	return map[string]any{
+		"workloadIdentityPool": map[string]any{
+			"poolId":     "pool-123",
+			"providerId": "provider-123",
+		},
+		"projectNumber": "123456789012",
+		"serviceAccounts": map[string]any{
+			"ctrlplane-op":     "controlplane@test-project.iam.gserviceaccount.com",
+			"nodepool-mgmt":    "nodepool@test-project.iam.gserviceaccount.com",
+			"cloud-controller": "controller@test-project.iam.gserviceaccount.com",
+			"gcp-pd-csi":       "storage@test-project.iam.gserviceaccount.com",
+			"image-registry":   "registry@test-project.iam.gserviceaccount.com",
+			"cloud-network":    "network@test-project.iam.gserviceaccount.com",
+		},
+	}
+}
+
+func TestReconcilerReconcile_CleansHypershiftWorkspaceBeforeNodepoolReconcile(t *testing.T) {
 	origNewBrokerAuth := newBrokerAuth
-	origBuildHypershiftEnv := buildHypershiftEnv
+	origBuildCreateWorkspace := buildCreateHypershiftWorkspace
+	origReconcileNodepools := reconcileNodepoolsFn
+	origPollClusterReady := pollClusterReadyFn
+	origCompleteGuestRegistration := completeGuestRegistrationFn
+	origPollDesiredNodepoolsHealthy := pollDesiredNodepoolsHealthyFn
 	defer func() {
 		newBrokerAuth = origNewBrokerAuth
-		buildHypershiftEnv = origBuildHypershiftEnv
+		buildCreateHypershiftWorkspace = origBuildCreateWorkspace
+		reconcileNodepoolsFn = origReconcileNodepools
+		pollClusterReadyFn = origPollClusterReady
+		completeGuestRegistrationFn = origCompleteGuestRegistration
+		pollDesiredNodepoolsHealthyFn = origPollDesiredNodepoolsHealthy
+	}()
+
+	fakeAuth := &fakeBrokerAuth{
+		result: BrokerAuthResult{
+			BrokerToken:    "broker-token",
+			BrokerEmail:    "broker@example.com",
+			WorkforceToken: "workforce-token",
+		},
+	}
+	newBrokerAuth = func(BrokerAuthConfig) brokerAuthExchanger {
+		return fakeAuth
+	}
+
+	workspaceDir, err := os.MkdirTemp("", "gcphcp-workspace-reconcile-*")
+	if err != nil {
+		t.Fatalf("os.MkdirTemp() error = %v", err)
+	}
+	buildCreateHypershiftWorkspace = func(token string, _ TargetConfig, jwksJSON []byte) (*HypershiftWorkspace, error) {
+		if token != "caller-token" {
+			t.Fatalf("workspace token = %q, want caller-token", token)
+		}
+		if len(jwksJSON) == 0 {
+			t.Fatal("expected generated JWKS payload")
+		}
+		return &HypershiftWorkspace{
+			Env:      []string{"PATH=/usr/bin"},
+			JWKSPath: workspaceDir + "/jwks.json",
+			tempDir:  workspaceDir,
+		}, nil
+	}
+
+	reconcileNodepoolsFn = func(_ context.Context, _ nodepoolReconcileClient, _ string, _ []NodepoolSpec, _ *domain.DeliverySignaler) error {
+		if _, err := os.Stat(workspaceDir); err == nil {
+			t.Fatal("expected hypershift workspace to be cleaned before nodepool reconcile")
+		}
+		return nil
+	}
+	pollClusterReadyFn = func(context.Context, *CLSClient, string, *domain.DeliverySignaler) error { return nil }
+	completeGuestRegistrationFn = func(context.Context, *CLSClient, string, string, domain.TargetID, *domain.DeliverySignaler) (string, BootstrapResult, error) {
+		return "https://guest.example:6443", BootstrapResult{
+			CACert:     []byte("ca-cert"),
+			SATokenRef: "sa-token-ref",
+			SAToken:    []byte("sa-token"),
+		}, nil
+	}
+	pollDesiredNodepoolsHealthyFn = func(context.Context, nodepoolStatusClient, string, []NodepoolSpec, *domain.DeliverySignaler) error {
+		return nil
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/clusters":
+			fmt.Fprint(w, `{"clusters":[]}`)
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/clusters":
+			fmt.Fprint(w, `{"id":"c-123"}`)
+		default:
+			t.Fatalf("unexpected %s %s", r.Method, r.URL.String())
+		}
+	}))
+	defer server.Close()
+
+	infra := &fakeCleanupInfra{
+		createIAMResults: []createAttemptResult{{result: validIAMConfigForReconcileTest()}},
+	}
+	reconciler := &Reconciler{
+		gateway: GatewayConfig{
+			URL:      server.URL,
+			Audience: "test-audience",
+		},
+		infra: infra,
+	}
+
+	output, err := reconciler.Reconcile(
+		context.Background(),
+		ClusterSpec{
+			Name:           "test-cluster",
+			EndpointAccess: "PublicAndPrivate",
+			ReleaseVersion: "4.22.0",
+			ChannelGroup:   "stable",
+			Nodepools: []NodepoolSpec{{
+				Name:           "worker-a",
+				Replicas:       2,
+				InstanceType:   "n1-standard-4",
+				RootVolumeSize: 128,
+				RootVolumeType: "pd-standard",
+				AutoRepair:     boolPtr(true),
+				UpgradeType:    "Replace",
+			}},
+		},
+		TargetConfig{
+			GCPProject:        "test-project",
+			Region:            "us-central1",
+			WorkforcePool:     "test-pool",
+			WorkforceProvider: "test-provider",
+			BrokerSAEmail:     "broker@example.com",
+		},
+		"caller-token",
+		&domain.DeliverySignaler{},
+	)
+	if err != nil {
+		t.Fatalf("Reconcile() error = %v", err)
+	}
+	if output == nil {
+		t.Fatal("expected reconcile output")
+	}
+}
+
+func TestReconcilerDelete_WaitsForPSCCleanupBeforeBuildingHypershiftWorkspace(t *testing.T) {
+	origNewBrokerAuth := newBrokerAuth
+	origBuildDestroyWorkspace := buildDestroyHypershiftWorkspace
+	defer func() {
+		newBrokerAuth = origNewBrokerAuth
+		buildDestroyHypershiftWorkspace = origBuildDestroyWorkspace
+	}()
+
+	fakeAuth := &fakeBrokerAuth{
+		result: BrokerAuthResult{
+			BrokerToken:    "broker-token",
+			BrokerEmail:    "broker@example.com",
+			WorkforceToken: "workforce-token",
+		},
+	}
+	newBrokerAuth = func(BrokerAuthConfig) brokerAuthExchanger {
+		return fakeAuth
+	}
+
+	infra := &fakeCleanupInfra{}
+	buildDestroyHypershiftWorkspace = func(token string, _ TargetConfig) (*HypershiftWorkspace, error) {
+		if token != "caller-token" {
+			t.Fatalf("workspace token = %q, want caller-token", token)
+		}
+		if infra.waitPSCCalls == 0 {
+			t.Fatal("expected PSC cleanup to complete before destroy workspace materialization")
+		}
+
+		workspaceDir, err := os.MkdirTemp("", "gcphcp-workspace-delete-*")
+		if err != nil {
+			t.Fatalf("os.MkdirTemp() error = %v", err)
+		}
+		return &HypershiftWorkspace{
+			Env:     []string{"PATH=/usr/bin"},
+			tempDir: workspaceDir,
+		}, nil
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("Authorization"); got != "Bearer broker-token" {
+			t.Errorf("authorization header = %q, want Bearer broker-token", got)
+		}
+		if got := r.Header.Get("X-User-Email"); got != "broker@example.com" {
+			t.Errorf("X-User-Email = %q, want broker@example.com", got)
+		}
+
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/clusters":
+			fmt.Fprint(w, `{"clusters":[{"id":"c-123","name":"test-cluster"}]}`)
+		case r.Method == http.MethodDelete && r.URL.Path == "/api/v1/clusters/c-123":
+			w.WriteHeader(http.StatusNoContent)
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/clusters/c-123":
+			w.WriteHeader(http.StatusNotFound)
+			fmt.Fprint(w, `{"error":"not found"}`)
+		default:
+			t.Fatalf("unexpected %s %s", r.Method, r.URL.String())
+		}
+	}))
+	defer server.Close()
+
+	reconciler := &Reconciler{
+		gateway: GatewayConfig{
+			URL:      server.URL,
+			Audience: "test-audience",
+		},
+		infra: infra,
+	}
+
+	err := reconciler.Delete(
+		context.Background(),
+		ClusterSpec{Name: "test-cluster"},
+		TargetConfig{
+			GCPProject:        "test-project",
+			Region:            "us-central1",
+			WorkforcePool:     "test-pool",
+			WorkforceProvider: "test-provider",
+			BrokerSAEmail:     "broker@example.com",
+		},
+		"caller-token",
+		&domain.DeliverySignaler{},
+	)
+	if err != nil {
+		t.Fatalf("Delete() error = %v", err)
+	}
+}
+
+func TestReconcilerDelete_UsesCallerTokenForHypershiftEnvAndWorkforceTokenForPSCCleanup(t *testing.T) {
+	origNewBrokerAuth := newBrokerAuth
+	origBuildDestroyWorkspace := buildDestroyHypershiftWorkspace
+	defer func() {
+		newBrokerAuth = origNewBrokerAuth
+		buildDestroyHypershiftWorkspace = origBuildDestroyWorkspace
 	}()
 
 	fakeAuth := &fakeBrokerAuth{
@@ -931,9 +1186,16 @@ func TestReconcilerDelete_UsesCallerTokenForHypershiftEnvAndWorkforceTokenForPSC
 	}
 
 	var gotHypershiftToken string
-	buildHypershiftEnv = func(token string, _ TargetConfig, _ string) ([]string, error) {
+	buildDestroyHypershiftWorkspace = func(token string, _ TargetConfig) (*HypershiftWorkspace, error) {
 		gotHypershiftToken = token
-		return []string{"PATH=/usr/bin"}, nil
+		workspaceDir, err := os.MkdirTemp("", "gcphcp-workspace-delete-*")
+		if err != nil {
+			t.Fatalf("os.MkdirTemp() error = %v", err)
+		}
+		return &HypershiftWorkspace{
+			Env:     []string{"PATH=/usr/bin"},
+			tempDir: workspaceDir,
+		}, nil
 	}
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

@@ -2,7 +2,11 @@ package gcphcp
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -215,4 +219,87 @@ func TestWaitForPSCCleanup_ReturnsLookupCreationError(t *testing.T) {
 	if err.Error() != "create PSC cleanup lookup: compute client init failed" {
 		t.Fatalf("unexpected error: %v", err)
 	}
+}
+
+func TestPrepareCreateHypershiftWorkspace_WritesFilesAndCleansUp(t *testing.T) {
+	workspace, err := PrepareCreateHypershiftWorkspace(
+		"caller-token",
+		TargetConfig{
+			GCPProject:        "project-123",
+			WorkforcePool:     "pool-123",
+			WorkforceProvider: "provider-123",
+		},
+		[]byte(`{"keys":[{"kid":"test-key"}]}`),
+	)
+	if err != nil {
+		t.Fatalf("PrepareCreateHypershiftWorkspace() error = %v", err)
+	}
+
+	if workspace.tempDir == "" {
+		t.Fatal("expected workspace temp dir")
+	}
+	tempDir := workspace.tempDir
+	if got := workspace.JWKSPath; got != filepath.Join(tempDir, "jwks.json") {
+		t.Fatalf("JWKSPath = %q, want %q", got, filepath.Join(tempDir, "jwks.json"))
+	}
+
+	adcPath := lookupHypershiftEnvVar(workspace.Env, "GOOGLE_APPLICATION_CREDENTIALS")
+	if adcPath != filepath.Join(tempDir, "workforce-cred.json") {
+		t.Fatalf("GOOGLE_APPLICATION_CREDENTIALS = %q, want %q", adcPath, filepath.Join(tempDir, "workforce-cred.json"))
+	}
+	if got := lookupHypershiftEnvVar(workspace.Env, "GOOGLE_EXTERNAL_ACCOUNT_ALLOW_EXECUTABLES"); got != "" {
+		t.Fatalf("GOOGLE_EXTERNAL_ACCOUNT_ALLOW_EXECUTABLES = %q, want empty", got)
+	}
+
+	subjectData, err := os.ReadFile(filepath.Join(tempDir, "subject_token.txt"))
+	if err != nil {
+		t.Fatalf("read subject token: %v", err)
+	}
+	if string(subjectData) != "caller-token" {
+		t.Fatalf("subject token content = %q, want caller-token", string(subjectData))
+	}
+
+	credConfigData, err := os.ReadFile(adcPath)
+	if err != nil {
+		t.Fatalf("read credential config: %v", err)
+	}
+	var credConfig map[string]any
+	if err := json.Unmarshal(credConfigData, &credConfig); err != nil {
+		t.Fatalf("credential config JSON parse error = %v", err)
+	}
+	if credConfig["type"] != "external_account" {
+		t.Fatalf("credential config type = %v, want external_account", credConfig["type"])
+	}
+	credSource, ok := credConfig["credential_source"].(map[string]any)
+	if !ok {
+		t.Fatalf("credential_source type = %T, want map[string]any", credConfig["credential_source"])
+	}
+	if got := credSource["file"]; got != filepath.Join(tempDir, "subject_token.txt") {
+		t.Fatalf("credential_source.file = %v, want %q", got, filepath.Join(tempDir, "subject_token.txt"))
+	}
+
+	jwksData, err := os.ReadFile(workspace.JWKSPath)
+	if err != nil {
+		t.Fatalf("read JWKS: %v", err)
+	}
+	if string(jwksData) != `{"keys":[{"kid":"test-key"}]}` {
+		t.Fatalf("JWKS content = %q, want original payload", string(jwksData))
+	}
+
+	if err := workspace.Cleanup(); err != nil {
+		t.Fatalf("Cleanup() error = %v", err)
+	}
+	if _, err := os.Stat(tempDir); !os.IsNotExist(err) {
+		t.Fatalf("workspace temp dir still exists after cleanup: %v", err)
+	}
+}
+
+func lookupHypershiftEnvVar(env []string, key string) string {
+	prefix := key + "="
+	for _, entry := range env {
+		if strings.HasPrefix(entry, prefix) {
+			return strings.TrimPrefix(entry, prefix)
+		}
+	}
+	return ""
 }

@@ -17,7 +17,6 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"regexp"
 	"strings"
 	"time"
@@ -181,7 +180,11 @@ func NewInfraRunner() *InfraRunner {
 }
 
 // CreateIAM runs hypershift create iam gcp and returns the parsed JSON output.
-func (r *InfraRunner) CreateIAM(ctx context.Context, infraID, projectID, jwksFile string, env []string) (map[string]any, error) {
+func (r *InfraRunner) CreateIAM(
+	ctx context.Context,
+	infraID, projectID, jwksFile string,
+	env []string,
+) (map[string]any, error) {
 	args := []string{
 		"create", "iam", "gcp",
 		"--infra-id", infraID,
@@ -209,7 +212,11 @@ func (r *InfraRunner) CreateIAM(ctx context.Context, infraID, projectID, jwksFil
 }
 
 // CreateInfra runs hypershift create infra gcp and returns the parsed JSON output.
-func (r *InfraRunner) CreateInfra(ctx context.Context, infraID, projectID, region string, env []string) (map[string]any, error) {
+func (r *InfraRunner) CreateInfra(
+	ctx context.Context,
+	infraID, projectID, region string,
+	env []string,
+) (map[string]any, error) {
 	args := []string{
 		"create", "infra", "gcp",
 		"--infra-id", infraID,
@@ -237,7 +244,11 @@ func (r *InfraRunner) CreateInfra(ctx context.Context, infraID, projectID, regio
 }
 
 // DestroyInfra runs hypershift destroy infra gcp.
-func (r *InfraRunner) DestroyInfra(ctx context.Context, infraID, projectID, region string, env []string) error {
+func (r *InfraRunner) DestroyInfra(
+	ctx context.Context,
+	infraID, projectID, region string,
+	env []string,
+) error {
 	args := []string{
 		"destroy", "infra", "gcp",
 		"--infra-id", infraID,
@@ -394,7 +405,11 @@ func (l *httpPSCResourceLookup) regionalResourceExists(
 }
 
 // DestroyIAM runs hypershift destroy iam gcp.
-func (r *InfraRunner) DestroyIAM(ctx context.Context, infraID, projectID string, env []string) error {
+func (r *InfraRunner) DestroyIAM(
+	ctx context.Context,
+	infraID, projectID string,
+	env []string,
+) error {
 	args := []string{
 		"destroy", "iam", "gcp",
 		"--infra-id", infraID,
@@ -492,69 +507,4 @@ func IAMConfigToWIFSpec(iamConfig map[string]any) (map[string]any, error) {
 		"providerID":         providerID,
 		"serviceAccountsRef": serviceAccountsRef,
 	}, nil
-}
-
-// PrepareHypershiftEnv prepares an isolated environment for running hypershift commands.
-// It writes the caller token and workforce credential config to the temp directory,
-// and returns an environment with isolated credential paths.
-func PrepareHypershiftEnv(callerToken string, target TargetConfig, tempDir string) ([]string, error) {
-	// Write subject token
-	subjectTokenPath := filepath.Join(tempDir, "subject_token.txt")
-	if err := os.WriteFile(subjectTokenPath, []byte(callerToken), 0600); err != nil {
-		return nil, fmt.Errorf("failed to write subject token: %w", err)
-	}
-
-	// Create workforce credential config
-	audience := fmt.Sprintf("//iam.googleapis.com/locations/global/workforcePools/%s/providers/%s",
-		target.WorkforcePool, target.WorkforceProvider)
-
-	credConfig := map[string]interface{}{
-		"type":               "external_account",
-		"audience":           audience,
-		"subject_token_type": "urn:ietf:params:oauth:token-type:jwt",
-		"token_url":          "https://sts.googleapis.com/v1/token",
-		"credential_source": map[string]interface{}{
-			"file": subjectTokenPath,
-		},
-		"workforce_pool_user_project": target.GCPProject,
-	}
-
-	credConfigJSON, err := json.MarshalIndent(credConfig, "", "  ")
-	if err != nil {
-		return nil, fmt.Errorf("failed to marshal credential config: %w", err)
-	}
-
-	credConfigPath := filepath.Join(tempDir, "workforce-cred.json")
-	if err := os.WriteFile(credConfigPath, credConfigJSON, 0600); err != nil {
-		return nil, fmt.Errorf("failed to write credential config: %w", err)
-	}
-
-	// Create isolated directories
-	homeDir := filepath.Join(tempDir, "home")
-	cloudSDKDir := filepath.Join(tempDir, "cloudsdk")
-	xdgConfigDir := filepath.Join(tempDir, "xdg")
-
-	for _, dir := range []string{homeDir, cloudSDKDir, xdgConfigDir} {
-		if err := os.MkdirAll(dir, 0700); err != nil {
-			return nil, fmt.Errorf("failed to create directory %s: %w", dir, err)
-		}
-	}
-
-	// Build environment
-	env := []string{
-		fmt.Sprintf("GOOGLE_APPLICATION_CREDENTIALS=%s", credConfigPath),
-		"GOOGLE_EXTERNAL_ACCOUNT_ALLOW_EXECUTABLES=1",
-		fmt.Sprintf("HOME=%s", homeDir),
-		fmt.Sprintf("CLOUDSDK_CONFIG=%s", cloudSDKDir),
-		fmt.Sprintf("XDG_CONFIG_HOME=%s", xdgConfigDir),
-	}
-
-	// Inherit PATH and other essential variables
-	for _, key := range []string{"PATH", "USER", "LOGNAME"} {
-		if val := os.Getenv(key); val != "" {
-			env = append(env, fmt.Sprintf("%s=%s", key, val))
-		}
-	}
-
-	return env, nil
 }
