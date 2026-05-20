@@ -2,183 +2,130 @@ package gcphcp
 
 import (
 	"context"
-	"errors"
 	"reflect"
-	"strings"
 	"testing"
-	"time"
 
-	corev1 "k8s.io/api/core/v1"
+	authv1 "k8s.io/api/authentication/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/fake"
+	"k8s.io/client-go/rest"
 	ktesting "k8s.io/client-go/testing"
 )
 
-func TestEnsurePlatformSATokenSecret_CreatesExpectedSecret(t *testing.T) {
+func TestBuildGuestBootstrapRESTConfig_UsesSystemTrust(t *testing.T) {
+	cfg := buildGuestBootstrapRESTConfig("https://guest.example:6443", "broker-token")
+
+	if cfg.Host != "https://guest.example:6443" {
+		t.Fatalf("Host = %q, want %q", cfg.Host, "https://guest.example:6443")
+	}
+	if cfg.BearerToken != "broker-token" {
+		t.Fatalf("BearerToken = %q, want broker-token", cfg.BearerToken)
+	}
+	if cfg.TLSClientConfig.Insecure {
+		t.Fatal("expected verified TLS, got insecure config")
+	}
+	if len(cfg.TLSClientConfig.CAData) != 0 {
+		t.Fatalf("CAData = %q, want empty system-trust config", string(cfg.TLSClientConfig.CAData))
+	}
+}
+
+func TestRequestPlatformSAToken_CreatesShortLivedToken(t *testing.T) {
 	client := fake.NewSimpleClientset()
-
-	secretName, err := ensurePlatformSATokenSecret(context.Background(), client)
-	if err != nil {
-		t.Fatalf("ensurePlatformSATokenSecret() error = %v", err)
-	}
-	if secretName != platformSATokenSecretName {
-		t.Fatalf("secret name = %q, want %q", secretName, platformSATokenSecretName)
-	}
-
-	got, err := client.CoreV1().Secrets(platformSANamespace).Get(context.Background(), secretName, metav1.GetOptions{})
-	if err != nil {
-		t.Fatalf("get Secret: %v", err)
-	}
-	if got.Type != corev1.SecretTypeServiceAccountToken {
-		t.Fatalf("secret type = %q, want %q", got.Type, corev1.SecretTypeServiceAccountToken)
-	}
-	if got.Annotations[corev1.ServiceAccountNameKey] != platformSAName {
-		t.Fatalf("service-account annotation = %q, want %q", got.Annotations[corev1.ServiceAccountNameKey], platformSAName)
-	}
-}
-
-func TestEnsurePlatformSATokenSecret_RejectsConflictingSecret(t *testing.T) {
-	client := fake.NewSimpleClientset(&corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      platformSATokenSecretName,
-			Namespace: platformSANamespace,
-			Annotations: map[string]string{
-				corev1.ServiceAccountNameKey: "different-service-account",
-			},
-		},
-		Type: corev1.SecretTypeServiceAccountToken,
-	})
-
-	_, err := ensurePlatformSATokenSecret(context.Background(), client)
-	if err == nil {
-		t.Fatal("expected conflicting secret error")
-	}
-	if !strings.Contains(err.Error(), "different-service-account") {
-		t.Fatalf("unexpected error: %v", err)
-	}
-}
-
-func TestWaitForPlatformSATokenSecretData_ReturnsTokenAndCAFromSecret(t *testing.T) {
-	client := fake.NewSimpleClientset(&corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      platformSATokenSecretName,
-			Namespace: platformSANamespace,
-			Annotations: map[string]string{
-				corev1.ServiceAccountNameKey: platformSAName,
-			},
-		},
-		Type: corev1.SecretTypeServiceAccountToken,
-		Data: map[string][]byte{
-			"token":  []byte("durable-token"),
-			"ca.crt": []byte("cluster-ca"),
-		},
-	})
-
-	token, caCert, err := waitForPlatformSATokenSecretData(context.Background(), client, platformSATokenSecretName)
-	if err != nil {
-		t.Fatalf("waitForPlatformSATokenSecretData() error = %v", err)
-	}
-	if string(token) != "durable-token" {
-		t.Fatalf("token = %q, want durable-token", string(token))
-	}
-	if string(caCert) != "cluster-ca" {
-		t.Fatalf("ca cert = %q, want cluster-ca", string(caCert))
-	}
-}
-
-func TestWaitForPlatformSATokenSecretData_PollsUntilSecretPopulated(t *testing.T) {
-	origInterval := platformSATokenSecretPollInterval
-	origTimeout := platformSATokenSecretWaitTimeout
-	platformSATokenSecretPollInterval = 5 * time.Millisecond
-	platformSATokenSecretWaitTimeout = 50 * time.Millisecond
-	defer func() {
-		platformSATokenSecretPollInterval = origInterval
-		platformSATokenSecretWaitTimeout = origTimeout
-	}()
-
-	client := fake.NewSimpleClientset(&corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      platformSATokenSecretName,
-			Namespace: platformSANamespace,
-			Annotations: map[string]string{
-				corev1.ServiceAccountNameKey: platformSAName,
-			},
-		},
-		Type: corev1.SecretTypeServiceAccountToken,
-	})
-
-	secretGVR := schema.GroupVersionResource{Version: "v1", Resource: "secrets"}
-	getCalls := 0
-	client.PrependReactor("get", "secrets", func(action ktesting.Action) (bool, runtime.Object, error) {
-		getCalls++
-		if getCalls == 2 {
-			err := client.Tracker().Update(secretGVR, &corev1.Secret{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      platformSATokenSecretName,
-					Namespace: platformSANamespace,
-					Annotations: map[string]string{
-						corev1.ServiceAccountNameKey: platformSAName,
-					},
-				},
-				Type: corev1.SecretTypeServiceAccountToken,
-				Data: map[string][]byte{
-					"token":  []byte("durable-token"),
-					"ca.crt": []byte("cluster-ca"),
-				},
-			}, platformSANamespace)
-			if err != nil {
-				t.Fatalf("update tracker: %v", err)
-			}
+	createCalls := 0
+	client.PrependReactor("create", "serviceaccounts", func(action ktesting.Action) (bool, runtime.Object, error) {
+		if action.GetSubresource() != "token" {
+			return false, nil, nil
 		}
-		return false, nil, nil
+		createCalls++
+
+		createAction, ok := action.(ktesting.CreateAction)
+		if !ok {
+			t.Fatalf("expected CreateAction, got %T", action)
+		}
+		req, ok := createAction.GetObject().(*authv1.TokenRequest)
+		if !ok {
+			t.Fatalf("expected TokenRequest, got %T", createAction.GetObject())
+		}
+		if req.Spec.ExpirationSeconds == nil || *req.Spec.ExpirationSeconds != defaultPlatformTokenExpirySeconds {
+			t.Fatalf("ExpirationSeconds = %v, want %d", req.Spec.ExpirationSeconds, defaultPlatformTokenExpirySeconds)
+		}
+
+		return true, &authv1.TokenRequest{
+			Status: authv1.TokenRequestStatus{
+				Token: "short-lived-token",
+			},
+		}, nil
 	})
 
-	token, caCert, err := waitForPlatformSATokenSecretData(context.Background(), client, platformSATokenSecretName)
+	ref, token, err := requestPlatformSAToken(context.Background(), client, "guest-target")
 	if err != nil {
-		t.Fatalf("waitForPlatformSATokenSecretData() error = %v", err)
+		t.Fatalf("requestPlatformSAToken() error = %v", err)
 	}
-	if getCalls < 2 {
-		t.Fatalf("expected multiple get calls, got %d", getCalls)
+	if createCalls != 1 {
+		t.Fatalf("token create calls = %d, want 1", createCalls)
 	}
-	if string(token) != "durable-token" || string(caCert) != "cluster-ca" {
-		t.Fatalf("unexpected populated data: token=%q ca=%q", string(token), string(caCert))
+	if ref != "targets/guest-target/sa-token" {
+		t.Fatalf("ref = %q, want %q", ref, "targets/guest-target/sa-token")
+	}
+	if string(token) != "short-lived-token" {
+		t.Fatalf("token = %q, want short-lived-token", string(token))
 	}
 }
 
-func TestWaitForPlatformSATokenSecretData_TimesOutWhenControllerNeverPopulatesSecret(t *testing.T) {
-	origInterval := platformSATokenSecretPollInterval
-	origTimeout := platformSATokenSecretWaitTimeout
-	platformSATokenSecretPollInterval = 5 * time.Millisecond
-	platformSATokenSecretWaitTimeout = 20 * time.Millisecond
+func TestBootstrapGuestCluster_UsesVerifiedTLSAndTokenRequest(t *testing.T) {
+	origNewClient := newKubernetesClientForConfig
 	defer func() {
-		platformSATokenSecretPollInterval = origInterval
-		platformSATokenSecretWaitTimeout = origTimeout
+		newKubernetesClientForConfig = origNewClient
 	}()
 
-	client := fake.NewSimpleClientset(&corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      platformSATokenSecretName,
-			Namespace: platformSANamespace,
-			Annotations: map[string]string{
-				corev1.ServiceAccountNameKey: platformSAName,
+	client := fake.NewSimpleClientset()
+	client.PrependReactor("create", "serviceaccounts", func(action ktesting.Action) (bool, runtime.Object, error) {
+		if action.GetSubresource() != "token" {
+			return false, nil, nil
+		}
+		return true, &authv1.TokenRequest{
+			Status: authv1.TokenRequestStatus{
+				Token: "short-lived-token",
 			},
-		},
-		Type: corev1.SecretTypeServiceAccountToken,
+		}, nil
 	})
 
-	start := time.Now()
-	_, _, err := waitForPlatformSATokenSecretData(context.Background(), client, platformSATokenSecretName)
-	if err == nil {
-		t.Fatal("expected timeout error")
+	var captured *rest.Config
+	newKubernetesClientForConfig = func(cfg *rest.Config) (kubernetes.Interface, error) {
+		captured = rest.CopyConfig(cfg)
+		return client, nil
 	}
-	if !errors.Is(err, context.DeadlineExceeded) && !strings.Contains(err.Error(), "timeout waiting for service account token secret") {
-		t.Fatalf("unexpected error: %v", err)
+
+	result, err := BootstrapGuestCluster(
+		context.Background(),
+		"https://guest.example:6443",
+		"broker-token",
+		"guest-target",
+	)
+	if err != nil {
+		t.Fatalf("BootstrapGuestCluster() error = %v", err)
 	}
-	if elapsed := time.Since(start); elapsed < platformSATokenSecretWaitTimeout {
-		t.Fatalf("returned too quickly: %v", elapsed)
+
+	if captured == nil {
+		t.Fatal("expected kubernetes client config to be captured")
+	}
+	if captured.TLSClientConfig.Insecure {
+		t.Fatal("expected verified TLS, got insecure config")
+	}
+	if len(captured.TLSClientConfig.CAData) != 0 {
+		t.Fatalf("captured CAData = %q, want empty system-trust config", string(captured.TLSClientConfig.CAData))
+	}
+	if result.SATokenRef != "targets/guest-target/sa-token" {
+		t.Fatalf("SATokenRef = %q, want %q", result.SATokenRef, "targets/guest-target/sa-token")
+	}
+	if string(result.SAToken) != "short-lived-token" {
+		t.Fatalf("SAToken = %q, want %q", string(result.SAToken), "short-lived-token")
+	}
+	if len(result.CACert) != 0 {
+		t.Fatalf("CACert = %q, want empty system-trust output", string(result.CACert))
 	}
 }
 
