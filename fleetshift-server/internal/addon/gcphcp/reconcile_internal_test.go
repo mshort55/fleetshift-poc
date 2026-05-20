@@ -1013,7 +1013,6 @@ func TestReconcilerReconcile_CleansHypershiftWorkspaceBeforeNodepoolReconcile(t 
 	pollClusterReadyFn = func(context.Context, *CLSClient, string, *domain.DeliverySignaler) error { return nil }
 	completeGuestRegistrationFn = func(context.Context, *CLSClient, string, string, domain.TargetID, *domain.DeliverySignaler) (string, BootstrapResult, error) {
 		return "https://guest.example:6443", BootstrapResult{
-			CACert:     []byte("ca-cert"),
 			SATokenRef: "sa-token-ref",
 			SAToken:    []byte("sa-token"),
 		}, nil

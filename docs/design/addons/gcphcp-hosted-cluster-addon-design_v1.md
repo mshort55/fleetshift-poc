@@ -908,8 +908,7 @@ This phase uses a **retry loop** because several adjacent conditions may lag beh
 the API endpoint may not be reachable yet, or the CLS backend's `rbac-setup-job` (which grants the
 broker SA `cluster-admin` inside the guest cluster) may not have completed yet. The bootstrap gate
 is only satisfied when the addon can complete the real registration prerequisites: connect to the
-guest API, create the delivery ServiceAccount and RBAC, read the guest CA bundle, and obtain the
-ServiceAccount token.
+guest API, create the delivery ServiceAccount and RBAC, and obtain the ServiceAccount token.
 
 **Phase 3 — Desired nodepool readiness:** After guest bootstrap succeeds, poll the desired nodepool
 set until every desired nodepool is present and reports `Ready`. This extra gate is required
@@ -955,8 +954,8 @@ In v1, that means all of the following must be true:
 
 - cluster phase is `Ready`
 - the guest API endpoint is resolved and actually reachable for bootstrap
-- TLS trust material or the narrow bootstrap fallback from section 10.5 is available
-- a durable delivery credential is successfully created and captured
+- the guest API endpoint is reachable using the host's normal trust store (see section 10.5)
+- a platform delivery credential is successfully created and captured
 - every desired nodepool is present and reports `Ready`
 
 If any of those are still pending, including desired nodepools that are still progressing after the
@@ -1006,22 +1005,20 @@ resolve guest API endpoint from CLS backend status
   -> build a Kubernetes rest.Config with:
        - host: resolved guest API endpoint
        - bearer token: broker ID token
-       - temporary bootstrap fallback: skip verification only for the first connection (see 10.5)
   -> create a delivery ServiceAccount in the guest cluster
   -> create RBAC for that ServiceAccount
-  -> read the guest cluster CA bundle from the live cluster
-  -> extract the ServiceAccount token
+  -> request a ServiceAccount token via TokenRequest
   -> emit ProvisionedTarget{type: "kubernetes"} with:
        - endpoint in target properties
-       - guest CA bundle in target properties
        - ServiceAccount token as a ProducedSecret
 ```
 
 The broker ID token provides initial privileged access. The addon uses that access to create a
-long-lived ServiceAccount with appropriate RBAC, reads the cluster's CA bundle, and then registers
-both the CA bundle and ServiceAccount token as the durable delivery configuration. This decouples
-ongoing delivery from the short-lived broker token and ensures later FleetShift delivery can use
-normal TLS verification.
+ServiceAccount with appropriate RBAC, request a bounded-lifetime token via `TokenRequest`, and
+register that token as the delivery credential. In the current environment the CLS-exposed guest
+API endpoint uses a publicly trusted certificate chain (Let's Encrypt), so the addon does not
+persist `ca_cert` on the emitted guest target; bootstrap and later FleetShift delivery use the
+host's normal trust store instead.
 
 Importantly, resolving the guest API endpoint is not yet the registration gate. The addon should
 register the target only after the bootstrap write path has succeeded end to end and the emitted
@@ -1042,13 +1039,16 @@ Its target properties should be:
 
 - required: `api_server`
   - the resolved guest cluster API endpoint
-- required for durable platform delivery: `service_account_token_ref`
+- required for platform delivery: `service_account_token_ref`
   - a vault reference for the delivery ServiceAccount token created during bootstrap
-- required for normal post-bootstrap TLS validation: `ca_cert`
-  - the guest cluster CA bundle captured during bootstrap and used for future verified delivery
 - required for attested follow-on delivery in v1: `trust_bundle`
   - the trust configuration used by FleetShift's Kubernetes delivery agent to verify attestation
     before it uses the platform ServiceAccount token
+
+The current implementation does **not** persist `ca_cert` on the emitted guest target. The
+CLS-exposed guest API endpoint uses a publicly trusted certificate chain (Let's Encrypt in the
+current environment), so FleetShift delivery relies on the host's normal trust store instead of a
+per-cluster pinned CA bundle.
 
 The corresponding `ProducedSecret` contract should be:
 
@@ -1083,42 +1083,25 @@ attested follow-on delivery.
 
 ### 10.5 TLS trust strategy
 
-The v1 plan is:
+Current implementation uses the host's normal trust store for both the initial guest bootstrap
+connection and later FleetShift delivery to the emitted guest target.
 
-1. use `InsecureSkipVerify` only for the first guest-cluster bootstrap connection
-2. immediately retrieve the guest cluster CA bundle from the live cluster during that bootstrap
-   session
-3. store that CA bundle on the emitted guest target as `ca_cert`
-4. require all later FleetShift delivery to use the stored CA bundle for normal TLS verification
+The CLS-exposed guest API endpoint is expected to present a publicly trusted certificate chain. In
+the current environment that chain is Let's Encrypt, so the addon does not persist `ca_cert` on the
+emitted target.
 
-This is better than leaving guest-cluster delivery permanently dependent on insecure TLS, and it is
-the intended v1 trust model.
-
-The guest endpoint appears to use a self-signed or HCP-internal certificate that is not in the
-addon's default trust store. So the first bootstrap hop still needs a temporary insecure fallback
-in v1.
-
-That fallback remains a real limitation and should be described precisely:
-
-- it is a narrow bootstrap exception, not the desired steady-state trust model
-- it is only for the first guest-cluster connection used to establish durable delivery credentials
-  and capture the guest CA bundle
-- it is a known security limitation, because the addon is still trusting the first server
-  connection before the guest API identity has been cryptographically verified
-
-The long-term strategy is stronger: resolve the guest cluster's CA bundle from `cls-backend` or
-other hosted-control-plane trust material **before** any bootstrap writes occur, so the first guest
-API connection can also use verified TLS. That is deferred from v1 (see section 14.9), but it
-should remain the target design rather than leaving `InsecureSkipVerify` as the implicit norm.
+If a future deployment exposes the guest API behind a private or self-signed CA, the addon will
+need a backend-supported path to surface the correct trust material before that configuration can be
+supported cleanly (see section 14.9).
 
 ### 10.6 Recommendation
 
 > Register a `kubernetes` target as part of the reconcile flow only after the cluster is `Ready`,
 > the guest API endpoint is resolvable, guest bootstrap succeeds, and every desired nodepool
-> reports `Ready`. Use the broker ID token for initial bootstrap access, create a durable
+> reports `Ready`. Use the broker ID token for initial bootstrap access, create a
 > ServiceAccount credential inside the guest cluster, and emit a guest target that includes
-> `api_server`, `ca_cert`, `service_account_token_ref`, and `trust_bundle` so both verified
-> platform delivery and attested follow-on delivery work in v1.
+> `api_server`, `service_account_token_ref`, and `trust_bundle` so platform delivery and attested
+> follow-on delivery work in v1.
 
 ---
 
@@ -1330,10 +1313,11 @@ If the next step is implementation planning, the v1 direction is:
 9. trigger reconciliation only from FleetShift-side spec changes; no addon-driven requeue
 10. register a `kubernetes` target only after cluster phase is `Ready`, the guest API is reachable
     for bootstrap, guest bootstrap succeeds, and every desired nodepool reports `Ready`, including
-    `api_server`, `ca_cert`, `service_account_token_ref`, and `trust_bundle` so attested follow-on
-    delivery also works in v1; if bootstrap or desired nodepool readiness still does not complete
-    by the end of the bounded delivery window, fail the delivery explicitly rather than silently
-    succeeding without registration (see section 10.4)
+    `api_server`, `service_account_token_ref`, and `trust_bundle` so attested follow-on delivery
+    also works in v1; the current implementation relies on the host trust store for the
+    CLS-exposed endpoint rather than persisting `ca_cert`; if bootstrap or desired nodepool
+    readiness still does not complete by the end of the bounded delivery window, fail the delivery
+    explicitly rather than silently succeeding without registration (see section 10.4)
 11. report status through delivery events and emit a redacted curated failure snapshot only when a
     reconcile run fails after a hosted cluster exists (see section 12)
 12. implement delivery-owned cleanup for emitted guest targets, inventory, and referenced vault
@@ -1472,20 +1456,17 @@ nodepool status derived from the CLS backend's controller status surfaces. This 
 a platform-level managed resource status mechanism (analogous to Kubernetes CRD `.status`) and
 periodic resync (see section 14.3) to keep it current.
 
-### 14.9 Trusted guest CA before first bootstrap connection
+### 14.9 Private guest API trust material
 
-V1 plans to use `InsecureSkipVerify` only for the first guest-cluster bootstrap connection, then
-read the guest CA bundle from the live cluster and persist it as `ca_cert` for all later delivery
-connections (see section 10.5).
+Current implementation assumes the CLS-exposed guest API endpoint presents a publicly trusted
+certificate chain. In the current environment that chain is Let's Encrypt, so the addon does not
+fetch or persist a per-cluster `ca_cert`.
 
-What is intentionally left out of v1 is the stronger first-step trust model:
+What is intentionally left out of v1 is support for guest API endpoints that require private or
+self-signed trust material.
 
-- obtain the guest cluster CA bundle before making any bootstrap writes
-- use that CA bundle to verify even the first guest API connection
-
-That stronger model likely depends on `cls-backend` changes, because the current status payloads
-surface the guest API endpoint and kubeconfig secret name but do not provide the CA bundle itself.
-Until such a backend path exists, v1 still accepts a narrow insecure first hop during bootstrap.
+That likely depends on `cls-backend` changes, because the current status payloads surface the guest
+API endpoint and kubeconfig secret name but do not provide the CA bundle itself.
 
 ### 14.10 Durable and deterministic trust-bundle reconstruction
 
