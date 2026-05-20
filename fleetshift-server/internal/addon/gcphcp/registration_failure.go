@@ -35,6 +35,12 @@ func isPostProvisionRegistrationError(err error) bool {
 }
 
 func deliveryResultForReconcileError(err error) domain.DeliveryResult {
+	if IsAuthExpiredError(err) {
+		return domain.DeliveryResult{
+			State:   domain.DeliveryStateAuthFailed,
+			Message: fmt.Sprintf("credentials expired during reconciliation: %v", err),
+		}
+	}
 	if isPostProvisionRegistrationError(err) {
 		return domain.DeliveryResult{
 			State:   domain.DeliveryStateFailed,

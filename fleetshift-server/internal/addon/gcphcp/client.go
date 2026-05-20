@@ -24,14 +24,14 @@ type CLSClient struct {
 	httpClient *http.Client
 }
 
-type clsHTTPError struct {
+type CLSHTTPError struct {
 	Method     string
 	Path       string
 	StatusCode int
 	Body       string
 }
 
-func (e *clsHTTPError) Error() string {
+func (e *CLSHTTPError) Error() string {
 	return fmt.Sprintf("CLS API %s %s failed (HTTP %d): %s", e.Method, e.Path, e.StatusCode, e.Body)
 }
 
@@ -150,12 +150,16 @@ func (c *CLSClient) doJSON(ctx context.Context, method, path string, body any) (
 	}
 
 	if resp.StatusCode >= 400 {
-		return nil, &clsHTTPError{
+		httpErr := &CLSHTTPError{
 			Method:     method,
 			Path:       path,
 			StatusCode: resp.StatusCode,
 			Body:       string(respBody),
 		}
+		if resp.StatusCode == http.StatusUnauthorized {
+			return nil, newAuthExpiredError(httpErr)
+		}
+		return nil, httpErr
 	}
 
 	if len(respBody) == 0 {
@@ -199,6 +203,6 @@ func requiredObjectListField(result map[string]any, field string) ([]map[string]
 }
 
 func isCLSHTTPStatus(err error, statusCode int) bool {
-	var httpErr *clsHTTPError
+	var httpErr *CLSHTTPError
 	return errors.As(err, &httpErr) && httpErr.StatusCode == statusCode
 }
