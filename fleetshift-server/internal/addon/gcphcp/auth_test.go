@@ -201,6 +201,164 @@ func TestBrokerAuth_STSFailure(t *testing.T) {
 	}
 }
 
+func TestBrokerAuth_STSInvalidGrant_ReturnsAuthExpiredError(t *testing.T) {
+	stsServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+		w.Write([]byte(`{"error":"invalid_grant","error_description":"The token has expired."}`))
+	}))
+	defer stsServer.Close()
+
+	cfg := gcphcp.BrokerAuthConfig{
+		WorkforcePool:     "test-pool",
+		WorkforceProvider: "test-provider",
+		GCPProject:        "test-project",
+		BrokerSAEmail:     "broker@test-project.iam.gserviceaccount.com",
+		GatewayAudience:   "test-gateway-audience",
+		STSEndpoint:       stsServer.URL,
+		IAMEndpoint:       "http://should-not-be-called.invalid",
+		HTTPClient:        http.DefaultClient,
+	}
+
+	auth := gcphcp.NewBrokerAuth(cfg)
+	_, err := auth.Exchange(context.Background(), "expired-token")
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if !gcphcp.IsAuthExpiredError(err) {
+		t.Fatalf("expected authExpiredError for invalid_grant, got: %v", err)
+	}
+}
+
+func TestBrokerAuth_STSOtherError_DoesNotReturnAuthExpiredError(t *testing.T) {
+	stsServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+		w.Write([]byte(`{"error":"invalid_request","error_description":"Missing required parameter."}`))
+	}))
+	defer stsServer.Close()
+
+	cfg := gcphcp.BrokerAuthConfig{
+		WorkforcePool:     "test-pool",
+		WorkforceProvider: "test-provider",
+		GCPProject:        "test-project",
+		BrokerSAEmail:     "broker@test-project.iam.gserviceaccount.com",
+		GatewayAudience:   "test-gateway-audience",
+		STSEndpoint:       stsServer.URL,
+		IAMEndpoint:       "http://should-not-be-called.invalid",
+		HTTPClient:        http.DefaultClient,
+	}
+
+	auth := gcphcp.NewBrokerAuth(cfg)
+	_, err := auth.Exchange(context.Background(), "some-token")
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if gcphcp.IsAuthExpiredError(err) {
+		t.Fatal("invalid_request should NOT be classified as authExpiredError")
+	}
+}
+
+func TestBrokerAuth_STS500_DoesNotReturnAuthExpiredError(t *testing.T) {
+	stsServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		w.Write([]byte(`internal server error`))
+	}))
+	defer stsServer.Close()
+
+	cfg := gcphcp.BrokerAuthConfig{
+		WorkforcePool:     "test-pool",
+		WorkforceProvider: "test-provider",
+		GCPProject:        "test-project",
+		BrokerSAEmail:     "broker@test-project.iam.gserviceaccount.com",
+		GatewayAudience:   "test-gateway-audience",
+		STSEndpoint:       stsServer.URL,
+		IAMEndpoint:       "http://should-not-be-called.invalid",
+		HTTPClient:        http.DefaultClient,
+	}
+
+	auth := gcphcp.NewBrokerAuth(cfg)
+	_, err := auth.Exchange(context.Background(), "some-token")
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if gcphcp.IsAuthExpiredError(err) {
+		t.Fatal("500 should NOT be classified as authExpiredError")
+	}
+}
+
+func TestBrokerAuth_IAM401_ReturnsAuthExpiredError(t *testing.T) {
+	stsServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]any{
+			"access_token": "workforce-token",
+			"token_type":   "Bearer",
+			"expires_in":   3600,
+		})
+	}))
+	defer stsServer.Close()
+
+	iamServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+		w.Write([]byte(`{"error":{"code":401,"message":"Request had invalid authentication credentials.","status":"UNAUTHENTICATED"}}`))
+	}))
+	defer iamServer.Close()
+
+	cfg := gcphcp.BrokerAuthConfig{
+		WorkforcePool:     "test-pool",
+		WorkforceProvider: "test-provider",
+		GCPProject:        "test-project",
+		BrokerSAEmail:     "broker@test-project.iam.gserviceaccount.com",
+		GatewayAudience:   "test-gateway-audience",
+		STSEndpoint:       stsServer.URL,
+		IAMEndpoint:       iamServer.URL,
+		HTTPClient:        http.DefaultClient,
+	}
+
+	auth := gcphcp.NewBrokerAuth(cfg)
+	_, err := auth.Exchange(context.Background(), "valid-caller-token")
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if !gcphcp.IsAuthExpiredError(err) {
+		t.Fatalf("expected authExpiredError for IAM 401, got: %v", err)
+	}
+}
+
+func TestBrokerAuth_IAM403_DoesNotReturnAuthExpiredError(t *testing.T) {
+	stsServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]any{
+			"access_token": "workforce-token",
+			"token_type":   "Bearer",
+			"expires_in":   3600,
+		})
+	}))
+	defer stsServer.Close()
+
+	iamServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+		w.Write([]byte(`{"error":{"code":403,"message":"The caller does not have permission","status":"PERMISSION_DENIED"}}`))
+	}))
+	defer iamServer.Close()
+
+	cfg := gcphcp.BrokerAuthConfig{
+		WorkforcePool:     "test-pool",
+		WorkforceProvider: "test-provider",
+		GCPProject:        "test-project",
+		BrokerSAEmail:     "broker@test-project.iam.gserviceaccount.com",
+		GatewayAudience:   "test-gateway-audience",
+		STSEndpoint:       stsServer.URL,
+		IAMEndpoint:       iamServer.URL,
+		HTTPClient:        http.DefaultClient,
+	}
+
+	auth := gcphcp.NewBrokerAuth(cfg)
+	_, err := auth.Exchange(context.Background(), "valid-caller-token")
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if gcphcp.IsAuthExpiredError(err) {
+		t.Fatal("IAM 403 should NOT be classified as authExpiredError")
+	}
+}
+
 func TestWorkforceCredentialConfig(t *testing.T) {
 	cfg := gcphcp.TargetConfig{
 		ID:                "test-target",

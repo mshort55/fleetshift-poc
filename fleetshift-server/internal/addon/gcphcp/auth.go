@@ -132,7 +132,15 @@ func (a *BrokerAuth) exchangeSTS(ctx context.Context, callerToken string) (strin
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("STS returned status %d: %s", resp.StatusCode, string(body))
+		var oauthErr struct {
+			Error string `json:"error"`
+		}
+		_ = json.Unmarshal(body, &oauthErr)
+		baseErr := fmt.Errorf("STS returned status %d: %s", resp.StatusCode, string(body))
+		if oauthErr.Error == "invalid_grant" {
+			return "", newAuthExpiredError(baseErr)
+		}
+		return "", baseErr
 	}
 
 	var tokenResp struct {
@@ -183,7 +191,11 @@ func (a *BrokerAuth) generateIDToken(ctx context.Context, workforceToken string)
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("IAM returned status %d: %s", resp.StatusCode, string(body))
+		baseErr := fmt.Errorf("IAM returned status %d: %s", resp.StatusCode, string(body))
+		if resp.StatusCode == http.StatusUnauthorized {
+			return "", newAuthExpiredError(baseErr)
+		}
+		return "", baseErr
 	}
 
 	var tokenResp struct {

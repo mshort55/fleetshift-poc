@@ -370,6 +370,72 @@ func TestCLSClient_ListNodepools_RejectsMissingNodepoolsField(t *testing.T) {
 	}
 }
 
+func TestCLSClient_HTTP401_ReturnsAuthExpiredError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+		w.Write([]byte(`{"error":"token expired"}`))
+	}))
+	defer server.Close()
+
+	client := gcphcp.NewCLSClient(server.URL, "expired-token", "email@example.com", nil)
+	_, err := client.GetCluster(context.Background(), "c-123")
+	if err == nil {
+		t.Fatal("expected error on 401")
+	}
+	if !gcphcp.IsAuthExpiredError(err) {
+		t.Fatalf("expected authExpiredError, got %T: %v", err, err)
+	}
+	// The underlying clsHTTPError should still be accessible
+	var httpErr *gcphcp.CLSHTTPError
+	if !errors.As(err, &httpErr) {
+		t.Fatal("expected clsHTTPError to be unwrappable from authExpiredError")
+	}
+	if httpErr.StatusCode != 401 {
+		t.Fatalf("status code = %d, want 401", httpErr.StatusCode)
+	}
+}
+
+func TestCLSClient_HTTP403_DoesNotReturnAuthExpiredError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+		w.Write([]byte(`{"error":"access denied"}`))
+	}))
+	defer server.Close()
+
+	client := gcphcp.NewCLSClient(server.URL, "valid-token", "email@example.com", nil)
+	_, err := client.GetCluster(context.Background(), "c-123")
+	if err == nil {
+		t.Fatal("expected error on 403")
+	}
+	if gcphcp.IsAuthExpiredError(err) {
+		t.Fatal("403 should NOT be classified as authExpiredError")
+	}
+	var httpErr *gcphcp.CLSHTTPError
+	if !errors.As(err, &httpErr) {
+		t.Fatal("expected clsHTTPError")
+	}
+	if httpErr.StatusCode != 403 {
+		t.Fatalf("status code = %d, want 403", httpErr.StatusCode)
+	}
+}
+
+func TestCLSClient_HTTP500_DoesNotReturnAuthExpiredError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		w.Write([]byte(`internal error`))
+	}))
+	defer server.Close()
+
+	client := gcphcp.NewCLSClient(server.URL, "token", "email@example.com", nil)
+	_, err := client.GetCluster(context.Background(), "c-123")
+	if err == nil {
+		t.Fatal("expected error on 500")
+	}
+	if gcphcp.IsAuthExpiredError(err) {
+		t.Fatal("500 should NOT be classified as authExpiredError")
+	}
+}
+
 func TestCLSClient_ResolveClusterID(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(map[string]any{

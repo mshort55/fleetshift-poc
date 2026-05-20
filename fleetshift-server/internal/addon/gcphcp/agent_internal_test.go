@@ -46,6 +46,41 @@ func TestNewReconcileContext_AddsDeadlineAndPreservesValues(t *testing.T) {
 	}
 }
 
+func TestDeliveryResultForReconcileError_AuthExpiredReturnsAuthFailed(t *testing.T) {
+	err := newAuthExpiredError(fmt.Errorf("CLS API GET /api/v1/clusters failed (HTTP 401): token expired"))
+	result := deliveryResultForReconcileError(err)
+
+	if result.State != domain.DeliveryStateAuthFailed {
+		t.Fatalf("state = %q, want %q", result.State, domain.DeliveryStateAuthFailed)
+	}
+	if !strings.Contains(result.Message, "credentials expired") {
+		t.Fatalf("message = %q, want 'credentials expired' context", result.Message)
+	}
+	if !strings.Contains(result.Message, "401") {
+		t.Fatalf("message = %q, want wrapped cause mentioning 401", result.Message)
+	}
+}
+
+func TestDeliveryResultForReconcileError_AuthExpiredTakesPrecedenceOverPostProvision(t *testing.T) {
+	inner := newPostProvisionRegistrationError(fmt.Errorf("bootstrap failed"))
+	err := newAuthExpiredError(inner)
+	result := deliveryResultForReconcileError(err)
+
+	if result.State != domain.DeliveryStateAuthFailed {
+		t.Fatalf("state = %q, want %q — auth expired should take precedence", result.State, domain.DeliveryStateAuthFailed)
+	}
+}
+
+func TestDeliveryResultForReconcileError_WrappedAuthExpiredReturnsAuthFailed(t *testing.T) {
+	authErr := newAuthExpiredError(fmt.Errorf("IAM returned status 401"))
+	wrapped := fmt.Errorf("broker auth exchange: %w", authErr)
+	result := deliveryResultForReconcileError(wrapped)
+
+	if result.State != domain.DeliveryStateAuthFailed {
+		t.Fatalf("state = %q, want %q", result.State, domain.DeliveryStateAuthFailed)
+	}
+}
+
 func TestDeliveryResultForReconcileError_PostProvisionRegistrationErrorUsesExplicitMessage(t *testing.T) {
 	result := deliveryResultForReconcileError(
 		newPostProvisionRegistrationError(fmt.Errorf("bootstrap guest cluster after 3 attempts: RBAC not ready")),
