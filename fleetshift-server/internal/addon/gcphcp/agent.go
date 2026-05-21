@@ -26,11 +26,14 @@ type AgentDeps struct {
 // Agent implements the domain.DeliveryAgent interface for the GCP HCP addon.
 // It coordinates cluster provisioning and deletion through the Reconciler.
 type Agent struct {
-	reconciler *Reconciler
-	observer   AgentObserver
-	reporter   domain.DeliveryReporter
-	trustMu    sync.RWMutex
-	trustMap   map[domain.IssuerURL]domain.TrustBundleEntry
+	reconciler    *Reconciler
+	observer      AgentObserver
+	reporter      domain.DeliveryReporter
+	trustMu       sync.RWMutex
+	trustMap      map[domain.IssuerURL]domain.TrustBundleEntry
+	clusterMu     sync.Mutex
+	clusterGen    map[string]domain.Generation
+	deliveryLocks sync.Map
 }
 
 // NewAgent creates a new Agent with the given dependencies.
@@ -54,6 +57,7 @@ func NewAgent(deps AgentDeps) *Agent {
 		observer:   observer,
 		reporter:   deps.Reporter,
 		trustMap:   make(map[domain.IssuerURL]domain.TrustBundleEntry),
+		clusterGen: make(map[string]domain.Generation),
 	}
 }
 
@@ -72,6 +76,24 @@ func (a *Agent) TrustBundles() []domain.TrustBundleEntry {
 	return bundles
 }
 
+// acceptGeneration atomically checks and updates the per-cluster
+// generation high-water mark. Returns false if gen is stale (older or
+// equal to the highest generation already accepted for that cluster).
+func (a *Agent) acceptGeneration(clusterName string, gen domain.Generation) bool {
+	a.clusterMu.Lock()
+	defer a.clusterMu.Unlock()
+	if current, ok := a.clusterGen[clusterName]; ok && gen <= current {
+		return false
+	}
+	a.clusterGen[clusterName] = gen
+	return true
+}
+
+func (a *Agent) clusterLock(name string) *sync.Mutex {
+	val, _ := a.deliveryLocks.LoadOrStore(name, &sync.Mutex{})
+	return val.(*sync.Mutex)
+}
+
 // Deliver implements domain.DeliveryAgent.Deliver.
 // It processes manifests in two categories:
 // 1. Trust bundle manifests - stored immediately
@@ -85,7 +107,7 @@ func (a *Agent) Deliver(
 	manifests []domain.Manifest,
 	auth domain.DeliveryAuth,
 	_ *domain.Attestation,
-	_ domain.Generation,
+	generation domain.Generation,
 ) error {
 	progress := newDeliveryProgress(a.reporter, deliveryID)
 
@@ -166,6 +188,17 @@ func (a *Agent) Deliver(
 		return nil
 	}
 
+	if !a.acceptGeneration(spec.Name, generation) {
+		a.observer.Info("rejecting stale delivery", "cluster", spec.Name, "generation", generation)
+		if reportErr := progress.Complete(ctx, domain.DeliveryResult{
+			State:   domain.DeliveryStateFailed,
+			Message: fmt.Sprintf("stale generation %d for cluster %s", generation, spec.Name),
+		}); reportErr != nil {
+			a.observer.Error("failed to report stale delivery", "error", reportErr)
+		}
+		return nil
+	}
+
 	// Check auth token is non-empty
 	if auth.Token == "" {
 		a.observer.Error("missing auth token")
@@ -181,9 +214,14 @@ func (a *Agent) Deliver(
 	// Extract target config from properties
 	targetCfg := targetConfigFromProperties(target.Properties)
 
-	// Launch async provisioning
+	// Launch async provisioning with per-cluster serialization
+	lock := a.clusterLock(spec.Name)
+	lock.Lock()
 	asyncCtx := context.WithoutCancel(ctx)
-	go a.deliverAsync(asyncCtx, spec, targetCfg, string(auth.Token), progress)
+	go func() {
+		defer lock.Unlock()
+		a.deliverAsync(asyncCtx, spec, targetCfg, string(auth.Token), progress)
+	}()
 
 	return nil
 }
@@ -236,7 +274,7 @@ func (a *Agent) Remove(
 	manifests []domain.Manifest,
 	auth domain.DeliveryAuth,
 	_ *domain.Attestation,
-	_ domain.Generation,
+	generation domain.Generation,
 ) error {
 	progress := newDeliveryProgress(a.reporter, deliveryID)
 
@@ -266,13 +304,23 @@ func (a *Agent) Remove(
 		}
 		spec.Name = string(m.Name)
 
+		if !a.acceptGeneration(spec.Name, generation) {
+			a.observer.Info("rejecting stale removal", "cluster", spec.Name, "generation", generation)
+			continue
+		}
+
+		lock := a.clusterLock(spec.Name)
+		lock.Lock()
+
 		// Delete the cluster
 		a.observer.Info("deleting cluster", "cluster", spec.Name)
 		if err := a.reconciler.Delete(ctx, spec, targetCfg, string(auth.Token), progress); err != nil {
+			lock.Unlock()
 			a.observer.Error("failed to delete cluster", "error", err, "cluster", spec.Name)
 			return fmt.Errorf("failed to delete cluster %s: %w", spec.Name, err)
 		}
 
+		lock.Unlock()
 		a.observer.Info("cluster deleted successfully", "cluster", spec.Name)
 	}
 

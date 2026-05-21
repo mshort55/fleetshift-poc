@@ -46,6 +46,50 @@ func TestNewReconcileContext_AddsDeadlineAndPreservesValues(t *testing.T) {
 	}
 }
 
+func TestAcceptGeneration_FirstDeliveryAccepted(t *testing.T) {
+	agent := &Agent{clusterGen: make(map[string]domain.Generation)}
+
+	if !agent.acceptGeneration("cluster-a", 5) {
+		t.Fatal("first delivery should be accepted")
+	}
+}
+
+func TestAcceptGeneration_AcceptsNewerGeneration(t *testing.T) {
+	agent := &Agent{clusterGen: make(map[string]domain.Generation)}
+
+	agent.acceptGeneration("cluster-a", 5)
+	if !agent.acceptGeneration("cluster-a", 10) {
+		t.Fatal("newer generation should be accepted")
+	}
+}
+
+func TestAcceptGeneration_RejectsStaleGeneration(t *testing.T) {
+	agent := &Agent{clusterGen: make(map[string]domain.Generation)}
+
+	agent.acceptGeneration("cluster-a", 10)
+	if agent.acceptGeneration("cluster-a", 5) {
+		t.Fatal("stale generation should be rejected")
+	}
+}
+
+func TestAcceptGeneration_RejectsDuplicateGeneration(t *testing.T) {
+	agent := &Agent{clusterGen: make(map[string]domain.Generation)}
+
+	agent.acceptGeneration("cluster-a", 10)
+	if agent.acceptGeneration("cluster-a", 10) {
+		t.Fatal("duplicate generation should be rejected")
+	}
+}
+
+func TestAcceptGeneration_IndependentPerCluster(t *testing.T) {
+	agent := &Agent{clusterGen: make(map[string]domain.Generation)}
+
+	agent.acceptGeneration("cluster-a", 10)
+	if !agent.acceptGeneration("cluster-b", 5) {
+		t.Fatal("different cluster should track independently")
+	}
+}
+
 func TestDeliveryResultForReconcileError_AuthExpiredReturnsAuthFailed(t *testing.T) {
 	err := newAuthExpiredError(fmt.Errorf("CLS API GET /api/v1/clusters failed (HTTP 401): token expired"))
 	result := deliveryResultForReconcileError(err)

@@ -3,6 +3,7 @@ package gcphcp_test
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -285,6 +286,166 @@ func TestAgent_Remove_TrustBundle_RemovesStoredIssuerEntry(t *testing.T) {
 	if bundles := agent.TrustBundles(); len(bundles) != 0 {
 		t.Fatalf("expected trust bundle removal, got %#v", bundles)
 	}
+}
+
+func TestAgent_Deliver_RejectsStaleGeneration(t *testing.T) {
+	reporter := newRecordingReporter()
+	agent := gcphcp.NewAgent(gcphcp.AgentDeps{
+		Gateway: gcphcp.GatewayConfig{
+			URL:      "https://test-gateway",
+			Audience: "test-audience",
+		},
+		Reporter: reporter,
+	})
+
+	spec := validClusterSpecJSON(t)
+	manifest := domain.Manifest{
+		ResourceType: gcphcp.ClusterResourceType,
+		Name:         "test-cls",
+		Raw:          spec,
+	}
+
+	// First delivery with generation 10 — accepted (will fail async since no real backend, but generation is accepted)
+	err := agent.Deliver(
+		context.Background(),
+		domain.TargetInfo{},
+		domain.DeliveryID("delivery-1"),
+		[]domain.Manifest{manifest},
+		domain.DeliveryAuth{Token: "token"},
+		nil,
+		10,
+	)
+	if err != nil {
+		t.Fatalf("Deliver() error = %v", err)
+	}
+
+	// Drain the async result from delivery-1 (it will fail because there's no real backend)
+	select {
+	case <-reporter.done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timeout waiting for first delivery result")
+	}
+
+	// Second delivery with stale generation 5 — should be rejected
+	err = agent.Deliver(
+		context.Background(),
+		domain.TargetInfo{},
+		domain.DeliveryID("delivery-2"),
+		[]domain.Manifest{manifest},
+		domain.DeliveryAuth{Token: "token"},
+		nil,
+		5,
+	)
+	if err != nil {
+		t.Fatalf("Deliver() error = %v", err)
+	}
+
+	select {
+	case result := <-reporter.done:
+		if result.State != domain.DeliveryStateFailed {
+			t.Errorf("expected state %s, got %s", domain.DeliveryStateFailed, result.State)
+		}
+		if !strings.Contains(result.Message, "stale generation") {
+			t.Errorf("expected stale generation message, got %q", result.Message)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timeout waiting for stale delivery result")
+	}
+}
+
+func TestAgent_Remove_RejectsStaleGeneration(t *testing.T) {
+	reporter := newRecordingReporter()
+	agent := gcphcp.NewAgent(gcphcp.AgentDeps{
+		Gateway: gcphcp.GatewayConfig{
+			URL:      "https://test-gateway",
+			Audience: "test-audience",
+		},
+		Reporter: reporter,
+	})
+
+	spec := validClusterSpecJSON(t)
+	manifest := domain.Manifest{
+		ResourceType: gcphcp.ClusterResourceType,
+		Name:         "test-cls",
+		Raw:          spec,
+	}
+
+	// First: accept generation 10 via Deliver (it will fail async, but the generation is recorded)
+	_ = agent.Deliver(
+		context.Background(),
+		domain.TargetInfo{},
+		domain.DeliveryID("delivery-1"),
+		[]domain.Manifest{manifest},
+		domain.DeliveryAuth{Token: "token"},
+		nil,
+		10,
+	)
+	select {
+	case <-reporter.done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timeout waiting for first delivery result")
+	}
+
+	// Remove with stale generation 5 — should skip the cluster (not error)
+	err := agent.Remove(
+		context.Background(),
+		domain.TargetInfo{},
+		domain.DeliveryID("remove-1"),
+		[]domain.Manifest{manifest},
+		domain.DeliveryAuth{Token: "token"},
+		nil,
+		5,
+	)
+	if err != nil {
+		t.Fatalf("Remove() error = %v, want nil (stale removal is skipped, not errored)", err)
+	}
+}
+
+func validClusterSpecJSON(t *testing.T) json.RawMessage {
+	t.Helper()
+	autoRepair := true
+	spec := struct {
+		EndpointAccess string `json:"endpointAccess"`
+		ReleaseVersion string `json:"releaseVersion"`
+		ChannelGroup   string `json:"channelGroup"`
+		Nodepools      []struct {
+			ID             string `json:"id"`
+			Replicas       int    `json:"replicas"`
+			InstanceType   string `json:"instanceType"`
+			RootVolumeSize int    `json:"rootVolumeSize"`
+			RootVolumeType string `json:"rootVolumeType"`
+			AutoRepair     *bool  `json:"autoRepair"`
+			UpgradeType    string `json:"upgradeType"`
+		} `json:"nodepools"`
+	}{
+		EndpointAccess: "PublicAndPrivate",
+		ReleaseVersion: "4.22.0",
+		ChannelGroup:   "stable",
+		Nodepools: []struct {
+			ID             string `json:"id"`
+			Replicas       int    `json:"replicas"`
+			InstanceType   string `json:"instanceType"`
+			RootVolumeSize int    `json:"rootVolumeSize"`
+			RootVolumeType string `json:"rootVolumeType"`
+			AutoRepair     *bool  `json:"autoRepair"`
+			UpgradeType    string `json:"upgradeType"`
+		}{
+			{
+				ID:             "np1",
+				Replicas:       2,
+				InstanceType:   "n1-standard-4",
+				RootVolumeSize: 128,
+				RootVolumeType: "pd-standard",
+				AutoRepair:     &autoRepair,
+				UpgradeType:    "Replace",
+			},
+		},
+	}
+	raw, err := json.Marshal(spec)
+	if err != nil {
+		t.Fatalf("marshal spec: %v", err)
+	}
+	return raw
 }
 
 func deliverTrustBundle(t *testing.T, agent *gcphcp.Agent, reporter *recordingReporter, entry domain.TrustBundleEntry) {
