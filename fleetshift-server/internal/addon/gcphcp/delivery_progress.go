@@ -2,6 +2,7 @@ package gcphcp
 
 import (
 	"context"
+	"time"
 
 	"github.com/fleetshift/fleetshift-poc/fleetshift-server/internal/domain"
 )
@@ -26,6 +27,24 @@ func (p *deliveryProgress) Event(ctx context.Context, event domain.DeliveryEvent
 		return
 	}
 	_ = p.reporter.ReportEvent(ctx, p.deliveryID, event)
+}
+
+// Info emits an informational progress event.
+func (p *deliveryProgress) Info(ctx context.Context, message string) {
+	p.Event(ctx, domain.DeliveryEvent{
+		Timestamp: time.Now(),
+		Kind:      domain.DeliveryEventProgress,
+		Message:   message,
+	})
+}
+
+// Warn emits a warning event.
+func (p *deliveryProgress) Warn(ctx context.Context, message string) {
+	p.Event(ctx, domain.DeliveryEvent{
+		Timestamp: time.Now(),
+		Kind:      domain.DeliveryEventWarning,
+		Message:   message,
+	})
 }
 
 // Complete reports a terminal delivery result and signals fulfillment

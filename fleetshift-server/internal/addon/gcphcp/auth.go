@@ -100,10 +100,13 @@ func (a *BrokerAuth) Exchange(ctx context.Context, callerToken string) (BrokerAu
 	}, nil
 }
 
+func workforceAudience(pool, provider string) string {
+	return fmt.Sprintf("//iam.googleapis.com/locations/global/workforcePools/%s/providers/%s", pool, provider)
+}
+
 // exchangeSTS exchanges the caller's OIDC token for a Workforce access token.
 func (a *BrokerAuth) exchangeSTS(ctx context.Context, callerToken string) (string, error) {
-	audience := fmt.Sprintf("//iam.googleapis.com/locations/global/workforcePools/%s/providers/%s",
-		a.cfg.WorkforcePool, a.cfg.WorkforceProvider)
+	audience := workforceAudience(a.cfg.WorkforcePool, a.cfg.WorkforceProvider)
 
 	formData := url.Values{
 		"grant_type":           {"urn:ietf:params:oauth:grant-type:token-exchange"},
@@ -162,7 +165,7 @@ func (a *BrokerAuth) generateIDToken(ctx context.Context, workforceToken string)
 	endpoint := fmt.Sprintf("%s/v1/projects/-/serviceAccounts/%s:generateIdToken",
 		a.cfg.IAMEndpoint, a.cfg.BrokerSAEmail)
 
-	requestBody := map[string]interface{}{
+	requestBody := map[string]any{
 		"audience":     a.cfg.GatewayAudience,
 		"includeEmail": true,
 	}
@@ -216,23 +219,30 @@ func (a *BrokerAuth) generateIDToken(ctx context.Context, workforceToken string)
 // for use by hypershift. This configuration enables workload identity federation
 // with the broker service account.
 func WorkforceCredentialConfig(cfg TargetConfig, subjectTokenFile string) []byte {
-	audience := fmt.Sprintf("//iam.googleapis.com/locations/global/workforcePools/%s/providers/%s",
-		cfg.WorkforcePool, cfg.WorkforceProvider)
+	jsonData, _ := buildCredentialConfig(cfg, subjectTokenFile, true, false)
+	return jsonData
+}
 
-	impersonationURL := fmt.Sprintf("https://iamcredentials.googleapis.com/v1/projects/-/serviceAccounts/%s:generateAccessToken",
-		cfg.BrokerSAEmail)
-
-	credConfig := map[string]interface{}{
+// buildCredentialConfig builds an external_account credential JSON.
+// impersonate adds service_account_impersonation_url; userProject adds workforce_pool_user_project.
+func buildCredentialConfig(cfg TargetConfig, subjectTokenFile string, impersonate, userProject bool) ([]byte, error) {
+	credConfig := map[string]any{
 		"type":               "external_account",
-		"audience":           audience,
+		"audience":           workforceAudience(cfg.WorkforcePool, cfg.WorkforceProvider),
 		"subject_token_type": "urn:ietf:params:oauth:token-type:jwt",
 		"token_url":          "https://sts.googleapis.com/v1/token",
-		"credential_source": map[string]interface{}{
+		"credential_source": map[string]any{
 			"file": subjectTokenFile,
 		},
-		"service_account_impersonation_url": impersonationURL,
 	}
-
-	jsonData, _ := json.Marshal(credConfig)
-	return jsonData
+	if impersonate {
+		credConfig["service_account_impersonation_url"] = fmt.Sprintf(
+			"https://iamcredentials.googleapis.com/v1/projects/-/serviceAccounts/%s:generateAccessToken",
+			cfg.BrokerSAEmail,
+		)
+	}
+	if userProject {
+		credConfig["workforce_pool_user_project"] = cfg.GCPProject
+	}
+	return json.MarshalIndent(credConfig, "", "  ")
 }

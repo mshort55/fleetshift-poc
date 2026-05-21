@@ -43,21 +43,27 @@ func (tc TargetConfig) TargetProperties() map[string]string {
 	}
 }
 
-// LoadConfig reads and parses a YAML configuration file.
+// TargetConfigFromProperties maps domain.TargetInfo.Properties back to TargetConfig.
+func TargetConfigFromProperties(props map[string]string) TargetConfig {
+	return TargetConfig{
+		ID:                props["id"],
+		GCPProject:        props["gcp_project"],
+		Region:            props["region"],
+		WorkforcePool:     props["workforce_pool"],
+		WorkforceProvider: props["workforce_provider"],
+		BrokerSAEmail:     props["broker_sa_email"],
+	}
+}
+
+// ParseConfig reads and parses a YAML configuration file.
 // It validates that all required fields are present.
-func LoadConfig(path string) (Config, error) {
+func ParseConfig(path string) (Config, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return Config{}, fmt.Errorf("failed to read config file: %w", err)
 	}
 
 	return ParseConfigBytes(data)
-}
-
-// ParseConfig reads and parses a YAML configuration file.
-// It validates that all required fields are present.
-func ParseConfig(path string) (Config, error) {
-	return LoadConfig(path)
 }
 
 // ParseConfigBytes parses YAML configuration data and validates

@@ -7,8 +7,6 @@ import (
 	"fmt"
 	"sort"
 	"time"
-
-	"github.com/fleetshift/fleetshift-poc/fleetshift-server/internal/domain"
 )
 
 type nodepoolReconcileClient interface {
@@ -32,13 +30,13 @@ type deleteCleanupInfra interface {
 	) error
 }
 
-type clusterDeleteClient interface {
-	ResolveClusterID(ctx context.Context, clusterName string) (string, error)
-	DeleteCluster(ctx context.Context, clusterID string) error
-}
-
 type clusterResolveClient interface {
 	ResolveClusterID(ctx context.Context, clusterName string) (string, error)
+}
+
+type clusterDeleteClient interface {
+	clusterResolveClient
+	DeleteCluster(ctx context.Context, clusterID string) error
 }
 
 type prereqRecoveryInfra interface {
@@ -144,7 +142,7 @@ func reconcileNodepools(
 		derivedName := NodepoolName(clusterName, np.ID)
 		derivedNames[derivedName] = struct{}{}
 		if _, seen := observedByName[derivedName]; !seen {
-			emitProgress(progress, ctx, fmt.Sprintf("Creating nodepool: %s", derivedName))
+			progress.Info(ctx, fmt.Sprintf("Creating nodepool: %s", derivedName))
 			if _, err := client.CreateNodepool(ctx, BuildCLSNodepoolSpec(np, clusterName, clusterID)); err != nil {
 				return fmt.Errorf("create nodepool %s: %w", derivedName, err)
 			}
@@ -155,7 +153,7 @@ func reconcileNodepools(
 	for _, np := range desired {
 		derivedName := NodepoolName(clusterName, np.ID)
 		if nodepoolID, ok := observedByName[derivedName]; ok {
-			emitProgress(progress, ctx, fmt.Sprintf("Updating nodepool: %s", derivedName))
+			progress.Info(ctx, fmt.Sprintf("Updating nodepool: %s", derivedName))
 			if _, err := client.UpdateNodepool(ctx, nodepoolID, BuildCLSNodepoolSpec(np, clusterName, clusterID)); err != nil {
 				return fmt.Errorf("update nodepool %s: %w", derivedName, err)
 			}
@@ -171,7 +169,7 @@ func reconcileNodepools(
 	sort.Strings(removed)
 
 	for _, name := range removed {
-		emitProgress(progress, ctx, fmt.Sprintf("Deleting removed nodepool: %s", name))
+		progress.Info(ctx, fmt.Sprintf("Deleting removed nodepool: %s", name))
 		if err := client.DeleteNodepool(ctx, observedByName[name]); err != nil {
 			return fmt.Errorf("delete nodepool %s: %w", name, err)
 		}
@@ -236,11 +234,11 @@ func cleanupDeleteResources(
 	hypershiftEnv []string,
 	progress *deliveryProgress,
 ) error {
-	emitProgress(progress, ctx, "Destroying infrastructure")
+	progress.Info(ctx, "Destroying infrastructure")
 	if err := infra.DestroyInfra(ctx, spec.Name, target.GCPProject, target.Region, hypershiftEnv); err != nil {
 		return fmt.Errorf("destroy infra: %w", err)
 	}
-	emitProgress(progress, ctx, "Destroying IAM resources")
+	progress.Info(ctx, "Destroying IAM resources")
 	if err := infra.DestroyIAM(ctx, spec.Name, target.GCPProject, hypershiftEnv); err != nil {
 		return fmt.Errorf(
 			"cluster deletion succeeded and infrastructure cleanup completed, but IAM cleanup failed: %w",
@@ -294,7 +292,7 @@ func retryUnconfirmedPrereqCreate(
 		result, err := create()
 		if err == nil {
 			if attempt > 1 {
-				emitProgress(progress, ctx, fmt.Sprintf("Recovered %s on attempt %d", resourceName, attempt))
+				progress.Info(ctx, fmt.Sprintf("Recovered %s on attempt %d", resourceName, attempt))
 			}
 			return result, nil
 		}
@@ -305,7 +303,7 @@ func retryUnconfirmedPrereqCreate(
 			return nil, errors.Join(attemptErrs...)
 		}
 
-		emitProgress(progress, ctx, fmt.Sprintf("%s may have partially succeeded; retrying (%d/%d)", resourceName, attempt+1, totalAttempts))
+		progress.Info(ctx, fmt.Sprintf("%s may have partially succeeded; retrying (%d/%d)", resourceName, attempt+1, totalAttempts))
 		if unconfirmedPrereqRetryInterval <= 0 {
 			continue
 		}
@@ -357,7 +355,7 @@ func recoverFromUnconfirmedCreate(
 		}
 		return clusterID, nil
 	default:
-		emitProgress(progress, ctx, "Unconfirmed create did not surface a cluster; cleaning up partial IAM/infra resources")
+		progress.Info(ctx, "Unconfirmed create did not surface a cluster; cleaning up partial IAM/infra resources")
 		cleanupErr := cleanupCreateResources(ctx, infra, spec, target, hypershiftEnv, createdInfra, createdIAM)
 		if cleanupErr != nil {
 			return "", errors.Join(createErr, cleanupErr)
@@ -377,17 +375,17 @@ func repairAdoptedClusterAfterUnconfirmedCreate(
 	hypershiftEnv []string,
 	progress *deliveryProgress,
 ) error {
-	emitProgress(progress, ctx, fmt.Sprintf("Re-ensuring IAM resources for adopted cluster %s", clusterID))
+	progress.Info(ctx, fmt.Sprintf("Re-ensuring IAM resources for adopted cluster %s", clusterID))
 	if _, err := ensureIAMWithRecovery(ctx, infra, spec, target, jwksPath, hypershiftEnv, progress); err != nil {
 		return fmt.Errorf("re-ensure IAM for adopted cluster: %w", err)
 	}
 
-	emitProgress(progress, ctx, fmt.Sprintf("Re-ensuring infrastructure for adopted cluster %s", clusterID))
+	progress.Info(ctx, fmt.Sprintf("Re-ensuring infrastructure for adopted cluster %s", clusterID))
 	if _, err := ensureInfraWithRecovery(ctx, infra, spec, target, hypershiftEnv, progress); err != nil {
 		return fmt.Errorf("re-ensure infrastructure for adopted cluster: %w", err)
 	}
 
-	emitProgress(progress, ctx, fmt.Sprintf("Refreshing adopted cluster %s before update", clusterID))
+	progress.Info(ctx, fmt.Sprintf("Refreshing adopted cluster %s before update", clusterID))
 	observedCluster, err := client.GetCluster(ctx, clusterID)
 	if err != nil {
 		return fmt.Errorf("get adopted cluster %s: %w", clusterID, err)
@@ -402,7 +400,7 @@ func repairAdoptedClusterAfterUnconfirmedCreate(
 		return fmt.Errorf("update adopted cluster %s: %w", clusterID, err)
 	}
 
-	emitProgress(progress, ctx, fmt.Sprintf("Adopted cluster %s repaired and updated", clusterID))
+	progress.Info(ctx, fmt.Sprintf("Adopted cluster %s repaired and updated", clusterID))
 	return nil
 }
 
@@ -412,7 +410,7 @@ func resolveClusterAfterUnconfirmedCreate(
 	clusterName string,
 	progress *deliveryProgress,
 ) (string, bool, error) {
-	emitProgress(progress, ctx, fmt.Sprintf("Create result for cluster %s was unconfirmed; probing for adoption", clusterName))
+	progress.Info(ctx, fmt.Sprintf("Create result for cluster %s was unconfirmed; probing for adoption", clusterName))
 
 	ticker := time.NewTicker(unconfirmedCreateProbeInterval)
 	defer ticker.Stop()
@@ -423,7 +421,7 @@ func resolveClusterAfterUnconfirmedCreate(
 		clusterID, err := client.ResolveClusterID(ctx, clusterName)
 		switch {
 		case err == nil:
-			emitProgress(progress, ctx, fmt.Sprintf("Adopted cluster %s after unconfirmed create", clusterID))
+			progress.Info(ctx, fmt.Sprintf("Adopted cluster %s after unconfirmed create", clusterID))
 			return clusterID, true, nil
 		case !errors.Is(err, ErrClusterNotFound):
 			return "", false, fmt.Errorf("probe for cluster after unconfirmed create: %w", err)
@@ -448,13 +446,13 @@ func deleteClusterIfPresent(
 	clusterID, err := client.ResolveClusterID(ctx, clusterName)
 	if err != nil {
 		if errors.Is(err, ErrClusterNotFound) {
-			emitProgress(progress, ctx, fmt.Sprintf("Cluster %s already absent; continuing cleanup", clusterName))
+			progress.Info(ctx, fmt.Sprintf("Cluster %s already absent; continuing cleanup", clusterName))
 			return "", false, nil
 		}
 		return "", false, fmt.Errorf("resolve cluster ID: %w", err)
 	}
 
-	emitProgress(progress, ctx, fmt.Sprintf("Deleting cluster %s (ID: %s)", clusterName, clusterID))
+	progress.Info(ctx, fmt.Sprintf("Deleting cluster %s (ID: %s)", clusterName, clusterID))
 	if err := client.DeleteCluster(ctx, clusterID); err != nil {
 		return "", false, fmt.Errorf("delete cluster: %w", err)
 	}
@@ -475,10 +473,3 @@ func cloneAnyMap(in map[string]any) (map[string]any, error) {
 	return out, nil
 }
 
-func emitProgress(progress *deliveryProgress, ctx context.Context, message string) {
-	progress.Event(ctx, domain.DeliveryEvent{
-		Timestamp: time.Now(),
-		Kind:      domain.DeliveryEventProgress,
-		Message:   message,
-	})
-}

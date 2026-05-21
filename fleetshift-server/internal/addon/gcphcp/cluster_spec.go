@@ -30,14 +30,12 @@ type NodepoolSpec struct {
 	UpgradeType    string `json:"upgradeType"`
 }
 
-var nodepoolIDPattern = regexp.MustCompile(`^[a-z][-a-z0-9]*$`)
+var lowerKebabPattern = regexp.MustCompile(`^[a-z][-a-z0-9]*$`)
 
 // NodepoolName derives the full CLS nodepool name from the cluster name and nodepool id.
 func NodepoolName(clusterName, poolID string) string {
 	return clusterName + "-" + poolID
 }
-
-var clusterNamePattern = regexp.MustCompile(`^[a-z][-a-z0-9]*$`)
 
 // ParseClusterSpec unmarshals and validates a ClusterSpec from JSON.
 func ParseClusterSpec(raw json.RawMessage) (ClusterSpec, error) {
@@ -63,7 +61,7 @@ func ValidateClusterName(name string) error {
 		return fmt.Errorf("%w: cluster name must be 15 characters or less (got %d)",
 			domain.ErrInvalidArgument, len(name))
 	}
-	if !clusterNamePattern.MatchString(name) {
+	if !lowerKebabPattern.MatchString(name) {
 		return fmt.Errorf("%w: cluster name must match pattern ^[a-z][-a-z0-9]*$ (got %q)",
 			domain.ErrInvalidArgument, name)
 	}
@@ -95,7 +93,7 @@ func validateClusterSpec(spec *ClusterSpec) error {
 			return fmt.Errorf("%w: nodepools[%d].id must be 10 characters or less (got %d)",
 				domain.ErrInvalidArgument, i, len(np.ID))
 		}
-		if !nodepoolIDPattern.MatchString(np.ID) {
+		if !lowerKebabPattern.MatchString(np.ID) {
 			return fmt.Errorf("%w: nodepools[%d].id must match pattern ^[a-z][-a-z0-9]*$ (got %q)",
 				domain.ErrInvalidArgument, i, np.ID)
 		}

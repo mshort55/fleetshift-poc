@@ -78,15 +78,6 @@ func (f *fakeNodepoolStatusClient) GetNodepoolStatus(_ context.Context, nodepool
 	return seq[idx], nil
 }
 
-func TestParseNodepoolPhase(t *testing.T) {
-	got := ParseNodepoolPhase(map[string]any{
-		"status": map[string]any{"phase": "Ready"},
-	})
-	if got != "Ready" {
-		t.Fatalf("ParseNodepoolPhase() = %q, want Ready", got)
-	}
-}
-
 func TestPollDesiredNodepoolsHealthy_ReadyOnFirstCheck(t *testing.T) {
 	obs := &testEventRecorder{}
 	client := &fakeNodepoolStatusClient{
@@ -160,15 +151,38 @@ func TestPollDesiredNodepoolsHealthy_FailedNodepool(t *testing.T) {
 	}
 }
 
-func TestPollDesiredNodepoolsHealthy_WaitsUntilReady(t *testing.T) {
+// withFastClusterPollTimers saves and restores clusterPollInterval
+// and clusterPollTimeout, setting fast defaults (5ms interval,
+// 20ms timeout) for testing.
+func withFastClusterPollTimers(t *testing.T) {
+	t.Helper()
+	origInterval := clusterPollInterval
+	origTimeout := clusterPollTimeout
+	clusterPollInterval = 5 * time.Millisecond
+	clusterPollTimeout = 20 * time.Millisecond
+	t.Cleanup(func() {
+		clusterPollInterval = origInterval
+		clusterPollTimeout = origTimeout
+	})
+}
+
+// withFastNodepoolPollTimers saves and restores nodepoolPollInterval
+// and nodepoolPollTimeout, setting fast defaults (5ms interval,
+// 100ms timeout) for testing.
+func withFastNodepoolPollTimers(t *testing.T) {
+	t.Helper()
 	origInterval := nodepoolPollInterval
 	origTimeout := nodepoolPollTimeout
 	nodepoolPollInterval = 5 * time.Millisecond
 	nodepoolPollTimeout = 100 * time.Millisecond
-	defer func() {
+	t.Cleanup(func() {
 		nodepoolPollInterval = origInterval
 		nodepoolPollTimeout = origTimeout
-	}()
+	})
+}
+
+func TestPollDesiredNodepoolsHealthy_WaitsUntilReady(t *testing.T) {
+	withFastNodepoolPollTimers(t)
 
 	client := &fakeNodepoolStatusClient{
 		listSeq: [][]map[string]any{
@@ -195,14 +209,7 @@ func TestPollDesiredNodepoolsHealthy_WaitsUntilReady(t *testing.T) {
 }
 
 func TestPollClusterReady_UsesConfigurableTimeout(t *testing.T) {
-	origInterval := clusterPollInterval
-	origTimeout := clusterPollTimeout
-	clusterPollInterval = 5 * time.Millisecond
-	clusterPollTimeout = 20 * time.Millisecond
-	defer func() {
-		clusterPollInterval = origInterval
-		clusterPollTimeout = origTimeout
-	}()
+	withFastClusterPollTimers(t)
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/api/v1/clusters/c-123" {
@@ -256,14 +263,7 @@ func TestEmitClusterReadyTransition_EmitsProgressEvent(t *testing.T) {
 }
 
 func TestPollClusterDeleted_ReturnsNon404Errors(t *testing.T) {
-	origInterval := clusterPollInterval
-	origTimeout := clusterPollTimeout
-	clusterPollInterval = 5 * time.Millisecond
-	clusterPollTimeout = 20 * time.Millisecond
-	defer func() {
-		clusterPollInterval = origInterval
-		clusterPollTimeout = origTimeout
-	}()
+	withFastClusterPollTimers(t)
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/api/v1/clusters/c-123" {
@@ -284,14 +284,7 @@ func TestPollClusterDeleted_ReturnsNon404Errors(t *testing.T) {
 }
 
 func TestPollClusterDeleted_SucceedsOnHTTP404(t *testing.T) {
-	origInterval := clusterPollInterval
-	origTimeout := clusterPollTimeout
-	clusterPollInterval = 5 * time.Millisecond
-	clusterPollTimeout = 20 * time.Millisecond
-	defer func() {
-		clusterPollInterval = origInterval
-		clusterPollTimeout = origTimeout
-	}()
+	withFastClusterPollTimers(t)
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/api/v1/clusters/c-123" {
@@ -308,14 +301,7 @@ func TestPollClusterDeleted_SucceedsOnHTTP404(t *testing.T) {
 }
 
 func TestPollClusterDeleted_DoesNotTreat404TextInBodyAsDeletion(t *testing.T) {
-	origInterval := clusterPollInterval
-	origTimeout := clusterPollTimeout
-	clusterPollInterval = 5 * time.Millisecond
-	clusterPollTimeout = 20 * time.Millisecond
-	defer func() {
-		clusterPollInterval = origInterval
-		clusterPollTimeout = origTimeout
-	}()
+	withFastClusterPollTimers(t)
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/api/v1/clusters/c-123" {

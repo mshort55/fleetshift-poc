@@ -445,15 +445,38 @@ func TestDeleteClusterIfPresent_SkipsMissingCluster(t *testing.T) {
 	}
 }
 
-func TestEnsureIAMWithRecovery_RetriesUnconfirmedFailure(t *testing.T) {
+// withFastRecoveryTimers saves and restores unconfirmedPrereqRetryInterval
+// and unconfirmedPrereqMaxAttempts, setting fast defaults (0 interval,
+// 2 max attempts) for testing.
+func withFastRecoveryTimers(t *testing.T) {
+	t.Helper()
 	origInterval := unconfirmedPrereqRetryInterval
 	origAttempts := unconfirmedPrereqMaxAttempts
 	unconfirmedPrereqRetryInterval = 0
 	unconfirmedPrereqMaxAttempts = 2
-	defer func() {
+	t.Cleanup(func() {
 		unconfirmedPrereqRetryInterval = origInterval
 		unconfirmedPrereqMaxAttempts = origAttempts
-	}()
+	})
+}
+
+// withFastProbeTimers saves and restores unconfirmedCreateProbeInterval
+// and unconfirmedCreateProbeTimeout, setting fast defaults (5ms interval,
+// 20ms timeout) for testing.
+func withFastProbeTimers(t *testing.T) {
+	t.Helper()
+	origInterval := unconfirmedCreateProbeInterval
+	origTimeout := unconfirmedCreateProbeTimeout
+	unconfirmedCreateProbeInterval = 5 * time.Millisecond
+	unconfirmedCreateProbeTimeout = 20 * time.Millisecond
+	t.Cleanup(func() {
+		unconfirmedCreateProbeInterval = origInterval
+		unconfirmedCreateProbeTimeout = origTimeout
+	})
+}
+
+func TestEnsureIAMWithRecovery_RetriesUnconfirmedFailure(t *testing.T) {
+	withFastRecoveryTimers(t)
 
 	infra := &fakeCleanupInfra{
 		createIAMResults: []createAttemptResult{
@@ -496,14 +519,8 @@ func TestEnsureIAMWithRecovery_RetriesUnconfirmedFailure(t *testing.T) {
 }
 
 func TestEnsureInfraWithRecovery_ReturnsErrorAfterUnconfirmedRetries(t *testing.T) {
-	origInterval := unconfirmedPrereqRetryInterval
-	origAttempts := unconfirmedPrereqMaxAttempts
-	unconfirmedPrereqRetryInterval = 0
+	withFastRecoveryTimers(t)
 	unconfirmedPrereqMaxAttempts = 3
-	defer func() {
-		unconfirmedPrereqRetryInterval = origInterval
-		unconfirmedPrereqMaxAttempts = origAttempts
-	}()
 
 	infra := &fakeCleanupInfra{
 		createInfraResults: []createAttemptResult{
@@ -537,14 +554,8 @@ func TestEnsureInfraWithRecovery_ReturnsErrorAfterUnconfirmedRetries(t *testing.
 }
 
 func TestRecoverFromUnconfirmedCreate_AdoptsClusterWhenItAppears(t *testing.T) {
-	origInterval := unconfirmedCreateProbeInterval
-	origTimeout := unconfirmedCreateProbeTimeout
-	unconfirmedCreateProbeInterval = 5 * time.Millisecond
+	withFastProbeTimers(t)
 	unconfirmedCreateProbeTimeout = 25 * time.Millisecond
-	defer func() {
-		unconfirmedCreateProbeInterval = origInterval
-		unconfirmedCreateProbeTimeout = origTimeout
-	}()
 
 	client := &fakeClusterResolveClient{
 		results: []resolveResult{
@@ -618,20 +629,8 @@ func TestRecoverFromUnconfirmedCreate_AdoptsClusterWhenItAppears(t *testing.T) {
 }
 
 func TestRecoverFromUnconfirmedCreate_ReturnsErrorWithoutCleanupWhenReensureFails(t *testing.T) {
-	origInterval := unconfirmedCreateProbeInterval
-	origTimeout := unconfirmedCreateProbeTimeout
-	origPrereqInterval := unconfirmedPrereqRetryInterval
-	origPrereqAttempts := unconfirmedPrereqMaxAttempts
-	unconfirmedCreateProbeInterval = 5 * time.Millisecond
-	unconfirmedCreateProbeTimeout = 20 * time.Millisecond
-	unconfirmedPrereqRetryInterval = 0
-	unconfirmedPrereqMaxAttempts = 2
-	defer func() {
-		unconfirmedCreateProbeInterval = origInterval
-		unconfirmedCreateProbeTimeout = origTimeout
-		unconfirmedPrereqRetryInterval = origPrereqInterval
-		unconfirmedPrereqMaxAttempts = origPrereqAttempts
-	}()
+	withFastProbeTimers(t)
+	withFastRecoveryTimers(t)
 
 	client := &fakeClusterResolveClient{
 		results: []resolveResult{
@@ -673,14 +672,7 @@ func TestRecoverFromUnconfirmedCreate_ReturnsErrorWithoutCleanupWhenReensureFail
 }
 
 func TestRecoverFromUnconfirmedCreate_CleansUpAfterTimeout(t *testing.T) {
-	origInterval := unconfirmedCreateProbeInterval
-	origTimeout := unconfirmedCreateProbeTimeout
-	unconfirmedCreateProbeInterval = 5 * time.Millisecond
-	unconfirmedCreateProbeTimeout = 20 * time.Millisecond
-	defer func() {
-		unconfirmedCreateProbeInterval = origInterval
-		unconfirmedCreateProbeTimeout = origTimeout
-	}()
+	withFastProbeTimers(t)
 
 	client := &fakeClusterResolveClient{
 		results: []resolveResult{
@@ -717,14 +709,7 @@ func TestRecoverFromUnconfirmedCreate_CleansUpAfterTimeout(t *testing.T) {
 }
 
 func TestRecoverFromUnconfirmedCreate_SkipsCleanupWhenProbeFails(t *testing.T) {
-	origInterval := unconfirmedCreateProbeInterval
-	origTimeout := unconfirmedCreateProbeTimeout
-	unconfirmedCreateProbeInterval = 5 * time.Millisecond
-	unconfirmedCreateProbeTimeout = 20 * time.Millisecond
-	defer func() {
-		unconfirmedCreateProbeInterval = origInterval
-		unconfirmedCreateProbeTimeout = origTimeout
-	}()
+	withFastProbeTimers(t)
 
 	client := &fakeClusterResolveClient{
 		results: []resolveResult{

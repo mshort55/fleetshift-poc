@@ -2,7 +2,6 @@ package gcphcp
 
 import (
 	"context"
-	"crypto"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/sha256"
@@ -17,7 +16,6 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
-	"regexp"
 	"strings"
 	"time"
 )
@@ -56,8 +54,6 @@ var (
 
 // ClusterKeypair holds an RSA keypair for cluster authentication.
 type ClusterKeypair struct {
-	// PrivateKey is the raw private key
-	PrivateKey crypto.PrivateKey
 	// PrivateKeyPEMBase64 is the base64-encoded PEM representation (sent to CLS API)
 	PrivateKeyPEMBase64 string
 	// JWKSJSON is the JWKS JSON representation (written to temp file for hypershift)
@@ -90,7 +86,6 @@ func GenerateClusterKeypair() (ClusterKeypair, error) {
 	}
 
 	return ClusterKeypair{
-		PrivateKey:          privateKey,
 		PrivateKeyPEMBase64: pemBase64,
 		JWKSJSON:            jwksJSON,
 	}, nil
@@ -112,8 +107,8 @@ func generateJWKS(privateKey *rsa.PrivateKey) ([]byte, error) {
 	n := base64.RawURLEncoding.EncodeToString(publicKey.N.Bytes())
 	e := base64.RawURLEncoding.EncodeToString(big.NewInt(int64(publicKey.E)).Bytes())
 
-	jwks := map[string]interface{}{
-		"keys": []map[string]interface{}{
+	jwks := map[string]any{
+		"keys": []map[string]any{
 			{
 				"kty": "RSA",
 				"use": "sig",
@@ -131,26 +126,6 @@ func generateJWKS(privateKey *rsa.PrivateKey) ([]byte, error) {
 	}
 
 	return jwksJSON, nil
-}
-
-// ValidateInfraID validates that an infrastructure ID meets GCP requirements.
-// Must be max 15 characters, lowercase, start with a letter, and contain only letters, digits, and hyphens.
-func ValidateInfraID(id string) error {
-	if id == "" {
-		return fmt.Errorf("infra ID cannot be empty")
-	}
-	if len(id) > 15 {
-		return fmt.Errorf("infra ID must be at most 15 characters, got %d", len(id))
-	}
-	// Must start with lowercase letter, followed by lowercase letters, digits, or hyphens
-	matched, err := regexp.MatchString(`^[a-z][-a-z0-9]*$`, id)
-	if err != nil {
-		return fmt.Errorf("failed to validate infra ID: %w", err)
-	}
-	if !matched {
-		return fmt.Errorf("infra ID must start with a lowercase letter and contain only lowercase letters, digits, and hyphens")
-	}
-	return nil
 }
 
 // InfraRunner wraps the hypershift CLI for infrastructure operations.
@@ -307,7 +282,7 @@ func (r *InfraRunner) WaitForPSCCleanup(
 		return nil
 	}
 
-	emitProgress(progress, ctx, "Waiting for PSC endpoint cleanup")
+	progress.Info(ctx, "Waiting for PSC endpoint cleanup")
 
 	for {
 		select {
@@ -328,7 +303,7 @@ func (r *InfraRunner) WaitForPSCCleanup(
 				return nil
 			}
 
-			emitProgress(progress, ctx, "Waiting for PSC endpoint cleanup")
+			progress.Info(ctx, "Waiting for PSC endpoint cleanup")
 		}
 	}
 }

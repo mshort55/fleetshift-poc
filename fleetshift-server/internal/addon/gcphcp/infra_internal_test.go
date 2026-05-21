@@ -64,17 +64,25 @@ func (f *fakePSCResourceLookup) AddressExists(
 	return f.addressResults[idx], nil
 }
 
-func TestWaitForPSCCleanup_PollsUntilEndpointArtifactsDisappear(t *testing.T) {
+// withFastPSCCleanupTimers saves and restores newPSCResourceLookup,
+// pscCleanupPollInterval, and pscCleanupWaitTimeout, setting fast
+// defaults (1ms interval, 25ms timeout) for testing.
+func withFastPSCCleanupTimers(t *testing.T) {
+	t.Helper()
 	origLookup := newPSCResourceLookup
 	origInterval := pscCleanupPollInterval
 	origTimeout := pscCleanupWaitTimeout
 	pscCleanupPollInterval = time.Millisecond
 	pscCleanupWaitTimeout = 25 * time.Millisecond
-	defer func() {
+	t.Cleanup(func() {
 		newPSCResourceLookup = origLookup
 		pscCleanupPollInterval = origInterval
 		pscCleanupWaitTimeout = origTimeout
-	}()
+	})
+}
+
+func TestWaitForPSCCleanup_PollsUntilEndpointArtifactsDisappear(t *testing.T) {
+	withFastPSCCleanupTimers(t)
 
 	lookup := &fakePSCResourceLookup{
 		forwardingRuleResults: []bool{true, false},
@@ -116,16 +124,7 @@ func TestWaitForPSCCleanup_PollsUntilEndpointArtifactsDisappear(t *testing.T) {
 }
 
 func TestWaitForPSCCleanup_EmitsProgressWhileArtifactsRemain(t *testing.T) {
-	origLookup := newPSCResourceLookup
-	origInterval := pscCleanupPollInterval
-	origTimeout := pscCleanupWaitTimeout
-	pscCleanupPollInterval = time.Millisecond
-	pscCleanupWaitTimeout = 25 * time.Millisecond
-	defer func() {
-		newPSCResourceLookup = origLookup
-		pscCleanupPollInterval = origInterval
-		pscCleanupWaitTimeout = origTimeout
-	}()
+	withFastPSCCleanupTimers(t)
 
 	newPSCResourceLookup = func(_ context.Context, _ string) (pscResourceLookup, error) {
 		return &fakePSCResourceLookup{
@@ -159,16 +158,8 @@ func TestWaitForPSCCleanup_EmitsProgressWhileArtifactsRemain(t *testing.T) {
 }
 
 func TestWaitForPSCCleanup_TimesOutWhenArtifactsRemain(t *testing.T) {
-	origLookup := newPSCResourceLookup
-	origInterval := pscCleanupPollInterval
-	origTimeout := pscCleanupWaitTimeout
-	pscCleanupPollInterval = time.Millisecond
+	withFastPSCCleanupTimers(t)
 	pscCleanupWaitTimeout = 5 * time.Millisecond
-	defer func() {
-		newPSCResourceLookup = origLookup
-		pscCleanupPollInterval = origInterval
-		pscCleanupWaitTimeout = origTimeout
-	}()
 
 	newPSCResourceLookup = func(_ context.Context, _ string) (pscResourceLookup, error) {
 		return &fakePSCResourceLookup{

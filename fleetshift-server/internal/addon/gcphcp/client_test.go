@@ -12,6 +12,14 @@ import (
 	"github.com/fleetshift/fleetshift-poc/fleetshift-server/internal/addon/gcphcp"
 )
 
+// newTestCLSClient creates an httptest.Server with the given handler and returns
+// a CLSClient pointed at it. The caller must defer server.Close().
+func newTestCLSClient(t *testing.T, handler http.HandlerFunc) (*gcphcp.CLSClient, *httptest.Server) {
+	t.Helper()
+	server := httptest.NewServer(handler)
+	return gcphcp.NewCLSClient(server.URL, "token", "email@example.com", nil), server
+}
+
 func TestCLSClient_CreateCluster(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
@@ -49,7 +57,7 @@ func TestCLSClient_CreateCluster(t *testing.T) {
 }
 
 func TestCLSClient_GetCluster(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	client, server := newTestCLSClient(t, func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			t.Errorf("expected GET, got %s", r.Method)
 		}
@@ -63,10 +71,9 @@ func TestCLSClient_GetCluster(t *testing.T) {
 				"phase": "Ready",
 			},
 		})
-	}))
+	})
 	defer server.Close()
 
-	client := gcphcp.NewCLSClient(server.URL, "token", "email@example.com", nil)
 	result, err := client.GetCluster(context.Background(), "c-123")
 	if err != nil {
 		t.Fatalf("GetCluster failed: %v", err)
@@ -78,7 +85,7 @@ func TestCLSClient_GetCluster(t *testing.T) {
 }
 
 func TestCLSClient_UpdateCluster(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	client, server := newTestCLSClient(t, func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPut {
 			t.Errorf("expected PUT, got %s", r.Method)
 		}
@@ -92,10 +99,9 @@ func TestCLSClient_UpdateCluster(t *testing.T) {
 		}
 
 		json.NewEncoder(w).Encode(map[string]string{"id": "c-123", "name": "test-cluster"})
-	}))
+	})
 	defer server.Close()
 
-	client := gcphcp.NewCLSClient(server.URL, "token", "email@example.com", nil)
 	result, err := client.UpdateCluster(context.Background(), "c-123", map[string]any{"name": "test-cluster"})
 	if err != nil {
 		t.Fatalf("UpdateCluster failed: %v", err)
@@ -106,7 +112,7 @@ func TestCLSClient_UpdateCluster(t *testing.T) {
 }
 
 func TestCLSClient_DeleteCluster(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	client, server := newTestCLSClient(t, func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodDelete {
 			t.Errorf("expected DELETE, got %s", r.Method)
 		}
@@ -117,10 +123,9 @@ func TestCLSClient_DeleteCluster(t *testing.T) {
 			t.Error("expected force=true query param")
 		}
 		w.WriteHeader(http.StatusOK)
-	}))
+	})
 	defer server.Close()
 
-	client := gcphcp.NewCLSClient(server.URL, "token", "email@example.com", nil)
 	err := client.DeleteCluster(context.Background(), "c-123")
 	if err != nil {
 		t.Fatalf("DeleteCluster failed: %v", err)
@@ -128,16 +133,15 @@ func TestCLSClient_DeleteCluster(t *testing.T) {
 }
 
 func TestCLSClient_CreateNodepool(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	client, server := newTestCLSClient(t, func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/api/v1/nodepools" {
 			t.Errorf("unexpected path %q", r.URL.Path)
 		}
 		w.WriteHeader(http.StatusCreated)
 		json.NewEncoder(w).Encode(map[string]string{"id": "np-1"})
-	}))
+	})
 	defer server.Close()
 
-	client := gcphcp.NewCLSClient(server.URL, "token", "email@example.com", nil)
 	result, err := client.CreateNodepool(context.Background(), map[string]any{"name": "np"})
 	if err != nil {
 		t.Fatalf("CreateNodepool failed: %v", err)
@@ -148,7 +152,7 @@ func TestCLSClient_CreateNodepool(t *testing.T) {
 }
 
 func TestCLSClient_UpdateNodepool(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	client, server := newTestCLSClient(t, func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPut {
 			t.Errorf("expected PUT, got %s", r.Method)
 		}
@@ -162,10 +166,9 @@ func TestCLSClient_UpdateNodepool(t *testing.T) {
 		}
 
 		json.NewEncoder(w).Encode(map[string]string{"id": "np-123"})
-	}))
+	})
 	defer server.Close()
 
-	client := gcphcp.NewCLSClient(server.URL, "token", "email@example.com", nil)
 	result, err := client.UpdateNodepool(context.Background(), "np-123", map[string]any{"name": "worker-a"})
 	if err != nil {
 		t.Fatalf("UpdateNodepool failed: %v", err)
@@ -176,7 +179,7 @@ func TestCLSClient_UpdateNodepool(t *testing.T) {
 }
 
 func TestCLSClient_DeleteNodepool(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	client, server := newTestCLSClient(t, func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodDelete {
 			t.Errorf("expected DELETE, got %s", r.Method)
 		}
@@ -184,17 +187,16 @@ func TestCLSClient_DeleteNodepool(t *testing.T) {
 			t.Errorf("unexpected path %q", r.URL.Path)
 		}
 		w.WriteHeader(http.StatusOK)
-	}))
+	})
 	defer server.Close()
 
-	client := gcphcp.NewCLSClient(server.URL, "token", "email@example.com", nil)
 	if err := client.DeleteNodepool(context.Background(), "np-123"); err != nil {
 		t.Fatalf("DeleteNodepool failed: %v", err)
 	}
 }
 
 func TestCLSClient_GetClusterStatus(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	client, server := newTestCLSClient(t, func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/api/v1/clusters/c-123/status" {
 			t.Errorf("unexpected path %q", r.URL.Path)
 		}
@@ -212,10 +214,9 @@ func TestCLSClient_GetClusterStatus(t *testing.T) {
 				},
 			},
 		})
-	}))
+	})
 	defer server.Close()
 
-	client := gcphcp.NewCLSClient(server.URL, "token", "email@example.com", nil)
 	result, err := client.GetClusterStatus(context.Background(), "c-123")
 	if err != nil {
 		t.Fatalf("GetClusterStatus failed: %v", err)
@@ -226,7 +227,7 @@ func TestCLSClient_GetClusterStatus(t *testing.T) {
 }
 
 func TestCLSClient_GetNodepoolStatus(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	client, server := newTestCLSClient(t, func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/api/v1/nodepools/np-123/status" {
 			t.Errorf("unexpected path %q", r.URL.Path)
 		}
@@ -237,10 +238,9 @@ func TestCLSClient_GetNodepoolStatus(t *testing.T) {
 				"message": "all replicas available",
 			},
 		})
-	}))
+	})
 	defer server.Close()
 
-	client := gcphcp.NewCLSClient(server.URL, "token", "email@example.com", nil)
 	result, err := client.GetNodepoolStatus(context.Background(), "np-123")
 	if err != nil {
 		t.Fatalf("GetNodepoolStatus failed: %v", err)
@@ -252,16 +252,15 @@ func TestCLSClient_GetNodepoolStatus(t *testing.T) {
 }
 
 func TestCLSClient_ListClusters(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	client, server := newTestCLSClient(t, func(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(map[string]any{
 			"clusters": []map[string]any{
 				{"id": "c-1", "name": "cluster-a"},
 			},
 		})
-	}))
+	})
 	defer server.Close()
 
-	client := gcphcp.NewCLSClient(server.URL, "token", "email@example.com", nil)
 	clusters, err := client.ListClusters(context.Background())
 	if err != nil {
 		t.Fatalf("ListClusters failed: %v", err)
@@ -275,16 +274,15 @@ func TestCLSClient_ListClusters(t *testing.T) {
 }
 
 func TestCLSClient_ListClusters_RejectsMissingClustersField(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	client, server := newTestCLSClient(t, func(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(map[string]any{
 			"items": []map[string]any{
 				{"id": "c-1", "name": "cluster-a"},
 			},
 		})
-	}))
+	})
 	defer server.Close()
 
-	client := gcphcp.NewCLSClient(server.URL, "token", "email@example.com", nil)
 	_, err := client.ListClusters(context.Background())
 	if err == nil {
 		t.Fatal("expected missing clusters field error")
@@ -295,7 +293,7 @@ func TestCLSClient_ListClusters_RejectsMissingClustersField(t *testing.T) {
 }
 
 func TestCLSClient_ListNodepools(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	client, server := newTestCLSClient(t, func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			t.Errorf("expected GET, got %s", r.Method)
 		}
@@ -310,10 +308,9 @@ func TestCLSClient_ListNodepools(t *testing.T) {
 				{"id": "np-1", "name": "worker-a"},
 			},
 		})
-	}))
+	})
 	defer server.Close()
 
-	client := gcphcp.NewCLSClient(server.URL, "token", "email@example.com", nil)
 	nodepools, err := client.ListNodepools(context.Background(), "c-123")
 	if err != nil {
 		t.Fatalf("ListNodepools failed: %v", err)
@@ -327,17 +324,16 @@ func TestCLSClient_ListNodepools(t *testing.T) {
 }
 
 func TestCLSClient_ListNodepools_TreatsNullAsEmptyList(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	client, server := newTestCLSClient(t, func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Query().Get("clusterId") != "c-123" {
 			t.Errorf("unexpected clusterId query %q", r.URL.Query().Get("clusterId"))
 		}
 		json.NewEncoder(w).Encode(map[string]any{
 			"nodepools": nil,
 		})
-	}))
+	})
 	defer server.Close()
 
-	client := gcphcp.NewCLSClient(server.URL, "token", "email@example.com", nil)
 	nodepools, err := client.ListNodepools(context.Background(), "c-123")
 	if err != nil {
 		t.Fatalf("ListNodepools failed: %v", err)
@@ -348,7 +344,7 @@ func TestCLSClient_ListNodepools_TreatsNullAsEmptyList(t *testing.T) {
 }
 
 func TestCLSClient_ListNodepools_RejectsMissingNodepoolsField(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	client, server := newTestCLSClient(t, func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Query().Get("clusterId") != "c-123" {
 			t.Errorf("unexpected clusterId query %q", r.URL.Query().Get("clusterId"))
 		}
@@ -357,10 +353,9 @@ func TestCLSClient_ListNodepools_RejectsMissingNodepoolsField(t *testing.T) {
 				{"id": "np-1", "name": "worker-a"},
 			},
 		})
-	}))
+	})
 	defer server.Close()
 
-	client := gcphcp.NewCLSClient(server.URL, "token", "email@example.com", nil)
 	_, err := client.ListNodepools(context.Background(), "c-123")
 	if err == nil {
 		t.Fatal("expected missing nodepools field error")
@@ -370,83 +365,53 @@ func TestCLSClient_ListNodepools_RejectsMissingNodepoolsField(t *testing.T) {
 	}
 }
 
-func TestCLSClient_HTTP401_ReturnsAuthExpiredError(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusUnauthorized)
-		w.Write([]byte(`{"error":"token expired"}`))
-	}))
-	defer server.Close()
+func TestCLSClient_AuthExpiredErrorClassification(t *testing.T) {
+	tests := []struct {
+		name           string
+		statusCode     int
+		body           string
+		wantAuthExpired bool
+	}{
+		{"HTTP401_ReturnsAuthExpiredError", http.StatusUnauthorized, `{"error":"token expired"}`, true},
+		{"HTTP403_DoesNotReturnAuthExpiredError", http.StatusForbidden, `{"error":"access denied"}`, false},
+		{"HTTP500_DoesNotReturnAuthExpiredError", http.StatusInternalServerError, `internal error`, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			client, server := newTestCLSClient(t, func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(tt.statusCode)
+				w.Write([]byte(tt.body))
+			})
+			defer server.Close()
 
-	client := gcphcp.NewCLSClient(server.URL, "expired-token", "email@example.com", nil)
-	_, err := client.GetCluster(context.Background(), "c-123")
-	if err == nil {
-		t.Fatal("expected error on 401")
-	}
-	if !gcphcp.IsAuthExpiredError(err) {
-		t.Fatalf("expected authExpiredError, got %T: %v", err, err)
-	}
-	// The underlying clsHTTPError should still be accessible
-	var httpErr *gcphcp.CLSHTTPError
-	if !errors.As(err, &httpErr) {
-		t.Fatal("expected clsHTTPError to be unwrappable from authExpiredError")
-	}
-	if httpErr.StatusCode != 401 {
-		t.Fatalf("status code = %d, want 401", httpErr.StatusCode)
-	}
-}
-
-func TestCLSClient_HTTP403_DoesNotReturnAuthExpiredError(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusForbidden)
-		w.Write([]byte(`{"error":"access denied"}`))
-	}))
-	defer server.Close()
-
-	client := gcphcp.NewCLSClient(server.URL, "valid-token", "email@example.com", nil)
-	_, err := client.GetCluster(context.Background(), "c-123")
-	if err == nil {
-		t.Fatal("expected error on 403")
-	}
-	if gcphcp.IsAuthExpiredError(err) {
-		t.Fatal("403 should NOT be classified as authExpiredError")
-	}
-	var httpErr *gcphcp.CLSHTTPError
-	if !errors.As(err, &httpErr) {
-		t.Fatal("expected clsHTTPError")
-	}
-	if httpErr.StatusCode != 403 {
-		t.Fatalf("status code = %d, want 403", httpErr.StatusCode)
-	}
-}
-
-func TestCLSClient_HTTP500_DoesNotReturnAuthExpiredError(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusInternalServerError)
-		w.Write([]byte(`internal error`))
-	}))
-	defer server.Close()
-
-	client := gcphcp.NewCLSClient(server.URL, "token", "email@example.com", nil)
-	_, err := client.GetCluster(context.Background(), "c-123")
-	if err == nil {
-		t.Fatal("expected error on 500")
-	}
-	if gcphcp.IsAuthExpiredError(err) {
-		t.Fatal("500 should NOT be classified as authExpiredError")
+			_, err := client.GetCluster(context.Background(), "c-123")
+			if err == nil {
+				t.Fatalf("expected error on %d", tt.statusCode)
+			}
+			if got := gcphcp.IsAuthExpiredError(err); got != tt.wantAuthExpired {
+				t.Fatalf("IsAuthExpiredError() = %v, want %v (err: %v)", got, tt.wantAuthExpired, err)
+			}
+			var httpErr *gcphcp.CLSHTTPError
+			if !errors.As(err, &httpErr) {
+				t.Fatal("expected clsHTTPError to be unwrappable")
+			}
+			if httpErr.StatusCode != tt.statusCode {
+				t.Fatalf("status code = %d, want %d", httpErr.StatusCode, tt.statusCode)
+			}
+		})
 	}
 }
 
 func TestCLSClient_ResolveClusterID(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	client, server := newTestCLSClient(t, func(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(map[string]any{
 			"clusters": []map[string]any{
 				{"id": "c-1", "name": "cluster-a"},
 			},
 		})
-	}))
+	})
 	defer server.Close()
 
-	client := gcphcp.NewCLSClient(server.URL, "token", "email@example.com", nil)
 	clusterID, err := client.ResolveClusterID(context.Background(), "cluster-a")
 	if err != nil {
 		t.Fatalf("ResolveClusterID failed: %v", err)
@@ -457,16 +422,15 @@ func TestCLSClient_ResolveClusterID(t *testing.T) {
 }
 
 func TestCLSClient_ResolveClusterID_NotFound(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	client, server := newTestCLSClient(t, func(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(map[string]any{
 			"clusters": []map[string]any{
 				{"id": "c-1", "name": "cluster-a"},
 			},
 		})
-	}))
+	})
 	defer server.Close()
 
-	client := gcphcp.NewCLSClient(server.URL, "token", "email@example.com", nil)
 	_, err := client.ResolveClusterID(context.Background(), "cluster-b")
 	if err == nil {
 		t.Fatal("expected not found error")
@@ -477,16 +441,15 @@ func TestCLSClient_ResolveClusterID_NotFound(t *testing.T) {
 }
 
 func TestCLSClient_ResolveClusterID_DoesNotTreatMalformedListAsNotFound(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	client, server := newTestCLSClient(t, func(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(map[string]any{
 			"items": []map[string]any{
 				{"id": "c-1", "name": "cluster-a"},
 			},
 		})
-	}))
+	})
 	defer server.Close()
 
-	client := gcphcp.NewCLSClient(server.URL, "token", "email@example.com", nil)
 	_, err := client.ResolveClusterID(context.Background(), "cluster-a")
 	if err == nil {
 		t.Fatal("expected malformed list error")

@@ -1,7 +1,6 @@
 package gcphcp
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -13,6 +12,18 @@ type HypershiftWorkspace struct {
 	Env      []string
 	JWKSPath string
 	tempDir  string
+}
+
+// CleanupOnReturn returns a defer-friendly function that joins any cleanup
+// error with the caller's return error.
+func (w *HypershiftWorkspace) CleanupOnReturn(retErr *error) {
+	if cleanupErr := w.Cleanup(); cleanupErr != nil {
+		if *retErr == nil {
+			*retErr = fmt.Errorf("cleanup hypershift workspace: %w", cleanupErr)
+		} else {
+			*retErr = errors.Join(*retErr, fmt.Errorf("cleanup hypershift workspace: %w", cleanupErr))
+		}
+	}
 }
 
 // Cleanup removes the temporary workspace directory and every credential file in it.
@@ -105,25 +116,7 @@ func prepareHypershiftWorkspace(
 }
 
 func buildWorkforceCredentialConfig(target TargetConfig, subjectTokenPath string) ([]byte, error) {
-	audience := fmt.Sprintf("//iam.googleapis.com/locations/global/workforcePools/%s/providers/%s",
-		target.WorkforcePool, target.WorkforceProvider)
-
-	credConfig := map[string]any{
-		"type":               "external_account",
-		"audience":           audience,
-		"subject_token_type": "urn:ietf:params:oauth:token-type:jwt",
-		"token_url":          "https://sts.googleapis.com/v1/token",
-		"credential_source": map[string]any{
-			"file": subjectTokenPath,
-		},
-		"workforce_pool_user_project": target.GCPProject,
-	}
-
-	credConfigJSON, err := json.MarshalIndent(credConfig, "", "  ")
-	if err != nil {
-		return nil, fmt.Errorf("marshal credential config: %w", err)
-	}
-	return credConfigJSON, nil
+	return buildCredentialConfig(target, subjectTokenPath, false, true)
 }
 
 func buildHypershiftEnvironment(

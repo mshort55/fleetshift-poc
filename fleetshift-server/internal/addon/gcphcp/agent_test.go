@@ -41,15 +41,19 @@ func (r *recordingReporter) ListActiveDeliveries(_ context.Context, _ []domain.T
 	return nil, nil
 }
 
-func TestAgent_Deliver_RejectsMissingName(t *testing.T) {
-	reporter := newRecordingReporter()
-	agent := gcphcp.NewAgent(gcphcp.AgentDeps{
+func newTestAgent(reporter domain.DeliveryReporter) *gcphcp.Agent {
+	return gcphcp.NewAgent(gcphcp.AgentDeps{
 		Gateway: gcphcp.GatewayConfig{
 			URL:      "https://test-gateway",
 			Audience: "test-audience",
 		},
 		Reporter: reporter,
 	})
+}
+
+func TestAgent_Deliver_RejectsMissingName(t *testing.T) {
+	reporter := newRecordingReporter()
+	agent := newTestAgent(reporter)
 
 	manifest := domain.Manifest{
 		ResourceType: gcphcp.ClusterResourceType,
@@ -84,13 +88,7 @@ func TestAgent_Deliver_RejectsMissingName(t *testing.T) {
 
 func TestAgent_Deliver_TrustBundleOnly(t *testing.T) {
 	reporter := newRecordingReporter()
-	agent := gcphcp.NewAgent(gcphcp.AgentDeps{
-		Gateway: gcphcp.GatewayConfig{
-			URL:      "https://test-gateway",
-			Audience: "test-audience",
-		},
-		Reporter: reporter,
-	})
+	agent := newTestAgent(reporter)
 
 	trustBundle := domain.TrustBundleEntry{
 		IssuerURL:          "https://test-issuer",
@@ -140,13 +138,7 @@ func TestAgent_Deliver_TrustBundleOnly(t *testing.T) {
 
 func TestAgent_Deliver_TrustBundleOnly_CompletesEvenIfRequestContextCanceled(t *testing.T) {
 	reporter := newRecordingReporter()
-	agent := gcphcp.NewAgent(gcphcp.AgentDeps{
-		Gateway: gcphcp.GatewayConfig{
-			URL:      "https://test-gateway",
-			Audience: "test-audience",
-		},
-		Reporter: reporter,
-	})
+	agent := newTestAgent(reporter)
 
 	trustBundle := domain.TrustBundleEntry{
 		IssuerURL:          "https://test-issuer",
@@ -189,13 +181,7 @@ func TestAgent_Deliver_TrustBundleOnly_CompletesEvenIfRequestContextCanceled(t *
 
 func TestAgent_Deliver_TrustBundleOnly_ReplacesExistingIssuerEntry(t *testing.T) {
 	reporter := newRecordingReporter()
-	agent := gcphcp.NewAgent(gcphcp.AgentDeps{
-		Gateway: gcphcp.GatewayConfig{
-			URL:      "https://test-gateway",
-			Audience: "test-audience",
-		},
-		Reporter: reporter,
-	})
+	agent := newTestAgent(reporter)
 
 	deliverTrustBundle(t, agent, reporter, domain.TrustBundleEntry{
 		IssuerURL:          "https://issuer.example.com",
@@ -222,13 +208,7 @@ func TestAgent_Deliver_TrustBundleOnly_ReplacesExistingIssuerEntry(t *testing.T)
 
 func TestAgent_TrustBundles_ReturnsEntriesSortedByIssuer(t *testing.T) {
 	reporter := newRecordingReporter()
-	agent := gcphcp.NewAgent(gcphcp.AgentDeps{
-		Gateway: gcphcp.GatewayConfig{
-			URL:      "https://test-gateway",
-			Audience: "test-audience",
-		},
-		Reporter: reporter,
-	})
+	agent := newTestAgent(reporter)
 
 	deliverTrustBundle(t, agent, reporter, domain.TrustBundleEntry{
 		IssuerURL:          "https://issuer-b.example.com",
@@ -255,13 +235,7 @@ func TestAgent_TrustBundles_ReturnsEntriesSortedByIssuer(t *testing.T) {
 
 func TestAgent_Remove_TrustBundle_RemovesStoredIssuerEntry(t *testing.T) {
 	reporter := newRecordingReporter()
-	agent := gcphcp.NewAgent(gcphcp.AgentDeps{
-		Gateway: gcphcp.GatewayConfig{
-			URL:      "https://test-gateway",
-			Audience: "test-audience",
-		},
-		Reporter: reporter,
-	})
+	agent := newTestAgent(reporter)
 
 	entry := domain.TrustBundleEntry{
 		IssuerURL:          "https://issuer.example.com",
@@ -290,13 +264,7 @@ func TestAgent_Remove_TrustBundle_RemovesStoredIssuerEntry(t *testing.T) {
 
 func TestAgent_Deliver_RejectsStaleGeneration(t *testing.T) {
 	reporter := newRecordingReporter()
-	agent := gcphcp.NewAgent(gcphcp.AgentDeps{
-		Gateway: gcphcp.GatewayConfig{
-			URL:      "https://test-gateway",
-			Audience: "test-audience",
-		},
-		Reporter: reporter,
-	})
+	agent := newTestAgent(reporter)
 
 	spec := validClusterSpecJSON(t)
 	manifest := domain.Manifest{
@@ -355,13 +323,7 @@ func TestAgent_Deliver_RejectsStaleGeneration(t *testing.T) {
 
 func TestAgent_Remove_RejectsStaleGeneration(t *testing.T) {
 	reporter := newRecordingReporter()
-	agent := gcphcp.NewAgent(gcphcp.AgentDeps{
-		Gateway: gcphcp.GatewayConfig{
-			URL:      "https://test-gateway",
-			Audience: "test-audience",
-		},
-		Reporter: reporter,
-	})
+	agent := newTestAgent(reporter)
 
 	spec := validClusterSpecJSON(t)
 	manifest := domain.Manifest{

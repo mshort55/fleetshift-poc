@@ -1,7 +1,6 @@
 package gcphcp_test
 
 import (
-	"crypto/rsa"
 	"encoding/base64"
 	"encoding/json"
 	"strings"
@@ -15,15 +14,6 @@ func TestGenerateClusterKeypair(t *testing.T) {
 		kp, err := gcphcp.GenerateClusterKeypair()
 		if err != nil {
 			t.Fatalf("GenerateClusterKeypair() error = %v", err)
-		}
-
-		// Verify private key is RSA and 4096 bits
-		rsaKey, ok := kp.PrivateKey.(*rsa.PrivateKey)
-		if !ok {
-			t.Fatalf("PrivateKey is not *rsa.PrivateKey, got %T", kp.PrivateKey)
-		}
-		if rsaKey.N.BitLen() != 4096 {
-			t.Errorf("expected 4096-bit key, got %d bits", rsaKey.N.BitLen())
 		}
 
 		// Verify PEM base64 is non-empty and valid
@@ -43,7 +33,7 @@ func TestGenerateClusterKeypair(t *testing.T) {
 			t.Error("JWKSJSON is empty")
 		}
 		var jwks struct {
-			Keys []map[string]interface{} `json:"keys"`
+			Keys []map[string]any `json:"keys"`
 		}
 		if err := json.Unmarshal(kp.JWKSJSON, &jwks); err != nil {
 			t.Errorf("JWKSJSON is not valid JSON: %v", err)
@@ -91,84 +81,6 @@ func TestGenerateClusterKeypair(t *testing.T) {
 			t.Error("generated identical JWKS")
 		}
 	})
-}
-
-func TestValidateInfraID(t *testing.T) {
-	tests := []struct {
-		name    string
-		infraID string
-		wantErr bool
-	}{
-		{
-			name:    "valid lowercase",
-			infraID: "my-cluster-123",
-			wantErr: false,
-		},
-		{
-			name:    "valid single char",
-			infraID: "a",
-			wantErr: false,
-		},
-		{
-			name:    "valid with hyphens",
-			infraID: "abc-def-ghi",
-			wantErr: false,
-		},
-		{
-			name:    "valid max length (15 chars)",
-			infraID: "a12345678901234",
-			wantErr: false,
-		},
-		{
-			name:    "empty",
-			infraID: "",
-			wantErr: true,
-		},
-		{
-			name:    "too long (16 chars)",
-			infraID: "a123456789012345",
-			wantErr: true,
-		},
-		{
-			name:    "contains uppercase",
-			infraID: "My-Cluster",
-			wantErr: true,
-		},
-		{
-			name:    "starts with digit",
-			infraID: "1cluster",
-			wantErr: true,
-		},
-		{
-			name:    "starts with hyphen",
-			infraID: "-cluster",
-			wantErr: true,
-		},
-		{
-			name:    "contains underscore",
-			infraID: "my_cluster",
-			wantErr: true,
-		},
-		{
-			name:    "contains space",
-			infraID: "my cluster",
-			wantErr: true,
-		},
-		{
-			name:    "contains special char",
-			infraID: "my-cluster!",
-			wantErr: true,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			err := gcphcp.ValidateInfraID(tt.infraID)
-			if (err != nil) != tt.wantErr {
-				t.Errorf("ValidateInfraID(%q) error = %v, wantErr %v", tt.infraID, err, tt.wantErr)
-			}
-		})
-	}
 }
 
 func TestIAMConfigToWIFSpec(t *testing.T) {

@@ -68,18 +68,6 @@ type failureStatusSnapshot struct {
 	Nodepools      []failureNodepoolSnapshot `json:"nodepools,omitempty"`
 }
 
-// ParseClusterPhase extracts the status.phase field from cluster data.
-// Returns "Unknown" if the field is not found or not a string.
-func ParseClusterPhase(clusterData map[string]any) string {
-	return parseResourceStatusSummary(clusterData).Phase
-}
-
-// ParseNodepoolPhase extracts status.phase from a nodepool status response.
-// Returns "Unknown" if the field is missing or malformed.
-func ParseNodepoolPhase(nodepoolStatus map[string]any) string {
-	return parseResourceStatusSummary(nodepoolStatus).Phase
-}
-
 func parseResourceStatusSummary(resourceData map[string]any) resourceStatusSummary {
 	summary := resourceStatusSummary{
 		Phase:  "Unknown",
@@ -417,43 +405,31 @@ func PollClusterReady(ctx context.Context, client *CLSClient, clusterID string, 
 
 	timeout := time.After(clusterPollTimeout)
 
-	// Check immediately first
-	clusterData, err := client.GetCluster(ctx, clusterID)
-	if err != nil {
-		return fmt.Errorf("get cluster: %w", err)
-	}
-
-	clusterStatus := parseResourceStatusSummary(clusterData)
-	emitResourceStatusProgress(ctx, progress, "Cluster", clusterData)
-
-	if clusterStatus.Phase == "Ready" {
-		return nil
-	}
-	if clusterStatus.Phase == "Failed" {
-		return fmt.Errorf("cluster provisioning failed: %s", clusterStatus.Message)
-	}
-
-	for {
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-timeout:
-			return fmt.Errorf("timeout waiting for cluster to become ready (phase=%s)", clusterStatus.Phase)
-		case <-ticker.C:
-			clusterData, err := client.GetCluster(ctx, clusterID)
-			if err != nil {
-				return fmt.Errorf("get cluster: %w", err)
+	var clusterStatus resourceStatusSummary
+	for first := true; ; first = false {
+		if !first {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-timeout:
+				return fmt.Errorf("timeout waiting for cluster to become ready (phase=%s)", clusterStatus.Phase)
+			case <-ticker.C:
 			}
+		}
 
-			clusterStatus = parseResourceStatusSummary(clusterData)
-			emitResourceStatusProgress(ctx, progress, "Cluster", clusterData)
+		clusterData, err := client.GetCluster(ctx, clusterID)
+		if err != nil {
+			return fmt.Errorf("get cluster: %w", err)
+		}
 
-			if clusterStatus.Phase == "Ready" {
-				return nil
-			}
-			if clusterStatus.Phase == "Failed" {
-				return fmt.Errorf("cluster provisioning failed: %s", clusterStatus.Message)
-			}
+		clusterStatus = parseResourceStatusSummary(clusterData)
+		emitResourceStatusProgress(ctx, progress, "Cluster", clusterData)
+
+		if clusterStatus.Phase == "Ready" {
+			return nil
+		}
+		if clusterStatus.Phase == "Failed" {
+			return fmt.Errorf("cluster provisioning failed: %s", clusterStatus.Message)
 		}
 	}
 }
@@ -467,52 +443,27 @@ func PollClusterDeleted(ctx context.Context, client *CLSClient, clusterID string
 
 	timeout := time.After(clusterPollTimeout)
 
-	// Check immediately first
-	_, err := client.GetCluster(ctx, clusterID)
-	if err != nil {
-		if isCLSHTTPStatus(err, http.StatusNotFound) {
-			progress.Event(ctx, domain.DeliveryEvent{
-				Timestamp: time.Now(),
-				Kind:      domain.DeliveryEventProgress,
-				Message:   "Cluster deleted",
-			})
-			return nil
-		}
-		return fmt.Errorf("get cluster: %w", err)
-	}
-
-	progress.Event(ctx, domain.DeliveryEvent{
-		Timestamp: time.Now(),
-		Kind:      domain.DeliveryEventProgress,
-		Message:   "Waiting for cluster deletion",
-	})
-
-	for {
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-timeout:
-			return fmt.Errorf("timeout waiting for cluster deletion")
-		case <-ticker.C:
-			_, err := client.GetCluster(ctx, clusterID)
-			if err != nil {
-				if isCLSHTTPStatus(err, http.StatusNotFound) {
-					progress.Event(ctx, domain.DeliveryEvent{
-						Timestamp: time.Now(),
-						Kind:      domain.DeliveryEventProgress,
-						Message:   "Cluster deleted",
-					})
-					return nil
-				}
-				return fmt.Errorf("get cluster: %w", err)
+	for first := true; ; first = false {
+		if !first {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-timeout:
+				return fmt.Errorf("timeout waiting for cluster deletion")
+			case <-ticker.C:
 			}
-
-			progress.Event(ctx, domain.DeliveryEvent{
-				Timestamp: time.Now(),
-				Kind:      domain.DeliveryEventProgress,
-				Message:   "Waiting for cluster deletion",
-			})
 		}
+
+		_, err := client.GetCluster(ctx, clusterID)
+		if err != nil {
+			if isCLSHTTPStatus(err, http.StatusNotFound) {
+				progress.Info(ctx, "Cluster deleted")
+				return nil
+			}
+			return fmt.Errorf("get cluster: %w", err)
+		}
+
+		progress.Info(ctx, "Waiting for cluster deletion")
 	}
 }
 
