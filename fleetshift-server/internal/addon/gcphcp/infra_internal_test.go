@@ -294,3 +294,119 @@ func lookupHypershiftEnvVar(env []string, key string) string {
 	}
 	return ""
 }
+
+func makeUnremovableWorkspace(t *testing.T) (*HypershiftWorkspace, func()) {
+	t.Helper()
+	parentDir, err := os.MkdirTemp("", "gcphcp-cleanup-parent-*")
+	if err != nil {
+		t.Fatalf("os.MkdirTemp() error = %v", err)
+	}
+	childDir := filepath.Join(parentDir, "workspace")
+	if err := os.Mkdir(childDir, 0700); err != nil {
+		os.RemoveAll(parentDir)
+		t.Fatalf("os.Mkdir() error = %v", err)
+	}
+	protectedFile := filepath.Join(childDir, "protected.txt")
+	if err := os.WriteFile(protectedFile, []byte("data"), 0600); err != nil {
+		os.RemoveAll(parentDir)
+		t.Fatalf("os.WriteFile() error = %v", err)
+	}
+	if err := os.Chmod(childDir, 0500); err != nil {
+		os.RemoveAll(parentDir)
+		t.Fatalf("os.Chmod() error = %v", err)
+	}
+
+	cleanup := func() {
+		os.Chmod(childDir, 0700)
+		os.RemoveAll(parentDir)
+	}
+
+	return &HypershiftWorkspace{tempDir: childDir}, cleanup
+}
+
+func TestCleanupOnReturn_JoinsCleanupErrorWithExistingError(t *testing.T) {
+	if os.Getuid() == 0 {
+		t.Skip("cannot make directory unremovable as root")
+	}
+
+	workspace, cleanup := makeUnremovableWorkspace(t)
+	defer cleanup()
+
+	retErr := errors.New("original reconcile error")
+	workspace.CleanupOnReturn(&retErr)
+
+	if retErr == nil {
+		t.Fatal("expected joined error")
+	}
+	if !strings.Contains(retErr.Error(), "original reconcile error") {
+		t.Fatalf("error = %q, want original error preserved", retErr.Error())
+	}
+	if !strings.Contains(retErr.Error(), "cleanup hypershift workspace") {
+		t.Fatalf("error = %q, want cleanup error joined", retErr.Error())
+	}
+}
+
+func TestCleanupOnReturn_SetsCleanupErrorWhenRetErrNil(t *testing.T) {
+	if os.Getuid() == 0 {
+		t.Skip("cannot make directory unremovable as root")
+	}
+
+	workspace, cleanup := makeUnremovableWorkspace(t)
+	defer cleanup()
+
+	var retErr error
+	workspace.CleanupOnReturn(&retErr)
+
+	if retErr == nil {
+		t.Fatal("expected cleanup error")
+	}
+	if !strings.Contains(retErr.Error(), "cleanup hypershift workspace") {
+		t.Fatalf("error = %q, want cleanup error", retErr.Error())
+	}
+}
+
+func TestCleanupOnReturn_NoErrorWhenCleanupSucceeds(t *testing.T) {
+	tempDir, err := os.MkdirTemp("", "gcphcp-cleanup-test-*")
+	if err != nil {
+		t.Fatalf("os.MkdirTemp() error = %v", err)
+	}
+
+	workspace := &HypershiftWorkspace{tempDir: tempDir}
+
+	existingErr := errors.New("original error")
+	workspace.CleanupOnReturn(&existingErr)
+
+	if existingErr.Error() != "original error" {
+		t.Fatalf("error = %q, want original error unchanged", existingErr.Error())
+	}
+}
+
+func TestPrepareDestroyHypershiftWorkspace_CreatesWorkspaceWithoutJWKS(t *testing.T) {
+	workspace, err := PrepareDestroyHypershiftWorkspace(
+		"caller-token",
+		TargetConfig{
+			GCPProject:        "project-123",
+			WorkforcePool:     "pool-123",
+			WorkforceProvider: "provider-123",
+		},
+	)
+	if err != nil {
+		t.Fatalf("PrepareDestroyHypershiftWorkspace() error = %v", err)
+	}
+	defer workspace.Cleanup()
+
+	if workspace.JWKSPath != "" {
+		t.Fatalf("JWKSPath = %q, want empty for destroy workspace", workspace.JWKSPath)
+	}
+	if len(workspace.Env) == 0 {
+		t.Fatal("expected non-empty Env")
+	}
+
+	adcPath := lookupHypershiftEnvVar(workspace.Env, "GOOGLE_APPLICATION_CREDENTIALS")
+	if adcPath == "" {
+		t.Fatal("missing GOOGLE_APPLICATION_CREDENTIALS")
+	}
+	if _, err := os.Stat(adcPath); err != nil {
+		t.Fatalf("credential config file missing: %v", err)
+	}
+}

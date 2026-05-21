@@ -2,6 +2,7 @@ package gcphcp
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -765,7 +766,9 @@ func TestCompleteGuestRegistration_ReturnsPostProvisionRegistrationErrorAfterBoo
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/api/v1/clusters/c-123/status" {
-			t.Fatalf("unexpected path %q", r.URL.Path)
+			t.Errorf("unexpected path %q", r.URL.Path)
+			http.Error(w, "unexpected path", http.StatusInternalServerError)
+			return
 		}
 		fmt.Fprint(w, `{"controller_status":[{"conditions":[{"type":"APIServer","message":"https://guest.example:6443"}]}]}`)
 	}))
@@ -819,7 +822,9 @@ func TestCompleteGuestRegistration_RetriesUntilGuestAPIEndpointAppears(t *testin
 	statusCalls := 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/api/v1/clusters/c-123/status" {
-			t.Fatalf("unexpected path %q", r.URL.Path)
+			t.Errorf("unexpected path %q", r.URL.Path)
+			http.Error(w, "unexpected path", http.StatusInternalServerError)
+			return
 		}
 		statusCalls++
 		if statusCalls == 1 {
@@ -878,7 +883,9 @@ func TestCompleteGuestRegistration_ReturnsRetryExhaustedWhenGuestAPIEndpointNeve
 	statusCalls := 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/api/v1/clusters/c-123/status" {
-			t.Fatalf("unexpected path %q", r.URL.Path)
+			t.Errorf("unexpected path %q", r.URL.Path)
+			http.Error(w, "unexpected path", http.StatusInternalServerError)
+			return
 		}
 		statusCalls++
 		fmt.Fprint(w, `{"controller_status":[{"conditions":[{"type":"SomeOtherCondition","message":"still provisioning"}]}]}`)
@@ -1013,7 +1020,8 @@ func TestReconcilerReconcile_CleansHypershiftWorkspaceBeforeNodepoolReconcile(t 
 		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/clusters":
 			fmt.Fprint(w, `{"id":"c-123"}`)
 		default:
-			t.Fatalf("unexpected %s %s", r.Method, r.URL.String())
+			t.Errorf("unexpected %s %s", r.Method, r.URL.String())
+			http.Error(w, "unexpected request", http.StatusInternalServerError)
 		}
 	}))
 	defer server.Close()
@@ -1119,7 +1127,8 @@ func TestReconcilerDelete_WaitsForPSCCleanupBeforeBuildingHypershiftWorkspace(t 
 			w.WriteHeader(http.StatusNotFound)
 			fmt.Fprint(w, `{"error":"not found"}`)
 		default:
-			t.Fatalf("unexpected %s %s", r.Method, r.URL.String())
+			t.Errorf("unexpected %s %s", r.Method, r.URL.String())
+			http.Error(w, "unexpected request", http.StatusInternalServerError)
 		}
 	}))
 	defer server.Close()
@@ -1242,5 +1251,596 @@ func TestReconcilerDelete_UsesCallerTokenForHypershiftEnvAndWorkforceTokenForPSC
 	}
 	if infra.waitPSCWorkforceToken != "workforce-token" {
 		t.Fatalf("PSC cleanup workforce token = %q, want workforce-token", infra.waitPSCWorkforceToken)
+	}
+}
+
+func TestReconcilerReconcile_UpdatePathSkipsCreateInfra(t *testing.T) {
+	origNewBrokerAuth := newBrokerAuth
+	origReconcileNodepools := reconcileNodepoolsFn
+	origPollClusterReady := pollClusterReadyFn
+	origCompleteGuestRegistration := completeGuestRegistrationFn
+	origPollDesiredNodepoolsHealthy := pollDesiredNodepoolsHealthyFn
+	defer func() {
+		newBrokerAuth = origNewBrokerAuth
+		reconcileNodepoolsFn = origReconcileNodepools
+		pollClusterReadyFn = origPollClusterReady
+		completeGuestRegistrationFn = origCompleteGuestRegistration
+		pollDesiredNodepoolsHealthyFn = origPollDesiredNodepoolsHealthy
+	}()
+
+	fakeAuth := &fakeBrokerAuth{
+		result: BrokerAuthResult{
+			BrokerToken:    "broker-token",
+			BrokerEmail:    "broker@example.com",
+			WorkforceToken: "workforce-token",
+		},
+	}
+	newBrokerAuth = func(BrokerAuthConfig) brokerAuthExchanger {
+		return fakeAuth
+	}
+
+	var reconcileNodepoolsCalled bool
+	var nodepoolClusterID string
+	reconcileNodepoolsFn = func(_ context.Context, _ nodepoolReconcileClient, clusterID string, _ string, _ []NodepoolSpec, _ *deliveryProgress) error {
+		reconcileNodepoolsCalled = true
+		nodepoolClusterID = clusterID
+		return nil
+	}
+	pollClusterReadyFn = func(context.Context, *CLSClient, string, *deliveryProgress) error { return nil }
+	completeGuestRegistrationFn = func(context.Context, *CLSClient, string, string, domain.TargetID, *deliveryProgress) (string, BootstrapResult, error) {
+		return "https://guest.example:6443", BootstrapResult{
+			SATokenRef: "sa-token-ref",
+			SAToken:    []byte("sa-token"),
+		}, nil
+	}
+	pollDesiredNodepoolsHealthyFn = func(context.Context, nodepoolStatusClient, string, string, []NodepoolSpec, *deliveryProgress) error {
+		return nil
+	}
+
+	var updatedClusterID string
+	var updatedSpec map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/clusters":
+			fmt.Fprint(w, `{"clusters":[{"id":"c-existing","name":"test-cluster"}]}`)
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/clusters/c-existing":
+			fmt.Fprint(w, `{
+				"id":"c-existing",
+				"name":"test-cluster",
+				"target_project_id":"test-project",
+				"spec":{
+					"infraID":"test-cluster",
+					"issuerURL":"https://hypershift-test-cluster-oidc",
+					"serviceAccountSigningKey":"existing-key",
+					"releaseVersion":"4.20.0",
+					"channelGroup":"stable",
+					"platform":{
+						"type":"GCP",
+						"gcp":{
+							"projectID":"test-project",
+							"region":"us-central1",
+							"network":"test-cluster-network",
+							"subnet":"test-cluster-subnet",
+							"endpointAccess":"PublicAndPrivate",
+							"workloadIdentity":{"projectNumber":"123456789"}
+						}
+					}
+				}
+			}`)
+		case r.Method == http.MethodPut && strings.HasPrefix(r.URL.Path, "/api/v1/clusters/"):
+			updatedClusterID = strings.TrimPrefix(r.URL.Path, "/api/v1/clusters/")
+			var body map[string]any
+			json.NewDecoder(r.Body).Decode(&body)
+			updatedSpec = body
+			fmt.Fprintf(w, `{"id":"%s"}`, updatedClusterID)
+		default:
+			t.Errorf("unexpected %s %s", r.Method, r.URL.String())
+			http.Error(w, "unexpected request", http.StatusInternalServerError)
+		}
+	}))
+	defer server.Close()
+
+	infra := &fakeCleanupInfra{}
+	reconciler := &Reconciler{
+		gateway: GatewayConfig{
+			URL:      server.URL,
+			Audience: "test-audience",
+		},
+		infra: infra,
+	}
+
+	output, err := reconciler.Reconcile(
+		context.Background(),
+		ClusterSpec{
+			Name:           "test-cluster",
+			EndpointAccess: "Private",
+			ReleaseVersion: "4.22.0",
+			ChannelGroup:   "fast",
+			Nodepools: []NodepoolSpec{{
+				ID:             "workers",
+				Replicas:       2,
+				InstanceType:   "n1-standard-4",
+				RootVolumeSize: 128,
+				RootVolumeType: "pd-standard",
+				AutoRepair:     boolPtr(true),
+				UpgradeType:    "Replace",
+			}},
+		},
+		TargetConfig{
+			GCPProject:        "test-project",
+			Region:            "us-central1",
+			WorkforcePool:     "test-pool",
+			WorkforceProvider: "test-provider",
+			BrokerSAEmail:     "broker@example.com",
+		},
+		"caller-token",
+		noopProgress(),
+	)
+	if err != nil {
+		t.Fatalf("Reconcile() error = %v", err)
+	}
+	if output == nil {
+		t.Fatal("expected reconcile output")
+	}
+
+	if updatedClusterID != "c-existing" {
+		t.Fatalf("updated cluster ID = %q, want c-existing", updatedClusterID)
+	}
+
+	specMap, ok := updatedSpec["spec"].(map[string]any)
+	if !ok {
+		t.Fatal("updated spec missing 'spec' map")
+	}
+	if specMap["releaseVersion"] != "4.22.0" {
+		t.Fatalf("updated releaseVersion = %v, want 4.22.0", specMap["releaseVersion"])
+	}
+	if specMap["channelGroup"] != "fast" {
+		t.Fatalf("updated channelGroup = %v, want fast", specMap["channelGroup"])
+	}
+	platform, _ := specMap["platform"].(map[string]any)
+	gcp, _ := platform["gcp"].(map[string]any)
+	if gcp["endpointAccess"] != "Private" {
+		t.Fatalf("updated endpointAccess = %v, want Private", gcp["endpointAccess"])
+	}
+	if specMap["serviceAccountSigningKey"] != "existing-key" {
+		t.Fatalf("updated signingKey = %v, want existing-key (preserved)", specMap["serviceAccountSigningKey"])
+	}
+
+	if !reconcileNodepoolsCalled {
+		t.Fatal("expected reconcileNodepools to be called on update path")
+	}
+	if nodepoolClusterID != "c-existing" {
+		t.Fatalf("nodepool reconcile cluster ID = %q, want c-existing", nodepoolClusterID)
+	}
+
+	if len(infra.ops) != 0 {
+		t.Fatalf("expected no infra operations on update path, got %v", infra.ops)
+	}
+}
+
+func TestReconcilerReconcile_AuthExpiredReturnsAuthExpiredError(t *testing.T) {
+	origNewBrokerAuth := newBrokerAuth
+	defer func() {
+		newBrokerAuth = origNewBrokerAuth
+	}()
+
+	newBrokerAuth = func(BrokerAuthConfig) brokerAuthExchanger {
+		return &fakeBrokerAuth{
+			err: newAuthExpiredError(fmt.Errorf("STS returned status 400: invalid_grant")),
+		}
+	}
+
+	reconciler := &Reconciler{
+		gateway: GatewayConfig{
+			URL:      "https://unused.invalid",
+			Audience: "test-audience",
+		},
+		infra: &fakeCleanupInfra{},
+	}
+
+	_, err := reconciler.Reconcile(
+		context.Background(),
+		ClusterSpec{
+			Name:           "test-cluster",
+			EndpointAccess: "PublicAndPrivate",
+			ReleaseVersion: "4.22.0",
+			ChannelGroup:   "stable",
+			Nodepools: []NodepoolSpec{{
+				ID:             "workers",
+				Replicas:       2,
+				InstanceType:   "n1-standard-4",
+				RootVolumeSize: 128,
+				RootVolumeType: "pd-standard",
+				AutoRepair:     boolPtr(true),
+				UpgradeType:    "Replace",
+			}},
+		},
+		TargetConfig{
+			GCPProject:        "test-project",
+			Region:            "us-central1",
+			WorkforcePool:     "test-pool",
+			WorkforceProvider: "test-provider",
+			BrokerSAEmail:     "broker@example.com",
+		},
+		"expired-token",
+		noopProgress(),
+	)
+	if err == nil {
+		t.Fatal("expected auth exchange error")
+	}
+	if !IsAuthExpiredError(err) {
+		t.Fatalf("expected IsAuthExpiredError = true, got false; error was: %v", err)
+	}
+
+	result := deliveryResultForReconcileError(err)
+	if result.State != domain.DeliveryStateAuthFailed {
+		t.Fatalf("delivery state = %q, want %q", result.State, domain.DeliveryStateAuthFailed)
+	}
+	if !strings.Contains(result.Message, "credentials expired") {
+		t.Fatalf("delivery message = %q, want 'credentials expired' context", result.Message)
+	}
+}
+
+func TestBuildCLSClusterUpdateSpec_MalformedObservedCluster(t *testing.T) {
+	spec := ClusterSpec{
+		Name:           "test-cluster",
+		EndpointAccess: "Private",
+		ReleaseVersion: "4.22.0",
+		ChannelGroup:   "stable",
+	}
+
+	tests := []struct {
+		name     string
+		observed map[string]any
+		want     string
+	}{
+		{
+			name:     "missing target_project_id",
+			observed: map[string]any{"spec": map[string]any{}},
+			want:     "target_project_id",
+		},
+		{
+			name:     "missing spec object",
+			observed: map[string]any{"target_project_id": "proj-123"},
+			want:     "missing spec object",
+		},
+		{
+			name: "missing platform object",
+			observed: map[string]any{
+				"target_project_id": "proj-123",
+				"spec":              map[string]any{"infraID": "infra-123"},
+			},
+			want: "missing platform object",
+		},
+		{
+			name: "missing gcp object",
+			observed: map[string]any{
+				"target_project_id": "proj-123",
+				"spec": map[string]any{
+					"infraID":  "infra-123",
+					"platform": map[string]any{"type": "GCP"},
+				},
+			},
+			want: "missing gcp object",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := BuildCLSClusterUpdateSpec(spec, tt.observed)
+			if err == nil {
+				t.Fatal("expected error")
+			}
+			if !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("error = %q, want substring %q", err.Error(), tt.want)
+			}
+		})
+	}
+}
+
+func TestDeleteClusterIfPresent_ResolveError(t *testing.T) {
+	client := &fakeClusterDeleteClient{
+		resolveErr: errors.New("list clusters: connection refused"),
+	}
+
+	_, _, err := deleteClusterIfPresent(context.Background(), client, "test-cluster", noopProgress())
+	if err == nil {
+		t.Fatal("expected resolve error")
+	}
+	if !strings.Contains(err.Error(), "resolve cluster ID") {
+		t.Fatalf("error = %q, want 'resolve cluster ID' context", err.Error())
+	}
+	if len(client.deleteIDs) != 0 {
+		t.Fatalf("expected no delete calls, got %v", client.deleteIDs)
+	}
+}
+
+func TestDeleteClusterIfPresent_DeleteError(t *testing.T) {
+	client := &fakeClusterDeleteClientWithDeleteErr{
+		clusterID: "c-123",
+		deleteErr: errors.New("backend rejected delete"),
+	}
+
+	_, _, err := deleteClusterIfPresent(context.Background(), client, "test-cluster", noopProgress())
+	if err == nil {
+		t.Fatal("expected delete error")
+	}
+	if !strings.Contains(err.Error(), "delete cluster") {
+		t.Fatalf("error = %q, want 'delete cluster' context", err.Error())
+	}
+}
+
+type fakeClusterDeleteClientWithDeleteErr struct {
+	clusterID string
+	deleteErr error
+}
+
+func (f *fakeClusterDeleteClientWithDeleteErr) ResolveClusterID(_ context.Context, _ string) (string, error) {
+	return f.clusterID, nil
+}
+
+func (f *fakeClusterDeleteClientWithDeleteErr) DeleteCluster(_ context.Context, _ string) error {
+	return f.deleteErr
+}
+
+func TestWaitForDeleteCleanupPrereqs_SkipsWhenClusterIDEmpty(t *testing.T) {
+	infra := &fakeCleanupInfra{}
+
+	err := waitForDeleteCleanupPrereqs(
+		context.Background(),
+		infra,
+		"",
+		TargetConfig{GCPProject: "project-123", Region: "us-central1"},
+		"workforce-token",
+		noopProgress(),
+	)
+	if err != nil {
+		t.Fatalf("waitForDeleteCleanupPrereqs() error = %v", err)
+	}
+	if infra.waitPSCCalls != 0 {
+		t.Fatalf("expected no PSC wait calls, got %d", infra.waitPSCCalls)
+	}
+}
+
+func TestWaitForDeleteCleanupPrereqs_ReturnsPSCError(t *testing.T) {
+	infra := &fakeCleanupInfra{
+		waitPSCErr: errors.New("compute API unavailable"),
+	}
+
+	err := waitForDeleteCleanupPrereqs(
+		context.Background(),
+		infra,
+		"cluster-123",
+		TargetConfig{GCPProject: "project-123", Region: "us-central1"},
+		"workforce-token",
+		noopProgress(),
+	)
+	if err == nil {
+		t.Fatal("expected PSC cleanup error")
+	}
+	if !strings.Contains(err.Error(), "wait for PSC cleanup") {
+		t.Fatalf("error = %q, want 'wait for PSC cleanup' context", err.Error())
+	}
+}
+
+func TestCleanupCreateResources_IAMOnlyNoInfra(t *testing.T) {
+	infra := &fakeCleanupInfra{}
+
+	err := cleanupCreateResources(
+		context.Background(),
+		infra,
+		ClusterSpec{Name: "test-cluster"},
+		TargetConfig{GCPProject: "project-123", Region: "us-central1"},
+		[]string{"EXAMPLE=1"},
+		false,
+		true,
+	)
+	if err != nil {
+		t.Fatalf("cleanupCreateResources() error = %v", err)
+	}
+	if got := strings.Join(infra.ops, ","); got != "iam:test-cluster:project-123" {
+		t.Fatalf("cleanup operations = %q, want IAM only", got)
+	}
+}
+
+func TestCleanupCreateResources_InfraOnlyNoIAM(t *testing.T) {
+	infra := &fakeCleanupInfra{}
+
+	err := cleanupCreateResources(
+		context.Background(),
+		infra,
+		ClusterSpec{Name: "test-cluster"},
+		TargetConfig{GCPProject: "project-123", Region: "us-central1"},
+		[]string{"EXAMPLE=1"},
+		true,
+		false,
+	)
+	if err != nil {
+		t.Fatalf("cleanupCreateResources() error = %v", err)
+	}
+	if got := strings.Join(infra.ops, ","); got != "infra:test-cluster:project-123:us-central1" {
+		t.Fatalf("cleanup operations = %q, want infra only", got)
+	}
+}
+
+func TestCleanupCreateResources_DestroyIAMErrorJoined(t *testing.T) {
+	infra := &fakeCleanupInfra{
+		destroyIAMErr: errors.New("iam permission denied"),
+	}
+
+	err := cleanupCreateResources(
+		context.Background(),
+		infra,
+		ClusterSpec{Name: "test-cluster"},
+		TargetConfig{GCPProject: "project-123", Region: "us-central1"},
+		[]string{"EXAMPLE=1"},
+		true,
+		true,
+	)
+	if err == nil {
+		t.Fatal("expected IAM cleanup error")
+	}
+	if !strings.Contains(err.Error(), "destroy IAM") {
+		t.Fatalf("error = %q, want 'destroy IAM' context", err.Error())
+	}
+}
+
+func TestCleanupCreateResources_NeitherCreatedReturnsNil(t *testing.T) {
+	infra := &fakeCleanupInfra{}
+
+	err := cleanupCreateResources(
+		context.Background(),
+		infra,
+		ClusterSpec{Name: "test-cluster"},
+		TargetConfig{GCPProject: "project-123", Region: "us-central1"},
+		[]string{"EXAMPLE=1"},
+		false,
+		false,
+	)
+	if err != nil {
+		t.Fatalf("cleanupCreateResources() error = %v", err)
+	}
+	if len(infra.ops) != 0 {
+		t.Fatalf("expected no ops, got %v", infra.ops)
+	}
+}
+
+func TestReconcilerReconcile_FailureSnapshotEmittedOnError(t *testing.T) {
+	origNewBrokerAuth := newBrokerAuth
+	origBuildCreateWorkspace := buildCreateHypershiftWorkspace
+	origPollClusterReady := pollClusterReadyFn
+	defer func() {
+		newBrokerAuth = origNewBrokerAuth
+		buildCreateHypershiftWorkspace = origBuildCreateWorkspace
+		pollClusterReadyFn = origPollClusterReady
+	}()
+
+	fakeAuth := &fakeBrokerAuth{
+		result: BrokerAuthResult{
+			BrokerToken:    "broker-token",
+			BrokerEmail:    "broker@example.com",
+			WorkforceToken: "workforce-token",
+		},
+	}
+	newBrokerAuth = func(BrokerAuthConfig) brokerAuthExchanger {
+		return fakeAuth
+	}
+
+	origReconcileNodepools := reconcileNodepoolsFn
+	origCompleteGuestRegistration := completeGuestRegistrationFn
+	origPollDesiredNodepoolsHealthy := pollDesiredNodepoolsHealthyFn
+	defer func() {
+		reconcileNodepoolsFn = origReconcileNodepools
+		completeGuestRegistrationFn = origCompleteGuestRegistration
+		pollDesiredNodepoolsHealthyFn = origPollDesiredNodepoolsHealthy
+	}()
+
+	reconcileNodepoolsFn = func(context.Context, nodepoolReconcileClient, string, string, []NodepoolSpec, *deliveryProgress) error {
+		return nil
+	}
+	completeGuestRegistrationFn = func(context.Context, *CLSClient, string, string, domain.TargetID, *deliveryProgress) (string, BootstrapResult, error) {
+		return "", BootstrapResult{}, nil
+	}
+	pollDesiredNodepoolsHealthyFn = func(context.Context, nodepoolStatusClient, string, string, []NodepoolSpec, *deliveryProgress) error {
+		return nil
+	}
+
+	workspaceDir, err := os.MkdirTemp("", "gcphcp-snapshot-test-*")
+	if err != nil {
+		t.Fatalf("os.MkdirTemp() error = %v", err)
+	}
+	buildCreateHypershiftWorkspace = func(token string, _ TargetConfig, jwksJSON []byte) (*HypershiftWorkspace, error) {
+		return &HypershiftWorkspace{
+			Env:      []string{"PATH=/usr/bin"},
+			JWKSPath: workspaceDir + "/jwks.json",
+			tempDir:  workspaceDir,
+		}, nil
+	}
+
+	pollClusterReadyFn = func(context.Context, *CLSClient, string, *deliveryProgress) error {
+		return fmt.Errorf("timeout waiting for cluster to become ready")
+	}
+
+	var snapshotRequested bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/clusters":
+			fmt.Fprint(w, `{"clusters":[]}`)
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/clusters":
+			fmt.Fprint(w, `{"id":"c-123"}`)
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/clusters/c-123":
+			snapshotRequested = true
+			fmt.Fprint(w, `{"id":"c-123","name":"test-cluster","spec":{"releaseVersion":"4.22.0"}}`)
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/clusters/c-123/status":
+			fmt.Fprint(w, `{"status":{"phase":"Failed","reason":"Timeout","message":"timed out"}}`)
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/nodepools":
+			fmt.Fprint(w, `{"nodepools":[]}`)
+		default:
+			t.Errorf("unexpected %s %s", r.Method, r.URL.String())
+			http.Error(w, "unexpected", http.StatusInternalServerError)
+		}
+	}))
+	defer server.Close()
+
+	infra := &fakeCleanupInfra{
+		createIAMResults: []createAttemptResult{{result: validIAMConfigForReconcileTest()}},
+	}
+	reconciler := &Reconciler{
+		gateway: GatewayConfig{URL: server.URL, Audience: "test-audience"},
+		infra:   infra,
+	}
+
+	_, reconcileErr := reconciler.Reconcile(
+		context.Background(),
+		ClusterSpec{
+			Name:           "test-cluster",
+			EndpointAccess: "PublicAndPrivate",
+			ReleaseVersion: "4.22.0",
+			ChannelGroup:   "stable",
+			Nodepools: []NodepoolSpec{{
+				ID: "workers", Replicas: 2, InstanceType: "n1-standard-4",
+				RootVolumeSize: 128, RootVolumeType: "pd-standard",
+				AutoRepair: boolPtr(true), UpgradeType: "Replace",
+			}},
+		},
+		TargetConfig{
+			GCPProject: "test-project", Region: "us-central1",
+			WorkforcePool: "test-pool", WorkforceProvider: "test-provider",
+			BrokerSAEmail: "broker@example.com",
+		},
+		"caller-token",
+		noopProgress(),
+	)
+	if reconcileErr == nil {
+		t.Fatal("expected reconcile error from pollClusterReady timeout")
+	}
+	if !snapshotRequested {
+		t.Fatal("expected failure snapshot to request cluster status via GetCluster")
+	}
+}
+
+func TestRetryUnconfirmedPrereqCreate_ContextCancelledMidRetry(t *testing.T) {
+	withFastRecoveryTimers(t)
+	unconfirmedPrereqMaxAttempts = 5
+	unconfirmedPrereqRetryInterval = 50 * time.Millisecond
+
+	ctx, cancel := context.WithCancel(context.Background())
+
+	attempts := 0
+	_, err := retryUnconfirmedPrereqCreate(ctx, noopProgress(), "test resource", func() (map[string]any, error) {
+		attempts++
+		if attempts == 2 {
+			cancel()
+		}
+		return nil, fmt.Errorf("attempt %d failed", attempts)
+	})
+	if err == nil {
+		t.Fatal("expected context cancellation error")
+	}
+	if !strings.Contains(err.Error(), "context canceled") {
+		t.Fatalf("error = %q, want context canceled context", err.Error())
+	}
+	if !strings.Contains(err.Error(), "attempt 1") || !strings.Contains(err.Error(), "attempt 2") {
+		t.Fatalf("error = %q, want both attempt errors preserved", err.Error())
 	}
 }

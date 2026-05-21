@@ -2,8 +2,13 @@ package gcphcp
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"os"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -141,5 +146,269 @@ func TestDeliveryResultForReconcileError_PostProvisionRegistrationErrorUsesExpli
 	}
 	if !strings.Contains(result.Message, "RBAC not ready") {
 		t.Fatalf("message = %q, want wrapped bootstrap cause", result.Message)
+	}
+}
+
+type agentTestReporter struct {
+	mu      sync.Mutex
+	results map[domain.DeliveryID]domain.DeliveryResult
+	done    chan domain.DeliveryResult
+}
+
+func newAgentTestReporter() *agentTestReporter {
+	return &agentTestReporter{
+		results: make(map[domain.DeliveryID]domain.DeliveryResult),
+		done:    make(chan domain.DeliveryResult, 10),
+	}
+}
+
+func (r *agentTestReporter) ReportEvent(_ context.Context, _ domain.DeliveryID, _ domain.DeliveryEvent) error {
+	return nil
+}
+
+func (r *agentTestReporter) ReportResult(_ context.Context, id domain.DeliveryID, result domain.DeliveryResult) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.results[id] = result
+	r.done <- result
+	return nil
+}
+
+func (r *agentTestReporter) ListActiveDeliveries(_ context.Context, _ []domain.TargetID) ([]domain.ActiveDelivery, error) {
+	return nil, nil
+}
+
+func withAgentHooksStubbed(t *testing.T) {
+	t.Helper()
+	origNewBrokerAuth := newBrokerAuth
+	origBuildCreateWorkspace := buildCreateHypershiftWorkspace
+	origBuildDestroyWorkspace := buildDestroyHypershiftWorkspace
+	origReconcileNodepools := reconcileNodepoolsFn
+	origPollClusterReady := pollClusterReadyFn
+	origCompleteGuestRegistration := completeGuestRegistrationFn
+	origPollDesiredNodepoolsHealthy := pollDesiredNodepoolsHealthyFn
+	t.Cleanup(func() {
+		newBrokerAuth = origNewBrokerAuth
+		buildCreateHypershiftWorkspace = origBuildCreateWorkspace
+		buildDestroyHypershiftWorkspace = origBuildDestroyWorkspace
+		reconcileNodepoolsFn = origReconcileNodepools
+		pollClusterReadyFn = origPollClusterReady
+		completeGuestRegistrationFn = origCompleteGuestRegistration
+		pollDesiredNodepoolsHealthyFn = origPollDesiredNodepoolsHealthy
+	})
+
+	newBrokerAuth = func(BrokerAuthConfig) brokerAuthExchanger {
+		return &fakeBrokerAuth{
+			result: BrokerAuthResult{
+				BrokerToken:    "broker-token",
+				BrokerEmail:    "broker@example.com",
+				WorkforceToken: "workforce-token",
+			},
+		}
+	}
+
+	reconcileNodepoolsFn = func(context.Context, nodepoolReconcileClient, string, string, []NodepoolSpec, *deliveryProgress) error {
+		return nil
+	}
+	pollClusterReadyFn = func(context.Context, *CLSClient, string, *deliveryProgress) error {
+		return nil
+	}
+	completeGuestRegistrationFn = func(_ context.Context, _ *CLSClient, _ string, _ string, targetID domain.TargetID, _ *deliveryProgress) (string, BootstrapResult, error) {
+		return "https://guest.example:6443", BootstrapResult{
+			SATokenRef: DeliverySecretRef(targetID),
+			SAToken:    []byte("sa-token-value"),
+		}, nil
+	}
+	pollDesiredNodepoolsHealthyFn = func(context.Context, nodepoolStatusClient, string, string, []NodepoolSpec, *deliveryProgress) error {
+		return nil
+	}
+}
+
+func TestAgent_Deliver_SuccessReportsProvisionedTargetAndSecrets(t *testing.T) {
+	withAgentHooksStubbed(t)
+
+	origTimeout := reconcileTimeout
+	reconcileTimeout = 10 * time.Second
+	t.Cleanup(func() { reconcileTimeout = origTimeout })
+
+	workspaceDir, err := os.MkdirTemp("", "agent-deliver-test-*")
+	if err != nil {
+		t.Fatalf("os.MkdirTemp() error = %v", err)
+	}
+	buildCreateHypershiftWorkspace = func(_ string, _ TargetConfig, _ []byte) (*HypershiftWorkspace, error) {
+		return &HypershiftWorkspace{
+			Env:      []string{"PATH=/usr/bin"},
+			JWKSPath: workspaceDir + "/jwks.json",
+			tempDir:  workspaceDir,
+		}, nil
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/clusters":
+			fmt.Fprint(w, `{"clusters":[{"id":"c-new","name":"test-cls"}]}`)
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/clusters/c-new":
+			fmt.Fprint(w, `{
+				"id":"c-new","name":"test-cls","target_project_id":"proj",
+				"spec":{
+					"infraID":"test-cls","issuerURL":"https://oidc",
+					"serviceAccountSigningKey":"key",
+					"releaseVersion":"4.22.0","channelGroup":"stable",
+					"platform":{"type":"GCP","gcp":{
+						"projectID":"proj","region":"us-central1",
+						"network":"net","subnet":"sub",
+						"endpointAccess":"PublicAndPrivate",
+						"workloadIdentity":{}
+					}}
+				}
+			}`)
+		case r.Method == http.MethodPut && strings.HasPrefix(r.URL.Path, "/api/v1/clusters/"):
+			fmt.Fprint(w, `{"id":"c-new"}`)
+		default:
+			t.Errorf("unexpected %s %s", r.Method, r.URL.String())
+			http.Error(w, "unexpected", http.StatusInternalServerError)
+		}
+	}))
+	defer server.Close()
+
+	reporter := newAgentTestReporter()
+	infra := NewInfraRunner()
+	agent := NewAgent(AgentDeps{
+		Gateway:  GatewayConfig{URL: server.URL, Audience: "test-audience"},
+		Infra:    infra,
+		Reporter: reporter,
+	})
+
+	autoRepair := true
+	spec := json.RawMessage(`{
+		"endpointAccess":"PublicAndPrivate","releaseVersion":"4.22.0","channelGroup":"stable",
+		"nodepools":[{"id":"w","replicas":2,"instanceType":"n1-standard-4",
+		"rootVolumeSize":128,"rootVolumeType":"pd-standard","autoRepair":true,"upgradeType":"Replace"}]
+	}`)
+
+	err = agent.Deliver(
+		context.Background(),
+		domain.TargetInfo{Properties: map[string]string{
+			"id": "target-1", "gcp_project": "proj", "region": "us-central1",
+			"workforce_pool": "pool", "workforce_provider": "prov",
+			"broker_sa_email": "broker@example.com",
+		}},
+		domain.DeliveryID("delivery-success"),
+		[]domain.Manifest{{
+			ResourceType: ClusterResourceType,
+			Name:         "test-cls",
+			Raw:          spec,
+		}},
+		domain.DeliveryAuth{Token: "caller-token"},
+		nil,
+		1,
+	)
+	_ = autoRepair
+	if err != nil {
+		t.Fatalf("Deliver() error = %v", err)
+	}
+
+	select {
+	case result := <-reporter.done:
+		if result.State != domain.DeliveryStateDelivered {
+			t.Fatalf("state = %q, want %q; message = %q", result.State, domain.DeliveryStateDelivered, result.Message)
+		}
+		if len(result.ProvisionedTargets) != 1 {
+			t.Fatalf("ProvisionedTargets count = %d, want 1", len(result.ProvisionedTargets))
+		}
+		pt := result.ProvisionedTargets[0]
+		if pt.Type != KubernetesTargetType {
+			t.Fatalf("target type = %q, want %q", pt.Type, KubernetesTargetType)
+		}
+		if pt.Properties["api_server"] != "https://guest.example:6443" {
+			t.Fatalf("api_server = %q, want https://guest.example:6443", pt.Properties["api_server"])
+		}
+		if len(result.ProducedSecrets) != 1 {
+			t.Fatalf("ProducedSecrets count = %d, want 1", len(result.ProducedSecrets))
+		}
+		if string(result.ProducedSecrets[0].Value) != "sa-token-value" {
+			t.Fatalf("secret value = %q, want sa-token-value", string(result.ProducedSecrets[0].Value))
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timeout waiting for delivery result")
+	}
+}
+
+func TestAgent_Remove_DeletesClusterViaReconciler(t *testing.T) {
+	withAgentHooksStubbed(t)
+
+	buildDestroyHypershiftWorkspace = func(_ string, _ TargetConfig) (*HypershiftWorkspace, error) {
+		dir, err := os.MkdirTemp("", "agent-remove-test-*")
+		if err != nil {
+			return nil, err
+		}
+		return &HypershiftWorkspace{
+			Env:     []string{"PATH=/usr/bin"},
+			tempDir: dir,
+		}, nil
+	}
+
+	var deleteRequested bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/clusters":
+			fmt.Fprint(w, `{"clusters":[{"id":"c-del","name":"test-cls"}]}`)
+		case r.Method == http.MethodDelete && r.URL.Path == "/api/v1/clusters/c-del":
+			deleteRequested = true
+			w.WriteHeader(http.StatusNoContent)
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/clusters/c-del":
+			w.WriteHeader(http.StatusNotFound)
+			fmt.Fprint(w, `{"error":"not found"}`)
+		default:
+			t.Errorf("unexpected %s %s", r.Method, r.URL.String())
+			http.Error(w, "unexpected", http.StatusInternalServerError)
+		}
+	}))
+	defer server.Close()
+
+	reporter := newAgentTestReporter()
+	infra := &fakeCleanupInfra{}
+	agent := &Agent{
+		reconciler: &Reconciler{
+			gateway: GatewayConfig{URL: server.URL, Audience: "test-audience"},
+			infra:   infra,
+		},
+		observer:   noopObserver{},
+		reporter:   reporter,
+		trustMap:   make(map[domain.IssuerURL]domain.TrustBundleEntry),
+		clusterGen: make(map[string]domain.Generation),
+	}
+
+	spec := json.RawMessage(`{
+		"endpointAccess":"PublicAndPrivate","releaseVersion":"4.22.0","channelGroup":"stable",
+		"nodepools":[{"id":"w","replicas":2,"instanceType":"n1-standard-4",
+		"rootVolumeSize":128,"rootVolumeType":"pd-standard","autoRepair":true,"upgradeType":"Replace"}]
+	}`)
+
+	err := agent.Remove(
+		context.Background(),
+		domain.TargetInfo{Properties: map[string]string{
+			"id": "target-1", "gcp_project": "proj", "region": "us-central1",
+			"workforce_pool": "pool", "workforce_provider": "prov",
+			"broker_sa_email": "broker@example.com",
+		}},
+		domain.DeliveryID("remove-1"),
+		[]domain.Manifest{{
+			ResourceType: ClusterResourceType,
+			Name:         "test-cls",
+			Raw:          spec,
+		}},
+		domain.DeliveryAuth{Token: "caller-token"},
+		nil,
+		1,
+	)
+	if err != nil {
+		t.Fatalf("Remove() error = %v", err)
+	}
+	if !deleteRequested {
+		t.Fatal("expected CLS DeleteCluster to be called")
+	}
+	if infra.waitPSCCalls != 1 {
+		t.Fatalf("expected PSC cleanup, got %d calls", infra.waitPSCCalls)
 	}
 }

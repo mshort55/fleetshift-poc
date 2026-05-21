@@ -213,7 +213,9 @@ func TestPollClusterReady_UsesConfigurableTimeout(t *testing.T) {
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/api/v1/clusters/c-123" {
-			t.Fatalf("unexpected path %q", r.URL.Path)
+			t.Errorf("unexpected path %q", r.URL.Path)
+			http.Error(w, "unexpected path", http.StatusInternalServerError)
+			return
 		}
 		if err := json.NewEncoder(w).Encode(map[string]any{
 			"status": map[string]any{
@@ -222,7 +224,7 @@ func TestPollClusterReady_UsesConfigurableTimeout(t *testing.T) {
 				"message": "Controllers are provisioning cluster resources",
 			},
 		}); err != nil {
-			t.Fatalf("encode response: %v", err)
+			t.Errorf("encode response: %v", err)
 		}
 	}))
 	defer server.Close()
@@ -267,7 +269,9 @@ func TestPollClusterDeleted_ReturnsNon404Errors(t *testing.T) {
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/api/v1/clusters/c-123" {
-			t.Fatalf("unexpected path %q", r.URL.Path)
+			t.Errorf("unexpected path %q", r.URL.Path)
+			http.Error(w, "unexpected path", http.StatusInternalServerError)
+			return
 		}
 		http.Error(w, "backend unavailable", http.StatusBadGateway)
 	}))
@@ -288,7 +292,9 @@ func TestPollClusterDeleted_SucceedsOnHTTP404(t *testing.T) {
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/api/v1/clusters/c-123" {
-			t.Fatalf("unexpected path %q", r.URL.Path)
+			t.Errorf("unexpected path %q", r.URL.Path)
+			http.Error(w, "unexpected path", http.StatusInternalServerError)
+			return
 		}
 		http.Error(w, "not found", http.StatusNotFound)
 	}))
@@ -305,7 +311,9 @@ func TestPollClusterDeleted_DoesNotTreat404TextInBodyAsDeletion(t *testing.T) {
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/api/v1/clusters/c-123" {
-			t.Fatalf("unexpected path %q", r.URL.Path)
+			t.Errorf("unexpected path %q", r.URL.Path)
+			http.Error(w, "unexpected path", http.StatusInternalServerError)
+			return
 		}
 		http.Error(w, "upstream lookup mentioned stale 404 cache entry", http.StatusBadGateway)
 	}))
@@ -346,7 +354,7 @@ func TestEmitFailureStatusSnapshot_EmitsCuratedRedactedDetail(t *testing.T) {
 					},
 				},
 			}); err != nil {
-				t.Fatalf("encode cluster response: %v", err)
+				t.Errorf("encode cluster response: %v", err)
 			}
 		case "/api/v1/clusters/c-123/status":
 			if err := json.NewEncoder(w).Encode(map[string]any{
@@ -381,11 +389,11 @@ func TestEmitFailureStatusSnapshot_EmitsCuratedRedactedDetail(t *testing.T) {
 					},
 				},
 			}); err != nil {
-				t.Fatalf("encode cluster status response: %v", err)
+				t.Errorf("encode cluster status response: %v", err)
 			}
 		case "/api/v1/nodepools":
 			if got := r.URL.Query().Get("clusterId"); got != "c-123" {
-				t.Fatalf("clusterId = %q, want c-123", got)
+				t.Errorf("clusterId = %q, want c-123", got)
 			}
 			if err := json.NewEncoder(w).Encode(map[string]any{
 				"nodepools": []any{
@@ -402,7 +410,7 @@ func TestEmitFailureStatusSnapshot_EmitsCuratedRedactedDetail(t *testing.T) {
 					},
 				},
 			}); err != nil {
-				t.Fatalf("encode nodepool list response: %v", err)
+				t.Errorf("encode nodepool list response: %v", err)
 			}
 		case "/api/v1/nodepools/np-1/status":
 			if err := json.NewEncoder(w).Encode(map[string]any{
@@ -434,10 +442,11 @@ func TestEmitFailureStatusSnapshot_EmitsCuratedRedactedDetail(t *testing.T) {
 					},
 				},
 			}); err != nil {
-				t.Fatalf("encode nodepool status response: %v", err)
+				t.Errorf("encode nodepool status response: %v", err)
 			}
 		default:
-			t.Fatalf("unexpected path %q", r.URL.Path)
+			t.Errorf("unexpected path %q", r.URL.Path)
+			http.Error(w, "unexpected path", http.StatusInternalServerError)
 		}
 	}))
 	defer server.Close()
@@ -529,7 +538,7 @@ func TestEmitFailureStatusSnapshot_RedactsSensitiveFields(t *testing.T) {
 					},
 				},
 			}); err != nil {
-				t.Fatalf("encode cluster response: %v", err)
+				t.Errorf("encode cluster response: %v", err)
 			}
 		case "/api/v1/clusters/c-123/status":
 			if err := json.NewEncoder(w).Encode(map[string]any{
@@ -564,7 +573,7 @@ func TestEmitFailureStatusSnapshot_RedactsSensitiveFields(t *testing.T) {
 					},
 				},
 			}); err != nil {
-				t.Fatalf("encode cluster status response: %v", err)
+				t.Errorf("encode cluster status response: %v", err)
 			}
 		case "/api/v1/nodepools":
 			if err := json.NewEncoder(w).Encode(map[string]any{
@@ -582,7 +591,7 @@ func TestEmitFailureStatusSnapshot_RedactsSensitiveFields(t *testing.T) {
 					},
 				},
 			}); err != nil {
-				t.Fatalf("encode nodepool list response: %v", err)
+				t.Errorf("encode nodepool list response: %v", err)
 			}
 		case "/api/v1/nodepools/np-1/status":
 			if err := json.NewEncoder(w).Encode(map[string]any{
@@ -605,10 +614,11 @@ func TestEmitFailureStatusSnapshot_RedactsSensitiveFields(t *testing.T) {
 					},
 				},
 			}); err != nil {
-				t.Fatalf("encode nodepool status response: %v", err)
+				t.Errorf("encode nodepool status response: %v", err)
 			}
 		default:
-			t.Fatalf("unexpected path %q", r.URL.Path)
+			t.Errorf("unexpected path %q", r.URL.Path)
+			http.Error(w, "unexpected path", http.StatusInternalServerError)
 		}
 	}))
 	defer server.Close()
@@ -645,5 +655,177 @@ func TestEmitFailureStatusSnapshot_RedactsSensitiveFields(t *testing.T) {
 		if strings.Contains(payload, forbidden) {
 			t.Fatalf("payload unexpectedly contains %q: %s", forbidden, payload)
 		}
+	}
+}
+
+func TestExtractProblemConditions_EmptyData(t *testing.T) {
+	result := extractProblemConditions(map[string]any{})
+	if result != nil {
+		t.Fatalf("expected nil for empty data, got %v", result)
+	}
+}
+
+func TestExtractProblemConditions_NoControllerStatusFallsBackToStatusConditions(t *testing.T) {
+	data := map[string]any{
+		"status": map[string]any{
+			"conditions": []any{
+				map[string]any{
+					"type":    "Degraded",
+					"status":  "True",
+					"reason":  "QuotaExceeded",
+					"message": "quota limit reached",
+				},
+			},
+		},
+	}
+
+	result := extractProblemConditions(data)
+	if len(result) != 1 {
+		t.Fatalf("expected 1 condition, got %d", len(result))
+	}
+	if result[0].Type != "Degraded" {
+		t.Fatalf("type = %q, want Degraded", result[0].Type)
+	}
+	if result[0].Controller != "" {
+		t.Fatalf("controller = %q, want empty for status-level fallback", result[0].Controller)
+	}
+}
+
+func TestExtractProblemConditions_SkipsNonMapControllers(t *testing.T) {
+	data := map[string]any{
+		"controller_status": []any{
+			"not-a-map",
+			map[string]any{
+				"controller_name": "valid-controller",
+				"conditions": []any{
+					map[string]any{
+						"type":   "Failed",
+						"status": "True",
+						"reason": "Error",
+					},
+				},
+			},
+		},
+	}
+
+	result := extractProblemConditions(data)
+	if len(result) != 1 {
+		t.Fatalf("expected 1 condition (skipping non-map), got %d", len(result))
+	}
+	if result[0].Controller != "valid-controller" {
+		t.Fatalf("controller = %q, want valid-controller", result[0].Controller)
+	}
+}
+
+func TestExtractProblemConditions_SkipsNonMapConditions(t *testing.T) {
+	data := map[string]any{
+		"controller_status": []any{
+			map[string]any{
+				"controller_name": "test-controller",
+				"conditions": []any{
+					"not-a-map",
+					map[string]any{
+						"type":   "Degraded",
+						"status": "True",
+						"reason": "Error",
+					},
+				},
+			},
+		},
+	}
+
+	result := extractProblemConditions(data)
+	if len(result) != 1 {
+		t.Fatalf("expected 1 condition (skipping non-map), got %d", len(result))
+	}
+}
+
+func TestExtractProblemConditions_FiltersHealthyConditions(t *testing.T) {
+	data := map[string]any{
+		"controller_status": []any{
+			map[string]any{
+				"controller_name": "test-controller",
+				"conditions": []any{
+					map[string]any{
+						"type":   "Available",
+						"status": "True",
+						"reason": "AsExpected",
+					},
+					map[string]any{
+						"type":   "Degraded",
+						"status": "False",
+						"reason": "AsExpected",
+					},
+				},
+			},
+		},
+	}
+
+	result := extractProblemConditions(data)
+	if len(result) != 1 {
+		t.Fatalf("expected 1 problem condition (Degraded=False), got %d", len(result))
+	}
+	if result[0].Type != "Degraded" {
+		t.Fatalf("type = %q, want Degraded", result[0].Type)
+	}
+}
+
+func TestExtractProblemConditions_MissingConditionFields(t *testing.T) {
+	data := map[string]any{
+		"controller_status": []any{
+			map[string]any{
+				"conditions": []any{
+					map[string]any{
+						"status": "Unknown",
+					},
+				},
+			},
+		},
+	}
+
+	result := extractProblemConditions(data)
+	if len(result) != 1 {
+		t.Fatalf("expected 1 condition for Unknown status, got %d", len(result))
+	}
+	if result[0].Type != "" {
+		t.Fatalf("type = %q, want empty", result[0].Type)
+	}
+	if result[0].Controller != "" {
+		t.Fatalf("controller = %q, want empty", result[0].Controller)
+	}
+}
+
+func TestExtractProblemConditions_ControllerStatusTakesPrecedence(t *testing.T) {
+	data := map[string]any{
+		"controller_status": []any{
+			map[string]any{
+				"controller_name": "test-controller",
+				"conditions": []any{
+					map[string]any{
+						"type":   "Progressing",
+						"status": "True",
+						"reason": "Deploying",
+					},
+				},
+			},
+		},
+		"status": map[string]any{
+			"conditions": []any{
+				map[string]any{
+					"type":    "Failed",
+					"status":  "True",
+					"reason":  "ShouldNotAppear",
+					"message": "this should not be included",
+				},
+			},
+		},
+	}
+
+	result := extractProblemConditions(data)
+	if len(result) != 1 {
+		t.Fatalf("expected 1 condition from controller_status, got %d", len(result))
+	}
+	if result[0].Type != "Progressing" {
+		t.Fatalf("type = %q, want Progressing (from controller_status, not status fallback)", result[0].Type)
 	}
 }

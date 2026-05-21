@@ -29,112 +29,111 @@ func fullSpecJSON() string {
 	}`
 }
 
-func TestParseClusterSpec_ValidFullSpec(t *testing.T) {
-	raw := json.RawMessage(fullSpecJSON())
-
-	spec, err := gcphcp.ParseClusterSpec(raw)
-	if err != nil {
-		t.Fatalf("ParseClusterSpec failed: %v", err)
+func TestParseClusterSpec_ValidSpec(t *testing.T) {
+	tests := []struct {
+		name           string
+		rawJSON        string
+		endpointAccess string
+		releaseVersion string
+		channelGroup   string
+		npID           string
+		npReplicas     int
+		npInstanceType string
+		npRootSize     int
+		npRootType     string
+		npAutoRepair   bool
+		npUpgradeType  string
+	}{
+		{
+			name:           "public endpoint with standard nodepool",
+			rawJSON:        fullSpecJSON(),
+			endpointAccess: "PublicAndPrivate",
+			releaseVersion: "4.18.0",
+			channelGroup:   "stable",
+			npID:           "workers",
+			npReplicas:     2,
+			npInstanceType: "n1-standard-4",
+			npRootSize:     128,
+			npRootType:     "pd-standard",
+			npAutoRepair:   true,
+			npUpgradeType:  "Replace",
+		},
+		{
+			name: "private endpoint with ssd nodepool",
+			rawJSON: `{
+				"endpointAccess": "Private",
+				"releaseVersion": "4.14.0",
+				"channelGroup": "fast",
+				"nodepools": [{
+					"id": "infra",
+					"replicas": 3,
+					"instanceType": "n1-standard-8",
+					"rootVolumeSize": 256,
+					"rootVolumeType": "pd-ssd",
+					"autoRepair": false,
+					"upgradeType": "InPlace"
+				}]
+			}`,
+			endpointAccess: "Private",
+			releaseVersion: "4.14.0",
+			channelGroup:   "fast",
+			npID:           "infra",
+			npReplicas:     3,
+			npInstanceType: "n1-standard-8",
+			npRootSize:     256,
+			npRootType:     "pd-ssd",
+			npAutoRepair:   false,
+			npUpgradeType:  "InPlace",
+		},
 	}
 
-	if spec.Name != "" {
-		t.Errorf("expected Name to be empty (json:\"-\"), got %s", spec.Name)
-	}
-	if spec.EndpointAccess != "PublicAndPrivate" {
-		t.Errorf("expected EndpointAccess=PublicAndPrivate, got %s", spec.EndpointAccess)
-	}
-	if spec.ReleaseVersion != "4.18.0" {
-		t.Errorf("expected ReleaseVersion=4.18.0, got %s", spec.ReleaseVersion)
-	}
-	if spec.ChannelGroup != "stable" {
-		t.Errorf("expected ChannelGroup=stable, got %s", spec.ChannelGroup)
-	}
-
-	if len(spec.Nodepools) != 1 {
-		t.Fatalf("expected 1 nodepool, got %d", len(spec.Nodepools))
-	}
-
-	np := spec.Nodepools[0]
-	if np.ID != "workers" {
-		t.Errorf("expected nodepool ID=workers, got %s", np.ID)
-	}
-	if np.Replicas != 2 {
-		t.Errorf("expected nodepool Replicas=2, got %d", np.Replicas)
-	}
-	if np.InstanceType != "n1-standard-4" {
-		t.Errorf("expected nodepool InstanceType=n1-standard-4, got %s", np.InstanceType)
-	}
-	if np.RootVolumeSize != 128 {
-		t.Errorf("expected nodepool RootVolumeSize=128, got %d", np.RootVolumeSize)
-	}
-	if np.RootVolumeType != "pd-standard" {
-		t.Errorf("expected nodepool RootVolumeType=pd-standard, got %s", np.RootVolumeType)
-	}
-	if np.AutoRepair == nil || *np.AutoRepair != true {
-		t.Errorf("expected nodepool AutoRepair=true, got %v", np.AutoRepair)
-	}
-	if np.UpgradeType != "Replace" {
-		t.Errorf("expected nodepool UpgradeType=Replace, got %s", np.UpgradeType)
-	}
-}
-
-func TestParseClusterSpec_AllFieldsExplicit(t *testing.T) {
-	raw := json.RawMessage(`{
-		"endpointAccess": "Private",
-		"releaseVersion": "4.14.0",
-		"channelGroup": "fast",
-		"nodepools": [
-			{
-				"id": "infra",
-				"replicas": 3,
-				"instanceType": "n1-standard-8",
-				"rootVolumeSize": 256,
-				"rootVolumeType": "pd-ssd",
-				"autoRepair": false,
-				"upgradeType": "InPlace"
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			spec, err := gcphcp.ParseClusterSpec(json.RawMessage(tt.rawJSON))
+			if err != nil {
+				t.Fatalf("ParseClusterSpec failed: %v", err)
 			}
-		]
-	}`)
 
-	spec, err := gcphcp.ParseClusterSpec(raw)
-	if err != nil {
-		t.Fatalf("ParseClusterSpec failed: %v", err)
-	}
+			if spec.Name != "" {
+				t.Errorf("Name = %q, want empty", spec.Name)
+			}
+			if spec.EndpointAccess != tt.endpointAccess {
+				t.Errorf("EndpointAccess = %q, want %q", spec.EndpointAccess, tt.endpointAccess)
+			}
+			if spec.ReleaseVersion != tt.releaseVersion {
+				t.Errorf("ReleaseVersion = %q, want %q", spec.ReleaseVersion, tt.releaseVersion)
+			}
+			if spec.ChannelGroup != tt.channelGroup {
+				t.Errorf("ChannelGroup = %q, want %q", spec.ChannelGroup, tt.channelGroup)
+			}
 
-	if spec.Name != "" {
-		t.Errorf("expected Name to be empty (json:\"-\"), got %s", spec.Name)
-	}
-	if spec.EndpointAccess != "Private" {
-		t.Errorf("expected EndpointAccess=Private, got %s", spec.EndpointAccess)
-	}
-	if spec.ReleaseVersion != "4.14.0" {
-		t.Errorf("expected ReleaseVersion=4.14.0, got %s", spec.ReleaseVersion)
-	}
-	if spec.ChannelGroup != "fast" {
-		t.Errorf("expected ChannelGroup=fast, got %s", spec.ChannelGroup)
-	}
+			if len(spec.Nodepools) != 1 {
+				t.Fatalf("nodepool count = %d, want 1", len(spec.Nodepools))
+			}
 
-	np := spec.Nodepools[0]
-	if np.ID != "infra" {
-		t.Errorf("expected nodepool ID=infra, got %s", np.ID)
-	}
-	if np.Replicas != 3 {
-		t.Errorf("expected nodepool Replicas=3, got %d", np.Replicas)
-	}
-	if np.InstanceType != "n1-standard-8" {
-		t.Errorf("expected nodepool InstanceType=n1-standard-8, got %s", np.InstanceType)
-	}
-	if np.RootVolumeSize != 256 {
-		t.Errorf("expected nodepool RootVolumeSize=256, got %d", np.RootVolumeSize)
-	}
-	if np.RootVolumeType != "pd-ssd" {
-		t.Errorf("expected nodepool RootVolumeType=pd-ssd, got %s", np.RootVolumeType)
-	}
-	if np.AutoRepair == nil || *np.AutoRepair != false {
-		t.Errorf("expected nodepool AutoRepair=false, got %v", np.AutoRepair)
-	}
-	if np.UpgradeType != "InPlace" {
-		t.Errorf("expected nodepool UpgradeType=InPlace, got %s", np.UpgradeType)
+			np := spec.Nodepools[0]
+			if np.ID != tt.npID {
+				t.Errorf("nodepool ID = %q, want %q", np.ID, tt.npID)
+			}
+			if np.Replicas != tt.npReplicas {
+				t.Errorf("nodepool Replicas = %d, want %d", np.Replicas, tt.npReplicas)
+			}
+			if np.InstanceType != tt.npInstanceType {
+				t.Errorf("nodepool InstanceType = %q, want %q", np.InstanceType, tt.npInstanceType)
+			}
+			if np.RootVolumeSize != tt.npRootSize {
+				t.Errorf("nodepool RootVolumeSize = %d, want %d", np.RootVolumeSize, tt.npRootSize)
+			}
+			if np.RootVolumeType != tt.npRootType {
+				t.Errorf("nodepool RootVolumeType = %q, want %q", np.RootVolumeType, tt.npRootType)
+			}
+			if np.AutoRepair == nil || *np.AutoRepair != tt.npAutoRepair {
+				t.Errorf("nodepool AutoRepair = %v, want %v", np.AutoRepair, tt.npAutoRepair)
+			}
+			if np.UpgradeType != tt.npUpgradeType {
+				t.Errorf("nodepool UpgradeType = %q, want %q", np.UpgradeType, tt.npUpgradeType)
+			}
+		})
 	}
 }
 
