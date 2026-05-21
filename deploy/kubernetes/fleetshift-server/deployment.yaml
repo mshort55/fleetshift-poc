@@ -85,10 +85,11 @@ spec:
                 path: database-url
             defaultMode: 0400
         - name: fleetshift-config-files
-          configMap:
-            name: fleetshift-server-config
+          secret:
+            secretName: gcphcp-config
             items:
               - key: gcphcp.yaml
                 path: gcphcp.yaml
+            defaultMode: 0400
         - name: web-assets
           emptyDir: {}
