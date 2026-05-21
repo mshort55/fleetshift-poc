@@ -709,7 +709,13 @@ func (s *OrchestrationWorkflowSpec) Run(record Record, fulfillmentID Fulfillment
 				if !IsTerminal(err) {
 					return struct{}{}, s.releaseLockAndContinue(record, fulfillmentID, probe)
 				}
-				result = NewFailedResult(fulfillmentID, f.Auth, err.Error())
+				result = ReconciliationResult{
+					FulfillmentID:   fulfillmentID,
+					State:           FulfillmentStateFailed,
+					ResolvedTargets: f.ResolvedTargets,
+					StatusReason:    err.Error(),
+					Auth:            f.Auth,
+				}
 			} else {
 				if _, err := RunActivity(record, s.CleanupDeliveryData(), fulfillmentID); err != nil {
 					probe.Error(err)
@@ -726,15 +732,31 @@ func (s *OrchestrationWorkflowSpec) Run(record Record, fulfillmentID Fulfillment
 			resolvedIDs, err := s.executePlacementPipeline(record, f, pool, fulfillmentID, startGen, probe, loaded.Evidence)
 			if errors.Is(err, errAuthPaused) {
 				probe.Error(err)
-				result = NewPausedAuthResult(fulfillmentID, f.Auth)
+				result = ReconciliationResult{
+					FulfillmentID:   fulfillmentID,
+					State:           FulfillmentStatePausedAuth,
+					ResolvedTargets: resolvedIDs,
+					Auth:            f.Auth,
+				}
 			} else if err != nil {
 				probe.Error(err)
 				if !IsTerminal(err) {
 					return struct{}{}, s.releaseLockAndContinue(record, fulfillmentID, probe)
 				}
-				result = NewFailedResult(fulfillmentID, f.Auth, err.Error())
+				result = ReconciliationResult{
+					FulfillmentID:   fulfillmentID,
+					State:           FulfillmentStateFailed,
+					ResolvedTargets: resolvedIDs,
+					StatusReason:    err.Error(),
+					Auth:            f.Auth,
+				}
 			} else {
-				result = NewActiveResult(fulfillmentID, resolvedIDs, f.Auth)
+				result = ReconciliationResult{
+					FulfillmentID:   fulfillmentID,
+					State:           FulfillmentStateActive,
+					ResolvedTargets: resolvedIDs,
+					Auth:            f.Auth,
+				}
 			}
 		}
 
@@ -792,6 +814,11 @@ func (s *OrchestrationWorkflowSpec) executePlacementPipeline(
 		return nil, nil
 	}
 
+	ids := make([]TargetID, len(resolved))
+	for i, t := range resolved {
+		ids[i] = t.ID
+	}
+
 	resolvedTargets := ResolvedTargetInfos(resolved, pool)
 	delta := ComputeTargetDelta(f.ResolvedTargets, resolvedTargets, pool)
 
@@ -800,17 +827,13 @@ func (s *OrchestrationWorkflowSpec) executePlacementPipeline(
 		Delta: delta,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("plan rollout: %w", err)
+		return ids, fmt.Errorf("plan rollout: %w", err)
 	}
 
 	if err := s.executeRolloutPlan(record, f, plan, fulfillmentID, startGen, probe, evidence); err != nil {
-		return nil, err
+		return ids, err
 	}
 
-	ids := make([]TargetID, len(resolved))
-	for i, t := range resolved {
-		ids[i] = t.ID
-	}
 	return ids, nil
 }
 

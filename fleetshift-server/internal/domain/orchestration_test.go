@@ -2121,6 +2121,122 @@ func TestOrchestration_DeliveryOutputs_ReplayAfterTransientFailure_ErrAlreadyExi
 }
 
 // ---------------------------------------------------------------------------
+// ResolvedTargets preservation across failure/auth-pause
+// ---------------------------------------------------------------------------
+
+func TestOrchestration_AuthFailure_PreservesResolvedTargets(t *testing.T) {
+	store, _ := setupStore(t)
+	seedFulfillmentAndDeployment(t, store, "d1", domain.Fulfillment{
+		Generation:        1,
+		ManifestStrategy:  domain.ManifestStrategySpec{Type: domain.ManifestStrategyInline, Manifests: []domain.Manifest{{Raw: json.RawMessage(`{}`)}}},
+		PlacementStrategy: domain.PlacementStrategySpec{Type: domain.PlacementStrategyStatic, Targets: []domain.TargetID{"t1"}},
+		State:             domain.FulfillmentStateCreating,
+	})
+	seedTargets(t, store, domain.TargetInfo{ID: "t1", Name: "t1", Type: "test"})
+
+	events := make(chan domain.FulfillmentEvent, 16)
+	wf := newTestWorkflow(store, authFailingDelivery{events: events}, events)
+
+	rec := &simpleRecord{ctx: context.Background(), events: events}
+	_, err := wf.Run(rec, domain.FulfillmentID("d1"))
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	dep := getFulfillment(t, store, "d1")
+	if dep.State != domain.FulfillmentStatePausedAuth {
+		t.Fatalf("State = %q, want paused_auth", dep.State)
+	}
+	if len(dep.ResolvedTargets) != 1 || dep.ResolvedTargets[0] != "t1" {
+		t.Errorf("ResolvedTargets = %v, want [t1]; placement resolved before auth failure so targets must be preserved", dep.ResolvedTargets)
+	}
+}
+
+func TestOrchestration_DeleteAfterAuthPause_CallsRemove(t *testing.T) {
+	store, _ := setupStore(t)
+	seedFulfillmentAndDeployment(t, store, "d1", domain.Fulfillment{
+		Generation:        1,
+		ManifestStrategy:  domain.ManifestStrategySpec{Type: domain.ManifestStrategyInline, Manifests: []domain.Manifest{{Raw: json.RawMessage(`{}`)}}},
+		PlacementStrategy: domain.PlacementStrategySpec{Type: domain.PlacementStrategyStatic, Targets: []domain.TargetID{"t1"}},
+		State:             domain.FulfillmentStateCreating,
+	})
+	seedTargets(t, store, domain.TargetInfo{ID: "t1", Name: "t1", Type: "test"})
+
+	// Phase 1: delivery auth-fails → PausedAuth with ResolvedTargets preserved.
+	events := make(chan domain.FulfillmentEvent, 16)
+	wf := newTestWorkflow(store, authFailingDelivery{events: events}, events)
+	rec := &simpleRecord{ctx: context.Background(), events: events}
+	if _, err := wf.Run(rec, domain.FulfillmentID("d1")); err != nil {
+		t.Fatalf("Run (create): %v", err)
+	}
+
+	// Phase 2: transition to deleting (simulates user calling Delete).
+	ctx := context.Background()
+	tx, err := store.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f, err := tx.Fulfillments().Get(ctx, domain.FulfillmentID("d1"))
+	if err != nil {
+		tx.Rollback()
+		t.Fatal(err)
+	}
+	f.State = domain.FulfillmentStateDeleting
+	f.BumpGeneration()
+	if err := tx.Fulfillments().Update(ctx, f); err != nil {
+		tx.Rollback()
+		t.Fatal(err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Phase 3: run orchestration again — should call Remove on t1.
+	events2 := make(chan domain.FulfillmentEvent, 16)
+	removeAgent := &recordingRemoveDelivery{events: events2}
+	wf2 := newTestWorkflow(store, removeAgent, events2)
+	rec2 := &simpleRecord{ctx: ctx, events: events2}
+	recorder := &recordingRecord{ctx: rec2.ctx, delegate: rec2}
+	if _, err := wf2.Run(recorder, domain.FulfillmentID("d1")); err != nil {
+		t.Fatalf("Run (delete): %v", err)
+	}
+
+	removeAgent.mu.Lock()
+	removed := removeAgent.removed
+	removeAgent.mu.Unlock()
+
+	if len(removed) != 1 || removed[0] != "t1" {
+		t.Errorf("Remove called for targets %v, want [t1]; delete must clean up targets resolved before auth pause", removed)
+	}
+}
+
+// recordingRemoveDelivery tracks which targets had Remove called.
+type recordingRemoveDelivery struct {
+	events  chan<- domain.FulfillmentEvent
+	mu      sync.Mutex
+	removed []domain.TargetID
+}
+
+func (d *recordingRemoveDelivery) Deliver(_ context.Context, _ domain.TargetInfo, deliveryID domain.DeliveryID, _ []domain.Manifest, _ domain.DeliveryAuth, _ *domain.Attestation, _ domain.Generation) error {
+	go func() {
+		d.events <- domain.FulfillmentEvent{
+			DeliveryCompleted: &domain.DeliveryCompletionEvent{
+				DeliveryID: deliveryID,
+				Result:     domain.DeliveryResult{State: domain.DeliveryStateDelivered},
+			},
+		}
+	}()
+	return nil
+}
+
+func (d *recordingRemoveDelivery) Remove(_ context.Context, target domain.TargetInfo, _ domain.DeliveryID, _ []domain.Manifest, _ domain.DeliveryAuth, _ *domain.Attestation, _ domain.Generation) error {
+	d.mu.Lock()
+	d.removed = append(d.removed, target.ID)
+	d.mu.Unlock()
+	return nil
+}
+
+// ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
