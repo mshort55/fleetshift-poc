@@ -39,7 +39,7 @@ func (o *ClusterOutput) Target() domain.ProvisionedTarget {
 	if len(o.CACert) > 0 {
 		props["ca_cert"] = string(o.CACert)
 	}
-	if o.SATokenRef != "" {
+	if o.SATokenRef != "" && len(o.SAToken) > 0 {
 		props["service_account_token_ref"] = string(o.SATokenRef)
 	}
 	if len(o.TrustBundles) > 0 {
@@ -60,7 +60,7 @@ func (o *ClusterOutput) Target() domain.ProvisionedTarget {
 // stored in the vault for this cluster. Returns nil when no platform
 // SA was bootstrapped.
 func (o *ClusterOutput) Secrets() []domain.ProducedSecret {
-	if o.SATokenRef == "" {
+	if o.SATokenRef == "" || len(o.SAToken) == 0 {
 		return nil
 	}
 	return []domain.ProducedSecret{{

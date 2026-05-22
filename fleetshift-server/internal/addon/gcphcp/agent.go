@@ -195,7 +195,8 @@ func (a *Agent) Deliver(
 
 func (a *Agent) failDelivery(ctx context.Context, progress *deliveryProgress, state domain.DeliveryState, msg string) {
 	a.observer.Error(msg)
-	if err := progress.Complete(ctx, domain.DeliveryResult{State: state, Message: msg}); err != nil {
+	reportCtx := context.WithoutCancel(ctx)
+	if err := progress.Complete(reportCtx, domain.DeliveryResult{State: state, Message: msg}); err != nil {
 		a.observer.Error("failed to report delivery failure", "error", err)
 	}
 }
@@ -294,7 +295,12 @@ func (a *Agent) Remove(
 			return fmt.Errorf("failed to delete cluster %s: %w", spec.Name, err)
 		}
 
+		a.clusterMu.Lock()
+		delete(a.clusterGen, spec.Name)
+		a.clusterMu.Unlock()
+
 		lock.Unlock()
+		a.deliveryLocks.Delete(spec.Name)
 		a.observer.Info("cluster deleted successfully", "cluster", spec.Name)
 	}
 

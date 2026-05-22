@@ -3,6 +3,7 @@ package gcphcp
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -57,6 +58,9 @@ func noopProgress() *deliveryProgress {
 }
 
 func (f *fakeNodepoolStatusClient) ListNodepools(_ context.Context, _ string) ([]map[string]any, error) {
+	if len(f.listSeq) == 0 {
+		return nil, fmt.Errorf("fakeNodepoolStatusClient: no ListNodepools responses configured")
+	}
 	idx := f.listCalls
 	if idx >= len(f.listSeq) {
 		idx = len(f.listSeq) - 1
@@ -69,7 +73,10 @@ func (f *fakeNodepoolStatusClient) GetNodepoolStatus(_ context.Context, nodepool
 	if f.statusCall == nil {
 		f.statusCall = make(map[string]int)
 	}
-	seq := f.statusByID[nodepoolID]
+	seq, ok := f.statusByID[nodepoolID]
+	if !ok || len(seq) == 0 {
+		return nil, fmt.Errorf("fakeNodepoolStatusClient: no GetNodepoolStatus responses configured for %q", nodepoolID)
+	}
 	idx := f.statusCall[nodepoolID]
 	if idx >= len(seq) {
 		idx = len(seq) - 1

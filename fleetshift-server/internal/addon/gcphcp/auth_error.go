@@ -8,9 +8,9 @@ import "errors"
 // instead of DeliveryStateFailed, which causes the platform to
 // transition the fulfillment to FulfillmentStatePausedAuth.
 //
-// Only HTTP 401 (Unauthorized) from the CLS backend and IAM endpoint,
-// and OAuth "invalid_grant" from the STS endpoint, are wrapped in this
-// type. HTTP 403 (Forbidden) is NOT wrapped because it indicates a
+// HTTP 401 (Unauthorized) from any backend (CLS, IAM, STS) and OAuth
+// "invalid_grant" from the STS endpoint are wrapped in this type.
+// HTTP 403 (Forbidden) is NOT wrapped because it indicates a
 // permission/configuration issue that fresh user credentials will not
 // resolve.
 type authExpiredError struct {

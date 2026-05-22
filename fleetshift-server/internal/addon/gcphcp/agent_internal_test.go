@@ -412,3 +412,84 @@ func TestAgent_Remove_DeletesClusterViaReconciler(t *testing.T) {
 		t.Fatalf("expected PSC cleanup, got %d calls", infra.waitPSCCalls)
 	}
 }
+
+func TestAgent_Remove_ClearsGenerationSoRecreateIsAccepted(t *testing.T) {
+	withAgentHooksStubbed(t)
+
+	buildDestroyHypershiftWorkspace = func(_ string, _ TargetConfig) (*HypershiftWorkspace, error) {
+		dir, err := os.MkdirTemp("", "agent-recreate-test-*")
+		if err != nil {
+			return nil, err
+		}
+		return &HypershiftWorkspace{
+			Env:     []string{"PATH=/usr/bin"},
+			tempDir: dir,
+		}, nil
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/clusters":
+			fmt.Fprint(w, `{"clusters":[{"id":"c-del","name":"test-cls"}]}`)
+		case r.Method == http.MethodDelete && r.URL.Path == "/api/v1/clusters/c-del":
+			w.WriteHeader(http.StatusNoContent)
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/clusters/c-del":
+			w.WriteHeader(http.StatusNotFound)
+			fmt.Fprint(w, `{"error":"not found"}`)
+		default:
+			http.Error(w, "unexpected", http.StatusInternalServerError)
+		}
+	}))
+	defer server.Close()
+
+	reporter := newAgentTestReporter()
+	agent := &Agent{
+		reconciler: &Reconciler{
+			gateway: GatewayConfig{URL: server.URL, Audience: "test-audience"},
+			infra:   &fakeCleanupInfra{},
+		},
+		observer:   noopObserver{},
+		reporter:   reporter,
+		trustMap:   make(map[domain.IssuerURL]domain.TrustBundleEntry),
+		clusterGen: make(map[string]domain.Generation),
+	}
+
+	spec := json.RawMessage(`{
+		"endpointAccess":"PublicAndPrivate","releaseVersion":"4.22.0","channelGroup":"stable",
+		"nodepools":[{"id":"w","replicas":2,"instanceType":"n1-standard-4",
+		"rootVolumeSize":128,"rootVolumeType":"pd-standard","autoRepair":true,"upgradeType":"Replace"}]
+	}`)
+
+	target := domain.TargetInfo{Properties: map[string]string{
+		"id": "target-1", "gcp_project": "proj", "region": "us-central1",
+		"workforce_pool": "pool", "workforce_provider": "prov",
+		"broker_sa_email": "broker@example.com",
+	}}
+	manifest := domain.Manifest{
+		ResourceType: ClusterResourceType,
+		Name:         "test-cls",
+		Raw:          spec,
+	}
+
+	// Seed generation high-water mark as if prior deliveries happened.
+	agent.acceptGeneration("test-cls", 5)
+
+	// Remove with generation 6 — succeeds and should clear generation state.
+	err := agent.Remove(
+		context.Background(),
+		target,
+		domain.DeliveryID("remove-1"),
+		[]domain.Manifest{manifest},
+		domain.DeliveryAuth{Token: "caller-token"},
+		nil,
+		6,
+	)
+	if err != nil {
+		t.Fatalf("Remove() error = %v", err)
+	}
+
+	// After delete, a fresh delivery with generation 0 must be accepted.
+	if !agent.acceptGeneration("test-cls", 0) {
+		t.Fatal("generation 0 should be accepted after delete cleared the high-water mark")
+	}
+}

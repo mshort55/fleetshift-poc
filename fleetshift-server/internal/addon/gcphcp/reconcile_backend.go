@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"sort"
 	"time"
 )
@@ -454,6 +455,10 @@ func deleteClusterIfPresent(
 
 	progress.Info(ctx, fmt.Sprintf("Deleting cluster %s (ID: %s)", clusterName, clusterID))
 	if err := client.DeleteCluster(ctx, clusterID); err != nil {
+		if isCLSHTTPStatus(err, http.StatusNotFound) {
+			progress.Info(ctx, fmt.Sprintf("Cluster %s already absent after resolve; continuing cleanup", clusterName))
+			return clusterID, false, nil
+		}
 		return "", false, fmt.Errorf("delete cluster: %w", err)
 	}
 

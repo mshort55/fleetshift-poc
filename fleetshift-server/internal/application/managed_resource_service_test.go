@@ -270,8 +270,11 @@ func TestManagedResourceService_DeleteKeepsResourceVisibleDuringCleanup(t *testi
 	})
 
 	{
-		tx, _ := h.store.Begin(ctx)
-		_ = tx.Targets().Create(ctx, domain.TargetInfo{
+		tx, err := h.store.Begin(ctx)
+		if err != nil {
+			t.Fatalf("Begin: %v", err)
+		}
+		if err := tx.Targets().Create(ctx, domain.TargetInfo{
 			ID:   "addon-cluster-mgmt",
 			Name: "Cluster Addon",
 			Type: "test",
@@ -279,8 +282,12 @@ func TestManagedResourceService_DeleteKeepsResourceVisibleDuringCleanup(t *testi
 				"foo": "bar",
 			},
 			AcceptedResourceTypes: []domain.ResourceType{"clusters"},
-		})
-		_ = tx.Commit()
+		}); err != nil {
+			t.Fatalf("Targets.Create: %v", err)
+		}
+		if err := tx.Commit(); err != nil {
+			t.Fatalf("Commit: %v", err)
+		}
 	}
 
 	_, err := h.typeSvc.Create(ctx, application.CreateTypeInput{
@@ -350,8 +357,11 @@ func TestManagedResourceService_DeleteAllowsRecreateSameName(t *testing.T) {
 	h := setupManagedResources(t)
 
 	{
-		tx, _ := h.store.Begin(ctx)
-		_ = tx.Targets().Create(ctx, domain.TargetInfo{
+		tx, err := h.store.Begin(ctx)
+		if err != nil {
+			t.Fatalf("Begin: %v", err)
+		}
+		if err := tx.Targets().Create(ctx, domain.TargetInfo{
 			ID:   "addon-cluster-mgmt",
 			Name: "Cluster Addon",
 			Type: "test",
@@ -359,8 +369,12 @@ func TestManagedResourceService_DeleteAllowsRecreateSameName(t *testing.T) {
 				"foo": "bar",
 			},
 			AcceptedResourceTypes: []domain.ResourceType{"clusters"},
-		})
-		_ = tx.Commit()
+		}); err != nil {
+			t.Fatalf("Targets.Create: %v", err)
+		}
+		if err := tx.Commit(); err != nil {
+			t.Fatalf("Commit: %v", err)
+		}
 	}
 
 	_, err := h.typeSvc.Create(ctx, application.CreateTypeInput{

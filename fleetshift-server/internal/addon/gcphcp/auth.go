@@ -140,7 +140,7 @@ func (a *BrokerAuth) exchangeSTS(ctx context.Context, callerToken string) (strin
 		}
 		_ = json.Unmarshal(body, &oauthErr)
 		baseErr := fmt.Errorf("STS returned status %d: %s", resp.StatusCode, string(body))
-		if oauthErr.Error == "invalid_grant" {
+		if resp.StatusCode == http.StatusUnauthorized || oauthErr.Error == "invalid_grant" {
 			return "", newAuthExpiredError(baseErr)
 		}
 		return "", baseErr

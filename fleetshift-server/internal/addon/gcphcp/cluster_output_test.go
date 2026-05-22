@@ -16,6 +16,7 @@ func TestClusterOutput_Target(t *testing.T) {
 		APIServer: "https://1.2.3.4:6443",
 		CACert:    []byte("-----BEGIN CERTIFICATE-----\ntest\n-----END CERTIFICATE-----"),
 		SATokenRef: "vault/secret/test-token",
+		SAToken:    []byte("sa-token-value"),
 		TrustBundles: []domain.TrustBundleEntry{
 			{
 				IssuerURL:                  "https://issuer.example.com",
