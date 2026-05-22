@@ -357,6 +357,10 @@ func (s *OrchestrationWorkflowSpec) DeliverToTarget() Activity[DeliverInput, str
 // agent reports removal outcomes via [DeliveryReporter.ReportResult],
 // matching the async pattern of [DeliverToTarget].
 //
+// [Delivery.Withdraw] resets the record to [DeliveryStatePending] so
+// the addon's progress events can transition through the delivery
+// state machine and reach the observer.
+//
 // On retry, if the delivery is still Pending at the same generation
 // (previous dispatch failed), [Delivery.Retry] bumps the timestamp
 // and re-dispatches. If the addon already acked (delivery progressed
