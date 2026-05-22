@@ -77,12 +77,31 @@ FLEETSHIFT_SERVER_ADDONS=${FLEETSHIFT_SERVER_ADDONS}
 GCPHCP_CONFIG_PATH=${GCPHCP_CONFIG_PATH}
 EOF
 
+POSTGRES_PASSWORD_URLENC=$(printf '%s' "${POSTGRES_PASSWORD}" | sed 's/%/%25/g; s/#/%23/g; s/\?/%3F/g; s/@/%40/g; s/:/%3A/g; s/\//%2F/g')
+
 cat > "${K8S_DIR}/secrets.env" <<EOF
 POSTGRES_USER=${POSTGRES_USER}
 POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
 POSTGRES_DB=${POSTGRES_DB}
-DATABASE_URL=postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}?sslmode=disable
+DATABASE_URL=postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD_URLENC}@postgres:5432/${POSTGRES_DB}?sslmode=disable
 EOF
+
+# --- Ensure namespace exists (needed for pull secret before full apply) ---
+oc apply -f "${K8S_DIR}/namespace.yaml"
+
+# --- Quay pull secret (must exist before pods are created) ---
+if [ -n "${QUAY_PULL_USER:-}" ] && [ -n "${QUAY_PULL_TOKEN:-}" ]; then
+  echo "Setting up quay.io pull secret..."
+  oc delete secret quay-pull-secret -n "${NAMESPACE}" --ignore-not-found=true
+  oc create secret docker-registry quay-pull-secret \
+    --docker-server=quay.io \
+    --docker-username="${QUAY_PULL_USER}" \
+    --docker-password="${QUAY_PULL_TOKEN}" \
+    -n "${NAMESPACE}"
+  oc secrets link default quay-pull-secret --for=pull -n "${NAMESPACE}"
+else
+  echo "WARNING: QUAY_PULL_USER/QUAY_PULL_TOKEN not set — image imports may fail if repos are private."
+fi
 
 # --- Apply manifests ---
 echo "Applying Kustomize manifests..."
