@@ -9,6 +9,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -348,13 +349,13 @@ func TestAgent_Remove_DeletesClusterViaReconciler(t *testing.T) {
 		}, nil
 	}
 
-	var deleteRequested bool
+	var deleteRequested atomic.Bool
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/clusters":
 			fmt.Fprint(w, `{"clusters":[{"id":"c-del","name":"test-cls"}]}`)
 		case r.Method == http.MethodDelete && r.URL.Path == "/api/v1/clusters/c-del":
-			deleteRequested = true
+			deleteRequested.Store(true)
 			w.WriteHeader(http.StatusNoContent)
 		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/clusters/c-del":
 			w.WriteHeader(http.StatusNotFound)
@@ -405,7 +406,7 @@ func TestAgent_Remove_DeletesClusterViaReconciler(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Remove() error = %v", err)
 	}
-	if !deleteRequested {
+	if !deleteRequested.Load() {
 		t.Fatal("expected CLS DeleteCluster to be called")
 	}
 	if infra.waitPSCCalls != 1 {

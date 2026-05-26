@@ -77,7 +77,7 @@ FLEETSHIFT_SERVER_ADDONS=${FLEETSHIFT_SERVER_ADDONS}
 GCPHCP_CONFIG_PATH=${GCPHCP_CONFIG_PATH}
 EOF
 
-POSTGRES_PASSWORD_URLENC=$(printf '%s' "${POSTGRES_PASSWORD}" | sed 's/%/%25/g; s/#/%23/g; s/\?/%3F/g; s/@/%40/g; s/:/%3A/g; s/\//%2F/g')
+POSTGRES_PASSWORD_URLENC=$(printf '%s' "${POSTGRES_PASSWORD}" | python3 -c "import urllib.parse, sys; sys.stdout.write(urllib.parse.quote(sys.stdin.read(), safe=''))")
 
 cat > "${K8S_DIR}/secrets.env" <<EOF
 POSTGRES_USER=${POSTGRES_USER}
@@ -88,6 +88,15 @@ EOF
 
 # --- Ensure namespace exists (needed for pull secret before full apply) ---
 oc apply -f "${K8S_DIR}/namespace.yaml"
+
+# Wait for default ServiceAccount (created asynchronously after namespace)
+for _ in $(seq 1 30); do
+  if oc get serviceaccount default -n "${NAMESPACE}" >/dev/null 2>&1; then
+    break
+  fi
+  sleep 1
+done
+oc get serviceaccount default -n "${NAMESPACE}" >/dev/null
 
 # --- Quay pull secret (must exist before pods are created) ---
 if [ -n "${QUAY_PULL_USER:-}" ] && [ -n "${QUAY_PULL_TOKEN:-}" ]; then

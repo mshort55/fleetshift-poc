@@ -40,7 +40,7 @@ message Nodepool {
   string root_volume_type = 5 [(buf.validate.field).string.min_len = 1];
 
   // Enable auto-repair for nodes in this pool.
-  bool auto_repair = 6 [(buf.validate.field).required = true];
+  optional bool auto_repair = 6 [(buf.validate.field).required = true];
 
   // Upgrade type strategy (e.g., "Replace", "InPlace").
   string upgrade_type = 7 [(buf.validate.field).string.min_len = 1];

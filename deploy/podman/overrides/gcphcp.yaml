@@ -3,4 +3,4 @@ services:
     environment:
       GCPHCP_CONFIG: /config/gcphcp.yaml
     volumes:
-      - ${GCPHCP_CONFIG}:/config/gcphcp.yaml:ro
+      - ${GCPHCP_CONFIG:?Set GCPHCP_CONFIG to a valid gcphcp.yaml path}:/config/gcphcp.yaml:ro

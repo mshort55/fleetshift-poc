@@ -1,6 +1,7 @@
 package gcphcp
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"regexp"
@@ -40,7 +41,9 @@ func NodepoolName(clusterName, poolID string) string {
 // ParseClusterSpec unmarshals and validates a ClusterSpec from JSON.
 func ParseClusterSpec(raw json.RawMessage) (ClusterSpec, error) {
 	var spec ClusterSpec
-	if err := json.Unmarshal(raw, &spec); err != nil {
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&spec); err != nil {
 		return ClusterSpec{}, fmt.Errorf("failed to unmarshal cluster spec: %w", err)
 	}
 

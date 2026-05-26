@@ -36,10 +36,10 @@ func TestGenerateClusterKeypair(t *testing.T) {
 			Keys []map[string]any `json:"keys"`
 		}
 		if err := json.Unmarshal(kp.JWKSJSON, &jwks); err != nil {
-			t.Errorf("JWKSJSON is not valid JSON: %v", err)
+			t.Fatalf("JWKSJSON is not valid JSON: %v", err)
 		}
 		if len(jwks.Keys) != 1 {
-			t.Errorf("expected 1 key in JWKS, got %d", len(jwks.Keys))
+			t.Fatalf("expected 1 key in JWKS, got %d", len(jwks.Keys))
 		}
 
 		key := jwks.Keys[0]

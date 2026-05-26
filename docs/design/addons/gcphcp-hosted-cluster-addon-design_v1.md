@@ -952,8 +952,9 @@ deferred (see section 11).
 
 The agent tracks a per-cluster generation high-water mark. When a delivery arrives, the agent
 checks the generation against the highest previously accepted generation for that cluster name.
-Stale deliveries (generation less than or equal to the current high-water mark) are rejected
-immediately with a failed delivery result.
+Stale deliveries (generation strictly less than the current high-water mark) are rejected
+immediately with a failed delivery result. Equal-generation deliveries are permitted to support
+orchestration retries.
 
 This prevents out-of-order deliveries from overwriting newer spec state with older spec state.
 
