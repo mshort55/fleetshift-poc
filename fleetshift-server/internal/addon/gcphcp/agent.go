@@ -241,7 +241,10 @@ func (a *Agent) deliverAsync(
 }
 
 // Remove implements domain.DeliveryAgent.Remove.
-// It deletes clusters specified in the manifests.
+// It deletes clusters specified in the manifests. All outcomes
+// (success, auth failure, reconciler error) are reported via the
+// DeliveryReporter; the return value is reserved for infrastructure
+// failures (e.g. unparseable manifests).
 func (a *Agent) Remove(
 	ctx context.Context,
 	target domain.TargetInfo,
@@ -293,9 +296,13 @@ func (a *Agent) Remove(
 			lock.Unlock()
 			a.observer.Error("failed to delete cluster", "error", err, "cluster", spec.Name)
 			if IsAuthExpiredError(err) {
-				return fmt.Errorf("%w: %v", domain.ErrAuthExpired, err)
+				a.failDelivery(ctx, progress, domain.DeliveryStateAuthFailed,
+					fmt.Sprintf("auth expired deleting cluster %s: %v", spec.Name, err))
+			} else {
+				a.failDelivery(ctx, progress, domain.DeliveryStateFailed,
+					fmt.Sprintf("failed to delete cluster %s: %v", spec.Name, err))
 			}
-			return fmt.Errorf("failed to delete cluster %s: %w", spec.Name, err)
+			return nil
 		}
 
 		a.clusterMu.Lock()
@@ -306,6 +313,12 @@ func (a *Agent) Remove(
 		a.observer.Info("cluster deleted successfully", "cluster", spec.Name)
 	}
 
+	asyncCtx := context.WithoutCancel(ctx)
+	go func() {
+		if err := progress.Complete(asyncCtx, domain.DeliveryResult{State: domain.DeliveryStateDelivered}); err != nil {
+			a.observer.Error("failed to report removal completion", "error", err)
+		}
+	}()
 	return nil
 }
 

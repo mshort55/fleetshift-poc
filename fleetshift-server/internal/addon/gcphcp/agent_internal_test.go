@@ -3,7 +3,6 @@ package gcphcp
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -412,6 +411,16 @@ func TestAgent_Remove_DeletesClusterViaReconciler(t *testing.T) {
 	if infra.waitPSCCalls != 1 {
 		t.Fatalf("expected PSC cleanup, got %d calls", infra.waitPSCCalls)
 	}
+
+	select {
+	case result := <-reporter.done:
+		if result.State != domain.DeliveryStateDelivered {
+			t.Fatalf("reporter state = %q, want %q; message = %q",
+				result.State, domain.DeliveryStateDelivered, result.Message)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timeout waiting for reporter completion signal")
+	}
 }
 
 func TestAgent_Remove_ClearsGenerationSoRecreateIsAccepted(t *testing.T) {
@@ -489,13 +498,22 @@ func TestAgent_Remove_ClearsGenerationSoRecreateIsAccepted(t *testing.T) {
 		t.Fatalf("Remove() error = %v", err)
 	}
 
+	select {
+	case result := <-reporter.done:
+		if result.State != domain.DeliveryStateDelivered {
+			t.Fatalf("reporter state = %q, want %q", result.State, domain.DeliveryStateDelivered)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timeout waiting for reporter completion signal")
+	}
+
 	// After delete, a fresh delivery with generation 0 must be accepted.
 	if !agent.acceptGeneration("test-cls", 0) {
 		t.Fatal("generation 0 should be accepted after delete cleared the high-water mark")
 	}
 }
 
-func TestAgent_Remove_AuthExpiredReturnsErrAuthExpired(t *testing.T) {
+func TestAgent_Remove_AuthExpiredSignalsAuthFailed(t *testing.T) {
 	withAgentHooksStubbed(t)
 
 	// Override newBrokerAuth to return an auth expired error.
@@ -540,13 +558,20 @@ func TestAgent_Remove_AuthExpiredReturnsErrAuthExpired(t *testing.T) {
 		nil,
 		1,
 	)
-	if err == nil {
-		t.Fatal("Remove() should return an error wrapping domain.ErrAuthExpired")
+	if err != nil {
+		t.Fatalf("Remove() should return nil (auth failures signal via reporter), got: %v", err)
 	}
-	if !errors.Is(err, domain.ErrAuthExpired) {
-		t.Fatalf("error should wrap domain.ErrAuthExpired, got: %v", err)
-	}
-	if !strings.Contains(err.Error(), "invalid_grant") {
-		t.Fatalf("error should contain original cause, got: %v", err)
+
+	select {
+	case result := <-reporter.done:
+		if result.State != domain.DeliveryStateAuthFailed {
+			t.Fatalf("reporter state = %q, want %q; message = %q",
+				result.State, domain.DeliveryStateAuthFailed, result.Message)
+		}
+		if !strings.Contains(result.Message, "auth expired") {
+			t.Fatalf("reporter message = %q, want auth expired context", result.Message)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timeout waiting for reporter auth failure signal")
 	}
 }
