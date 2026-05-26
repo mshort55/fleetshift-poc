@@ -33,6 +33,12 @@ var (
 	// transition violates the entity's lifecycle rules (e.g.
 	// transitioning a terminal delivery back to progressing).
 	ErrIllegalStateTransition = errors.New("illegal state transition")
+
+	// ErrAuthExpired indicates that a delivery agent's credentials
+	// have expired or been invalidated. The orchestration layer
+	// translates this into FulfillmentStatePausedAuth so the
+	// fulfillment waits for fresh credentials.
+	ErrAuthExpired = errors.New("delivery auth expired")
 )
 
 // terminalPrefix is the marker prepended to terminal errors.

@@ -3,6 +3,7 @@ package gcphcp
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -494,7 +495,7 @@ func TestAgent_Remove_ClearsGenerationSoRecreateIsAccepted(t *testing.T) {
 	}
 }
 
-func TestAgent_Remove_AuthExpiredReportsAuthFailedViaProgress(t *testing.T) {
+func TestAgent_Remove_AuthExpiredReturnsErrAuthExpired(t *testing.T) {
 	withAgentHooksStubbed(t)
 
 	// Override newBrokerAuth to return an auth expired error.
@@ -539,19 +540,13 @@ func TestAgent_Remove_AuthExpiredReportsAuthFailedViaProgress(t *testing.T) {
 		nil,
 		1,
 	)
-	if err != nil {
-		t.Fatalf("Remove() should return nil on auth error (reported via progress), got: %v", err)
+	if err == nil {
+		t.Fatal("Remove() should return an error wrapping domain.ErrAuthExpired")
 	}
-
-	select {
-	case result := <-reporter.done:
-		if result.State != domain.DeliveryStateAuthFailed {
-			t.Fatalf("state = %q, want %q", result.State, domain.DeliveryStateAuthFailed)
-		}
-		if !strings.Contains(result.Message, "credentials expired") {
-			t.Fatalf("message = %q, want 'credentials expired' context", result.Message)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("timeout waiting for auth failure delivery result")
+	if !errors.Is(err, domain.ErrAuthExpired) {
+		t.Fatalf("error should wrap domain.ErrAuthExpired, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "invalid_grant") {
+		t.Fatalf("error should contain original cause, got: %v", err)
 	}
 }

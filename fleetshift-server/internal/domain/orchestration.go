@@ -710,15 +710,23 @@ func (s *OrchestrationWorkflowSpec) Run(record Record, fulfillmentID Fulfillment
 		case FulfillmentStateDeleting:
 			if err := s.executeDelete(record, f, pool, fulfillmentID, probe, loaded.Evidence); err != nil {
 				probe.Error(err)
-				if !IsTerminal(err) {
+				if errors.Is(err, errAuthPaused) {
+					result = ReconciliationResult{
+						FulfillmentID:   fulfillmentID,
+						State:           FulfillmentStatePausedAuth,
+						ResolvedTargets: f.ResolvedTargets,
+						Auth:            f.Auth,
+					}
+				} else if !IsTerminal(err) {
 					return struct{}{}, s.releaseLockAndContinue(record, fulfillmentID, probe)
-				}
-				result = ReconciliationResult{
-					FulfillmentID:   fulfillmentID,
-					State:           FulfillmentStateFailed,
-					ResolvedTargets: f.ResolvedTargets,
-					StatusReason:    err.Error(),
-					Auth:            f.Auth,
+				} else {
+					result = ReconciliationResult{
+						FulfillmentID:   fulfillmentID,
+						State:           FulfillmentStateFailed,
+						ResolvedTargets: f.ResolvedTargets,
+						StatusReason:    err.Error(),
+						Auth:            f.Auth,
+					}
 				}
 			} else {
 				if _, err := RunActivity(record, s.CleanupDeliveryData(), fulfillmentID); err != nil {
@@ -878,6 +886,9 @@ func (s *OrchestrationWorkflowSpec) executeDelete(
 	_, err := s.dispatchAndAwait(record, func(id DeliveryID) (bool, error) {
 		out, err := RunActivity(record, s.RemoveFromTarget(), inputs[id])
 		if err != nil {
+			if errors.Is(err, ErrAuthExpired) {
+				return false, fmt.Errorf("%w: target %s: %v", errAuthPaused, inputs[id].Target.ID, err)
+			}
 			return false, fmt.Errorf("remove delivery for target %s: %w", inputs[id].Target.ID, err)
 		}
 		return out.Dispatched, nil

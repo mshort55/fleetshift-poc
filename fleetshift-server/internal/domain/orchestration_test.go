@@ -2313,6 +2313,41 @@ func (d *recordingRemoveDelivery) Remove(_ context.Context, target domain.Target
 	return nil
 }
 
+func TestOrchestration_DeletePipeline_AuthExpired_SetsPausedAuth(t *testing.T) {
+	store, _ := setupStore(t)
+	seedFulfillmentAndDeployment(t, store, "d1", domain.Fulfillment{
+		Generation:        2,
+		ResolvedTargets:   []domain.TargetID{"t1"},
+		ManifestStrategy:  domain.ManifestStrategySpec{Type: domain.ManifestStrategyInline, Manifests: []domain.Manifest{{Raw: json.RawMessage(`{}`)}}},
+		PlacementStrategy: domain.PlacementStrategySpec{Type: domain.PlacementStrategyStatic, Targets: []domain.TargetID{"t1"}},
+		State:             domain.FulfillmentStateDeleting,
+	})
+	seedTargets(t, store, domain.TargetInfo{ID: "t1", Name: "t1", Type: "test"})
+	seedDelivery(t, store, domain.Delivery{
+		ID: "d1:t1", FulfillmentID: domain.FulfillmentID("d1"), TargetID: "t1",
+		Manifests: []domain.Manifest{{Raw: json.RawMessage(`{}`)}},
+		State:     domain.DeliveryStateDelivered,
+	})
+
+	events := make(chan domain.FulfillmentEvent, 16)
+	authErr := fmt.Errorf("%w: STS token exchange failed: invalid_grant", domain.ErrAuthExpired)
+	wf := newTestWorkflow(store, &failingRemoveDelivery{events: events, err: authErr}, events)
+
+	rec := &simpleRecord{ctx: context.Background(), events: events}
+	_, err := wf.Run(rec, domain.FulfillmentID("d1"))
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	dep := getFulfillment(t, store, "d1")
+	if dep.State != domain.FulfillmentStatePausedAuth {
+		t.Errorf("State = %q, want paused_auth", dep.State)
+	}
+	if len(dep.ResolvedTargets) != 1 || dep.ResolvedTargets[0] != "t1" {
+		t.Errorf("ResolvedTargets = %v, want [t1]; targets must be preserved across auth pause", dep.ResolvedTargets)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------

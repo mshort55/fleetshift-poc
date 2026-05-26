@@ -293,10 +293,7 @@ func (a *Agent) Remove(
 			lock.Unlock()
 			a.observer.Error("failed to delete cluster", "error", err, "cluster", spec.Name)
 			if IsAuthExpiredError(err) {
-				if reportErr := progress.Complete(ctx, deliveryResultForReconcileError(err)); reportErr != nil {
-					a.observer.Error("failed to report delete auth failure", "error", reportErr, "cluster", spec.Name)
-				}
-				return nil
+				return fmt.Errorf("%w: %v", domain.ErrAuthExpired, err)
 			}
 			return fmt.Errorf("failed to delete cluster %s: %w", spec.Name, err)
 		}
