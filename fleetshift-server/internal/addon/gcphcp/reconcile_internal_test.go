@@ -1137,9 +1137,11 @@ func TestReconcilerReconcile_CleansHypershiftWorkspaceBeforeNodepoolReconcile(t 
 
 func TestReconcilerDelete_WaitsForPSCCleanupBeforeBuildingHypershiftWorkspace(t *testing.T) {
 	origNewBrokerAuth := newBrokerAuth
+	origMintCleanupAccessToken := mintCleanupAccessTokenFn
 	origBuildDestroyWorkspace := buildDestroyWorkspaceWithTokenURL
 	defer func() {
 		newBrokerAuth = origNewBrokerAuth
+		mintCleanupAccessTokenFn = origMintCleanupAccessToken
 		buildDestroyWorkspaceWithTokenURL = origBuildDestroyWorkspace
 	}()
 
@@ -1153,6 +1155,9 @@ func TestReconcilerDelete_WaitsForPSCCleanupBeforeBuildingHypershiftWorkspace(t 
 	}
 	newBrokerAuth = func(BrokerAuthConfig) brokerAuthExchanger {
 		return fakeAuth
+	}
+	mintCleanupAccessTokenFn = func(context.Context, BrokerAuthConfig, string) (string, time.Time, error) {
+		return "cleanup-access-token", time.Now().Add(time.Hour), nil
 	}
 
 	infra := &fakeCleanupInfra{}
@@ -1228,9 +1233,11 @@ func TestReconcilerDelete_WaitsForPSCCleanupBeforeBuildingHypershiftWorkspace(t 
 
 func TestReconcilerDelete_UsesNonceForHypershiftEnvAndWorkforceTokenForPSCCleanup(t *testing.T) {
 	origNewBrokerAuth := newBrokerAuth
+	origMintCleanupAccessToken := mintCleanupAccessTokenFn
 	origBuildDestroyWorkspace := buildDestroyWorkspaceWithTokenURL
 	defer func() {
 		newBrokerAuth = origNewBrokerAuth
+		mintCleanupAccessTokenFn = origMintCleanupAccessToken
 		buildDestroyWorkspaceWithTokenURL = origBuildDestroyWorkspace
 	}()
 
@@ -1244,6 +1251,9 @@ func TestReconcilerDelete_UsesNonceForHypershiftEnvAndWorkforceTokenForPSCCleanu
 	}
 	newBrokerAuth = func(BrokerAuthConfig) brokerAuthExchanger {
 		return fakeAuth
+	}
+	mintCleanupAccessTokenFn = func(context.Context, BrokerAuthConfig, string) (string, time.Time, error) {
+		return "cleanup-access-token", time.Now().Add(time.Hour), nil
 	}
 
 	var gotHypershiftToken string
@@ -1327,8 +1337,10 @@ func TestReconcilerDelete_UsesNonceForHypershiftEnvAndWorkforceTokenForPSCCleanu
 
 func TestReconcilerDelete_UsesLocalSTSForwarderForHypershiftCleanup(t *testing.T) {
 	origNewBrokerAuth := newBrokerAuth
+	origMintCleanupAccessToken := mintCleanupAccessTokenFn
 	defer func() {
 		newBrokerAuth = origNewBrokerAuth
+		mintCleanupAccessTokenFn = origMintCleanupAccessToken
 	}()
 
 	fakeAuth := &fakeBrokerAuth{
@@ -1341,6 +1353,9 @@ func TestReconcilerDelete_UsesLocalSTSForwarderForHypershiftCleanup(t *testing.T
 	}
 	newBrokerAuth = func(BrokerAuthConfig) brokerAuthExchanger {
 		return fakeAuth
+	}
+	mintCleanupAccessTokenFn = func(context.Context, BrokerAuthConfig, string) (string, time.Time, error) {
+		return "cleanup-access-token", time.Now().Add(time.Hour), nil
 	}
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1388,17 +1403,99 @@ func TestReconcilerDelete_UsesLocalSTSForwarderForHypershiftCleanup(t *testing.T
 	if !strings.HasPrefix(infra.destroyInfraTokenURL, "http://127.0.0.1:") {
 		t.Fatalf("destroy infra token_url = %q, want localhost forwarder", infra.destroyInfraTokenURL)
 	}
-	if infra.destroyInfraToken != "workforce-token" {
-		t.Fatalf("destroy infra forwarded token = %q, want workforce-token", infra.destroyInfraToken)
+	if infra.destroyInfraToken != "cleanup-access-token" {
+		t.Fatalf("destroy infra forwarded token = %q, want cleanup-access-token", infra.destroyInfraToken)
 	}
-	if infra.destroyIAMToken != "workforce-token" {
-		t.Fatalf("destroy IAM forwarded token = %q, want workforce-token", infra.destroyIAMToken)
+	if infra.destroyIAMToken != "cleanup-access-token" {
+		t.Fatalf("destroy IAM forwarded token = %q, want cleanup-access-token", infra.destroyIAMToken)
 	}
 	if infra.destroyInfraSubjectToken == "caller-token" {
 		t.Fatalf("destroy infra subject token = %q, do not persist raw caller token in forwarder mode", infra.destroyInfraSubjectToken)
 	}
 	if infra.destroyIAMSubjectToken == "caller-token" {
 		t.Fatalf("destroy IAM subject token = %q, do not persist raw caller token in forwarder mode", infra.destroyIAMSubjectToken)
+	}
+}
+
+func TestReconcilerDelete_UsesLongLivedCleanupTokenAfterPSCCleanup(t *testing.T) {
+	origNewBrokerAuth := newBrokerAuth
+	origMintCleanupAccessToken := mintCleanupAccessTokenFn
+	defer func() {
+		newBrokerAuth = origNewBrokerAuth
+		mintCleanupAccessTokenFn = origMintCleanupAccessToken
+	}()
+
+	fakeAuth := &fakeBrokerAuth{
+		result: BrokerAuthResult{
+			BrokerToken:          "broker-token",
+			BrokerEmail:          "broker@example.com",
+			WorkforceToken:       "near-expiry-workforce-token",
+			WorkforceTokenExpiry: time.Now().Add(15 * time.Second),
+		},
+	}
+	newBrokerAuth = func(BrokerAuthConfig) brokerAuthExchanger {
+		return fakeAuth
+	}
+
+	var mintWorkforceToken string
+	mintCleanupAccessTokenFn = func(_ context.Context, _ BrokerAuthConfig, workforceToken string) (string, time.Time, error) {
+		mintWorkforceToken = workforceToken
+		return "cleanup-access-token", time.Now().Add(time.Hour), nil
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/clusters":
+			fmt.Fprint(w, `{"clusters":[{"id":"c-123","name":"test-cluster"}]}`)
+		case r.Method == http.MethodDelete && r.URL.Path == "/api/v1/clusters/c-123":
+			w.WriteHeader(http.StatusNoContent)
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/clusters/c-123":
+			w.WriteHeader(http.StatusNotFound)
+			fmt.Fprint(w, `{"error":"not found"}`)
+		default:
+			t.Errorf("unexpected %s %s", r.Method, r.URL.String())
+			http.Error(w, "unexpected request", http.StatusInternalServerError)
+		}
+	}))
+	defer server.Close()
+
+	infra := &fakeCleanupInfra{}
+	reconciler := &Reconciler{
+		gateway: GatewayConfig{
+			URL:      server.URL,
+			Audience: "test-audience",
+		},
+		infra: infra,
+	}
+
+	err := reconciler.Delete(
+		context.Background(),
+		ClusterSpec{Name: "test-cluster"},
+		TargetConfig{
+			GCPProject:        "test-project",
+			Region:            "us-central1",
+			WorkforcePool:     "test-pool",
+			WorkforceProvider: "test-provider",
+			BrokerSAEmail:     "broker@example.com",
+		},
+		"caller-token",
+		noopProgress(),
+	)
+	if err != nil {
+		t.Fatalf("Delete() error = %v", err)
+	}
+
+	if mintWorkforceToken != "near-expiry-workforce-token" {
+		t.Fatalf("mint cleanup token workforce token = %q, want near-expiry-workforce-token", mintWorkforceToken)
+	}
+	if infra.waitPSCWorkforceToken != "near-expiry-workforce-token" {
+		t.Fatalf("PSC cleanup workforce token = %q, want near-expiry-workforce-token", infra.waitPSCWorkforceToken)
+	}
+	if infra.destroyInfraToken != "cleanup-access-token" {
+		t.Fatalf("destroy infra forwarded token = %q, want cleanup-access-token", infra.destroyInfraToken)
+	}
+	if infra.destroyIAMToken != "cleanup-access-token" {
+		t.Fatalf("destroy IAM forwarded token = %q, want cleanup-access-token", infra.destroyIAMToken)
 	}
 }
 
