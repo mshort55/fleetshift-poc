@@ -24,13 +24,15 @@ const (
 	localSTSPathSuffixByteCount = 8
 )
 
-// localSTSForwarder serves a loopback-only STS-compatible endpoint for hypershift
-// destroy. FleetShift already has a fresher workforce token than the original
-// caller JWT at that point, so this shim lets hypershift fetch the cached token
-// through the ADC contract it already understands.
+// localSTSForwarder serves a loopback-only STS-compatible endpoint for
+// hypershift create and destroy flows. FleetShift already has a fresher
+// workforce token than the original caller JWT at that point, so this shim
+// lets hypershift fetch the cached token through the ADC contract it already
+// understands.
 //
-// TODO: Remove this shim once we implement the hypershift destroy-side logic
-// directly instead of translating through a local STS-compatible endpoint.
+// TODO: Remove this shim once we implement the hypershift-side create/destroy
+// logic directly instead of translating through a local STS-compatible
+// endpoint.
 type localSTSForwarder struct {
 	listener net.Listener
 	server   *http.Server
@@ -53,7 +55,7 @@ func randomHexString(byteCount int) (string, error) {
 }
 
 // startLocalSTSForwarder starts a loopback-only STS-compatible endpoint that
-// returns the cached workforce token for the hypershift destroy path.
+// returns the cached workforce token for hypershift create/destroy calls.
 func startLocalSTSForwarder(token string, expiry time.Time, subjectToken string, audience string) (*localSTSForwarder, error) {
 	if subjectToken == "" {
 		return nil, fmt.Errorf("subject token is required")

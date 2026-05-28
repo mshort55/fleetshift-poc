@@ -210,7 +210,7 @@ func (r *agentTestReporter) ListActiveDeliveries(_ context.Context, _ []domain.T
 func withAgentHooksStubbed(t *testing.T) {
 	t.Helper()
 	origNewBrokerAuth := newBrokerAuth
-	origBuildCreateWorkspace := buildCreateHypershiftWorkspace
+	origBuildCreateWorkspace := buildCreateWorkspaceWithTokenURL
 	origBuildDestroyWorkspace := buildDestroyWorkspaceWithTokenURL
 	origReconcileNodepools := reconcileNodepoolsFn
 	origPollClusterReady := pollClusterReadyFn
@@ -218,7 +218,7 @@ func withAgentHooksStubbed(t *testing.T) {
 	origPollDesiredNodepoolsHealthy := pollDesiredNodepoolsHealthyFn
 	t.Cleanup(func() {
 		newBrokerAuth = origNewBrokerAuth
-		buildCreateHypershiftWorkspace = origBuildCreateWorkspace
+		buildCreateWorkspaceWithTokenURL = origBuildCreateWorkspace
 		buildDestroyWorkspaceWithTokenURL = origBuildDestroyWorkspace
 		reconcileNodepoolsFn = origReconcileNodepools
 		pollClusterReadyFn = origPollClusterReady
@@ -229,9 +229,10 @@ func withAgentHooksStubbed(t *testing.T) {
 	newBrokerAuth = func(BrokerAuthConfig) brokerAuthExchanger {
 		return &fakeBrokerAuth{
 			result: BrokerAuthResult{
-				BrokerToken:    "broker-token",
-				BrokerEmail:    "broker@example.com",
-				WorkforceToken: "workforce-token",
+				BrokerToken:          "broker-token",
+				BrokerEmail:          "broker@example.com",
+				WorkforceToken:       "workforce-token",
+				WorkforceTokenExpiry: time.Now().Add(time.Hour),
 			},
 		}
 	}
@@ -264,11 +265,12 @@ func TestAgent_Deliver_SuccessReportsProvisionedTargetAndSecrets(t *testing.T) {
 	if err != nil {
 		t.Fatalf("os.MkdirTemp() error = %v", err)
 	}
-	buildCreateHypershiftWorkspace = func(_ string, _ TargetConfig, _ []byte) (*HypershiftWorkspace, error) {
+	buildCreateWorkspaceWithTokenURL = func(_ string, _ TargetConfig, _ []byte, _ string, cleanupCallbacks ...func() error) (*HypershiftWorkspace, error) {
 		return &HypershiftWorkspace{
-			Env:      []string{"PATH=/usr/bin"},
-			JWKSPath: workspaceDir + "/jwks.json",
-			tempDir:  workspaceDir,
+			Env:              []string{"PATH=/usr/bin"},
+			JWKSPath:         workspaceDir + "/jwks.json",
+			tempDir:          workspaceDir,
+			cleanupCallbacks: cleanupCallbacks,
 		}, nil
 	}
 

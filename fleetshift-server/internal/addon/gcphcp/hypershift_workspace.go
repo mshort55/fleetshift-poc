@@ -56,23 +56,17 @@ func (w *HypershiftWorkspace) Cleanup() error {
 	return cleanupErr
 }
 
-// PrepareCreateHypershiftWorkspace builds a tempdir-backed workspace for the
-// create-path hypershift calls, including the public JWKS payload.
-func PrepareCreateHypershiftWorkspace(
+// PrepareCreateHypershiftWorkspaceWithTokenURL builds a tempdir-backed
+// workspace for the create-path hypershift calls, overriding token_url for ADC
+// STS exchanges while preserving the JWKS payload.
+func PrepareCreateHypershiftWorkspaceWithTokenURL(
 	callerToken string,
 	target TargetConfig,
 	jwksJSON []byte,
+	tokenURL string,
+	cleanupCallbacks ...func() error,
 ) (_ *HypershiftWorkspace, retErr error) {
-	return prepareHypershiftWorkspace(callerToken, target, jwksJSON, "", nil)
-}
-
-// PrepareDestroyHypershiftWorkspace builds a tempdir-backed workspace for the
-// destroy-path hypershift calls.
-func PrepareDestroyHypershiftWorkspace(
-	callerToken string,
-	target TargetConfig,
-) (_ *HypershiftWorkspace, retErr error) {
-	return prepareHypershiftWorkspace(callerToken, target, nil, "", nil)
+	return prepareHypershiftWorkspace(callerToken, target, jwksJSON, tokenURL, cleanupCallbacks)
 }
 
 // PrepareDestroyHypershiftWorkspaceWithTokenURL builds a tempdir-backed workspace for the

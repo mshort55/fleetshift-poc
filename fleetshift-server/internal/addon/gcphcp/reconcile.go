@@ -16,8 +16,7 @@ var (
 	bootstrapGuestCluster             = BootstrapGuestCluster
 	failureSnapshotTimeout            = 10 * time.Second
 	newBrokerAuth                     = func(cfg BrokerAuthConfig) brokerAuthExchanger { return NewBrokerAuth(cfg) }
-	buildCreateHypershiftWorkspace    = PrepareCreateHypershiftWorkspace
-	buildDestroyHypershiftWorkspace   = PrepareDestroyHypershiftWorkspace
+	buildCreateWorkspaceWithTokenURL  = PrepareCreateHypershiftWorkspaceWithTokenURL
 	buildDestroyWorkspaceWithTokenURL = PrepareDestroyHypershiftWorkspaceWithTokenURL
 	startLocalSTSForwarderFn          = startLocalSTSForwarder
 	reconcileNodepoolsFn              = reconcileNodepools
@@ -223,7 +222,28 @@ func (r *Reconciler) Reconcile(
 		if err := func() (retErr error) {
 			progress.Info(ctx, "Preparing hypershift workspace")
 
-			workspace, err := buildCreateHypershiftWorkspace(callerToken, target, keypair.JWKSJSON)
+			subjectToken, err := randomHexString(16)
+			if err != nil {
+				return fmt.Errorf("generate local STS subject token: %w", err)
+			}
+
+			forwarder, err := startLocalSTSForwarderFn(
+				authResult.WorkforceToken,
+				authResult.WorkforceTokenExpiry,
+				subjectToken,
+				workforceAudience(target.WorkforcePool, target.WorkforceProvider),
+			)
+			if err != nil {
+				return fmt.Errorf("start local STS forwarder: %w", err)
+			}
+
+			workspace, err := buildCreateWorkspaceWithTokenURL(
+				subjectToken,
+				target,
+				keypair.JWKSJSON,
+				forwarder.URL(),
+				forwarder.Close,
+			)
 			if err != nil {
 				return fmt.Errorf("prepare hypershift workspace: %w", err)
 			}

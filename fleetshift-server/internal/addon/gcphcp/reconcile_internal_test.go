@@ -39,6 +39,14 @@ type fakeCleanupInfra struct {
 	waitPSCWorkforceToken    string
 	destroyIAMErr            error
 	destroyInfraErr          error
+	createIAMTokenURL        string
+	createInfraTokenURL      string
+	createIAMToken           string
+	createInfraToken         string
+	createIAMSubjectToken    string
+	createInfraSubjectToken  string
+	createIAMQuotaProject    string
+	createInfraQuotaProject  string
 	destroyInfraTokenURL     string
 	destroyIAMTokenURL       string
 	destroyInfraToken        string
@@ -50,6 +58,7 @@ type fakeCleanupInfra struct {
 	createIAMResults         []createAttemptResult
 	createInfraResults       []createAttemptResult
 	destroyInfraResults      []error
+	createIAMDelay           time.Duration
 	createIAMCalls           int
 	createInfraCalls         int
 	waitPSCCalls             int
@@ -59,11 +68,15 @@ type fakeCleanupInfra struct {
 func (f *fakeCleanupInfra) CreateIAM(
 	_ context.Context,
 	infraID, projectID, jwksPath string,
-	_ []string,
+	env []string,
 ) (map[string]any, error) {
 	f.ops = append(f.ops, "create-iam:"+infraID+":"+projectID+":"+jwksPath)
+	f.createIAMTokenURL, f.createIAMToken, f.createIAMSubjectToken, f.createIAMQuotaProject = readTokenURLAndToken(env)
 	attempt := f.createIAMCalls
 	f.createIAMCalls++
+	if f.createIAMDelay > 0 {
+		time.Sleep(f.createIAMDelay)
+	}
 	if len(f.createIAMResults) > 0 {
 		if attempt >= len(f.createIAMResults) {
 			attempt = len(f.createIAMResults) - 1
@@ -89,9 +102,10 @@ func (f *fakeCleanupInfra) CreateIAM(
 func (f *fakeCleanupInfra) CreateInfra(
 	_ context.Context,
 	infraID, projectID, region string,
-	_ []string,
+	env []string,
 ) (map[string]any, error) {
 	f.ops = append(f.ops, "create-infra:"+infraID+":"+projectID+":"+region)
+	f.createInfraTokenURL, f.createInfraToken, f.createInfraSubjectToken, f.createInfraQuotaProject = readTokenURLAndToken(env)
 	attempt := f.createInfraCalls
 	f.createInfraCalls++
 	if len(f.createInfraResults) > 0 {
@@ -122,7 +136,7 @@ func (f *fakeCleanupInfra) DestroyInfra(
 	env []string,
 ) error {
 	f.ops = append(f.ops, "infra:"+infraID+":"+projectID+":"+region)
-	f.destroyInfraTokenURL, f.destroyInfraToken, f.destroyInfraSubjectToken, f.destroyInfraQuotaProject = readDestroyTokenURLAndToken(env)
+	f.destroyInfraTokenURL, f.destroyInfraToken, f.destroyInfraSubjectToken, f.destroyInfraQuotaProject = readTokenURLAndToken(env)
 	attempt := f.destroyInfraCalls
 	f.destroyInfraCalls++
 	if len(f.destroyInfraResults) > 0 {
@@ -143,7 +157,7 @@ func (f *fakeCleanupInfra) DestroyIAM(
 	env []string,
 ) error {
 	f.ops = append(f.ops, "iam:"+infraID+":"+projectID)
-	f.destroyIAMTokenURL, f.destroyIAMToken, f.destroyIAMSubjectToken, f.destroyIAMQuotaProject = readDestroyTokenURLAndToken(env)
+	f.destroyIAMTokenURL, f.destroyIAMToken, f.destroyIAMSubjectToken, f.destroyIAMQuotaProject = readTokenURLAndToken(env)
 	return f.destroyIAMErr
 }
 
@@ -158,7 +172,7 @@ func (f *fakeCleanupInfra) WaitForPSCCleanup(
 	return f.waitPSCErr
 }
 
-func readDestroyTokenURLAndToken(env []string) (string, string, string, string) {
+func readTokenURLAndToken(env []string) (string, string, string, string) {
 	adcPath := lookupHypershiftEnvVar(env, "GOOGLE_APPLICATION_CREDENTIALS")
 	if adcPath == "" {
 		return "", "", "", ""
@@ -176,21 +190,23 @@ func readDestroyTokenURLAndToken(env []string) (string, string, string, string) 
 
 	tokenURL, _ := credConfig["token_url"].(string)
 	quotaProject, _ := credConfig["quota_project_id"].(string)
-	if tokenURL == "" {
-		return "", "", "", quotaProject
-	}
-	if !strings.HasPrefix(tokenURL, "http://127.0.0.1:") {
-		return tokenURL, "", "", quotaProject
-	}
-	audience, _ := credConfig["audience"].(string)
-
 	credSource, _ := credConfig["credential_source"].(map[string]any)
 	subjectTokenPath, _ := credSource["file"].(string)
-	subjectTokenData, err := os.ReadFile(subjectTokenPath)
-	if err != nil {
-		return tokenURL, "", "", quotaProject
+	var subjectToken string
+	if subjectTokenPath != "" {
+		subjectTokenData, err := os.ReadFile(subjectTokenPath)
+		if err != nil {
+			return tokenURL, "", "", quotaProject
+		}
+		subjectToken = string(subjectTokenData)
 	}
-	subjectToken := string(subjectTokenData)
+	if tokenURL == "" {
+		return "", "", subjectToken, quotaProject
+	}
+	if !strings.HasPrefix(tokenURL, "http://127.0.0.1:") {
+		return tokenURL, "", subjectToken, quotaProject
+	}
+	audience, _ := credConfig["audience"].(string)
 
 	resp, err := http.Post(tokenURL, "application/x-www-form-urlencoded", strings.NewReader(
 		"grant_type=urn:ietf:params:oauth:grant-type:token-exchange&audience="+url.QueryEscape(audience)+"&requested_token_type=urn:ietf:params:oauth:token-type:access_token&subject_token_type=urn:ietf:params:oauth:token-type:jwt&subject_token="+url.QueryEscape(subjectToken)+"&scope="+url.QueryEscape("https://www.googleapis.com/auth/cloud-platform"),
@@ -1019,14 +1035,14 @@ func validIAMConfigForReconcileTest() map[string]any {
 
 func TestReconcilerReconcile_CleansHypershiftWorkspaceBeforeNodepoolReconcile(t *testing.T) {
 	origNewBrokerAuth := newBrokerAuth
-	origBuildCreateWorkspace := buildCreateHypershiftWorkspace
+	origBuildCreateWorkspace := buildCreateWorkspaceWithTokenURL
 	origReconcileNodepools := reconcileNodepoolsFn
 	origPollClusterReady := pollClusterReadyFn
 	origCompleteGuestRegistration := completeGuestRegistrationFn
 	origPollDesiredNodepoolsHealthy := pollDesiredNodepoolsHealthyFn
 	defer func() {
 		newBrokerAuth = origNewBrokerAuth
-		buildCreateHypershiftWorkspace = origBuildCreateWorkspace
+		buildCreateWorkspaceWithTokenURL = origBuildCreateWorkspace
 		reconcileNodepoolsFn = origReconcileNodepools
 		pollClusterReadyFn = origPollClusterReady
 		completeGuestRegistrationFn = origCompleteGuestRegistration
@@ -1035,9 +1051,10 @@ func TestReconcilerReconcile_CleansHypershiftWorkspaceBeforeNodepoolReconcile(t 
 
 	fakeAuth := &fakeBrokerAuth{
 		result: BrokerAuthResult{
-			BrokerToken:    "broker-token",
-			BrokerEmail:    "broker@example.com",
-			WorkforceToken: "workforce-token",
+			BrokerToken:          "broker-token",
+			BrokerEmail:          "broker@example.com",
+			WorkforceToken:       "workforce-token",
+			WorkforceTokenExpiry: time.Now().Add(time.Hour),
 		},
 	}
 	newBrokerAuth = func(BrokerAuthConfig) brokerAuthExchanger {
@@ -1048,17 +1065,24 @@ func TestReconcilerReconcile_CleansHypershiftWorkspaceBeforeNodepoolReconcile(t 
 	if err != nil {
 		t.Fatalf("os.MkdirTemp() error = %v", err)
 	}
-	buildCreateHypershiftWorkspace = func(token string, _ TargetConfig, jwksJSON []byte) (*HypershiftWorkspace, error) {
-		if token != "caller-token" {
-			t.Fatalf("workspace token = %q, want caller-token", token)
+	buildCreateWorkspaceWithTokenURL = func(token string, _ TargetConfig, jwksJSON []byte, tokenURL string, cleanupCallbacks ...func() error) (*HypershiftWorkspace, error) {
+		if token == "" {
+			t.Fatal("workspace token is empty, want nonce")
+		}
+		if token == "caller-token" {
+			t.Fatalf("workspace token = %q, do not pass raw caller token to forwarder-mode workspace", token)
+		}
+		if !strings.HasPrefix(tokenURL, "http://127.0.0.1:") {
+			t.Fatalf("token_url = %q, want localhost forwarder", tokenURL)
 		}
 		if len(jwksJSON) == 0 {
 			t.Fatal("expected generated JWKS payload")
 		}
 		return &HypershiftWorkspace{
-			Env:      []string{"PATH=/usr/bin"},
-			JWKSPath: workspaceDir + "/jwks.json",
-			tempDir:  workspaceDir,
+			Env:              []string{"PATH=/usr/bin"},
+			JWKSPath:         workspaceDir + "/jwks.json",
+			tempDir:          workspaceDir,
+			cleanupCallbacks: cleanupCallbacks,
 		}, nil
 	}
 
@@ -1135,6 +1159,248 @@ func TestReconcilerReconcile_CleansHypershiftWorkspaceBeforeNodepoolReconcile(t 
 	}
 	if output == nil {
 		t.Fatal("expected reconcile output")
+	}
+}
+
+func TestReconcilerReconcile_UsesLocalSTSForwarderForCreatePrereqs(t *testing.T) {
+	origNewBrokerAuth := newBrokerAuth
+	origReconcileNodepools := reconcileNodepoolsFn
+	origPollClusterReady := pollClusterReadyFn
+	origCompleteGuestRegistration := completeGuestRegistrationFn
+	origPollDesiredNodepoolsHealthy := pollDesiredNodepoolsHealthyFn
+	defer func() {
+		newBrokerAuth = origNewBrokerAuth
+		reconcileNodepoolsFn = origReconcileNodepools
+		pollClusterReadyFn = origPollClusterReady
+		completeGuestRegistrationFn = origCompleteGuestRegistration
+		pollDesiredNodepoolsHealthyFn = origPollDesiredNodepoolsHealthy
+	}()
+
+	fakeAuth := &fakeBrokerAuth{
+		result: BrokerAuthResult{
+			BrokerToken:          "broker-token",
+			BrokerEmail:          "broker@example.com",
+			WorkforceToken:       "workforce-token",
+			WorkforceTokenExpiry: time.Now().Add(time.Hour),
+		},
+	}
+	newBrokerAuth = func(BrokerAuthConfig) brokerAuthExchanger {
+		return fakeAuth
+	}
+
+	reconcileNodepoolsFn = func(context.Context, nodepoolReconcileClient, string, string, []NodepoolSpec, *deliveryProgress) error {
+		return nil
+	}
+	pollClusterReadyFn = func(context.Context, *CLSClient, string, *deliveryProgress) error { return nil }
+	completeGuestRegistrationFn = func(context.Context, *CLSClient, string, string, domain.TargetID, *deliveryProgress) (string, BootstrapResult, error) {
+		return "https://guest.example:6443", BootstrapResult{
+			SATokenRef: "sa-token-ref",
+			SAToken:    []byte("sa-token"),
+		}, nil
+	}
+	pollDesiredNodepoolsHealthyFn = func(context.Context, nodepoolStatusClient, string, string, []NodepoolSpec, *deliveryProgress) error {
+		return nil
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/clusters":
+			fmt.Fprint(w, `{"clusters":[]}`)
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/clusters":
+			fmt.Fprint(w, `{"id":"c-123"}`)
+		default:
+			t.Errorf("unexpected %s %s", r.Method, r.URL.String())
+			http.Error(w, "unexpected request", http.StatusInternalServerError)
+		}
+	}))
+	defer server.Close()
+
+	infra := &fakeCleanupInfra{
+		createIAMDelay:   15 * time.Millisecond,
+		createIAMResults: []createAttemptResult{{result: validIAMConfigForReconcileTest()}},
+	}
+	reconciler := &Reconciler{
+		gateway: GatewayConfig{
+			URL:      server.URL,
+			Audience: "test-audience",
+		},
+		infra: infra,
+	}
+
+	output, err := reconciler.Reconcile(
+		context.Background(),
+		ClusterSpec{
+			Name:           "test-cluster",
+			EndpointAccess: "PublicAndPrivate",
+			ReleaseVersion: "4.22.0",
+			ChannelGroup:   "stable",
+			Nodepools: []NodepoolSpec{{
+				ID:             "workers",
+				Replicas:       2,
+				InstanceType:   "n1-standard-4",
+				RootVolumeSize: 128,
+				RootVolumeType: "pd-standard",
+				AutoRepair:     boolPtr(true),
+				UpgradeType:    "Replace",
+			}},
+		},
+		TargetConfig{
+			GCPProject:        "test-project",
+			Region:            "us-central1",
+			WorkforcePool:     "test-pool",
+			WorkforceProvider: "test-provider",
+			BrokerSAEmail:     "broker@example.com",
+		},
+		"caller-token",
+		noopProgress(),
+	)
+	if err != nil {
+		t.Fatalf("Reconcile() error = %v", err)
+	}
+	if output == nil {
+		t.Fatal("expected reconcile output")
+	}
+
+	if fakeAuth.callerToken != "caller-token" {
+		t.Fatalf("broker auth caller token = %q, want caller-token", fakeAuth.callerToken)
+	}
+	if !strings.HasPrefix(infra.createIAMTokenURL, "http://127.0.0.1:") {
+		t.Fatalf("create IAM token_url = %q, want localhost forwarder", infra.createIAMTokenURL)
+	}
+	if !strings.HasPrefix(infra.createInfraTokenURL, "http://127.0.0.1:") {
+		t.Fatalf("create infra token_url = %q, want localhost forwarder", infra.createInfraTokenURL)
+	}
+	if infra.createIAMToken != "workforce-token" {
+		t.Fatalf("create IAM forwarded token = %q, want workforce-token", infra.createIAMToken)
+	}
+	if infra.createInfraToken != "workforce-token" {
+		t.Fatalf("create infra forwarded token = %q, want workforce-token", infra.createInfraToken)
+	}
+	if infra.createIAMSubjectToken == "" {
+		t.Fatal("create IAM subject token is empty, want nonce")
+	}
+	if infra.createIAMSubjectToken == "caller-token" {
+		t.Fatalf("create IAM subject token = %q, do not persist raw caller token in forwarder mode", infra.createIAMSubjectToken)
+	}
+	if infra.createInfraSubjectToken == "" {
+		t.Fatal("create infra subject token is empty, want nonce")
+	}
+	if infra.createInfraSubjectToken == "caller-token" {
+		t.Fatalf("create infra subject token = %q, do not persist raw caller token in forwarder mode", infra.createInfraSubjectToken)
+	}
+	if infra.createIAMQuotaProject != "test-project" {
+		t.Fatalf("create IAM quota_project_id = %q, want test-project", infra.createIAMQuotaProject)
+	}
+	if infra.createInfraQuotaProject != "test-project" {
+		t.Fatalf("create infra quota_project_id = %q, want test-project", infra.createInfraQuotaProject)
+	}
+}
+
+func TestReconcilerReconcile_CreateClusterCleanupUsesLocalSTSForwarder(t *testing.T) {
+	origNewBrokerAuth := newBrokerAuth
+	defer func() {
+		newBrokerAuth = origNewBrokerAuth
+	}()
+
+	fakeAuth := &fakeBrokerAuth{
+		result: BrokerAuthResult{
+			BrokerToken:          "broker-token",
+			BrokerEmail:          "broker@example.com",
+			WorkforceToken:       "workforce-token",
+			WorkforceTokenExpiry: time.Now().Add(time.Hour),
+		},
+	}
+	newBrokerAuth = func(BrokerAuthConfig) brokerAuthExchanger {
+		return fakeAuth
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/clusters":
+			fmt.Fprint(w, `{"clusters":[]}`)
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/clusters":
+			http.Error(w, `{"error":"bad request"}`, http.StatusBadRequest)
+		default:
+			t.Errorf("unexpected %s %s", r.Method, r.URL.String())
+			http.Error(w, "unexpected request", http.StatusInternalServerError)
+		}
+	}))
+	defer server.Close()
+
+	infra := &fakeCleanupInfra{
+		createIAMResults: []createAttemptResult{{result: validIAMConfigForReconcileTest()}},
+	}
+	reconciler := &Reconciler{
+		gateway: GatewayConfig{
+			URL:      server.URL,
+			Audience: "test-audience",
+		},
+		infra: infra,
+	}
+
+	_, err := reconciler.Reconcile(
+		context.Background(),
+		ClusterSpec{
+			Name:           "test-cluster",
+			EndpointAccess: "PublicAndPrivate",
+			ReleaseVersion: "4.22.0",
+			ChannelGroup:   "stable",
+			Nodepools: []NodepoolSpec{{
+				ID:             "workers",
+				Replicas:       2,
+				InstanceType:   "n1-standard-4",
+				RootVolumeSize: 128,
+				RootVolumeType: "pd-standard",
+				AutoRepair:     boolPtr(true),
+				UpgradeType:    "Replace",
+			}},
+		},
+		TargetConfig{
+			GCPProject:        "test-project",
+			Region:            "us-central1",
+			WorkforcePool:     "test-pool",
+			WorkforceProvider: "test-provider",
+			BrokerSAEmail:     "broker@example.com",
+		},
+		"caller-token",
+		noopProgress(),
+	)
+	if err == nil {
+		t.Fatal("expected reconcile error")
+	}
+	if !strings.Contains(err.Error(), "create cluster") {
+		t.Fatalf("error = %q, want create cluster context", err.Error())
+	}
+
+	if !strings.HasPrefix(infra.destroyInfraTokenURL, "http://127.0.0.1:") {
+		t.Fatalf("destroy infra token_url = %q, want localhost forwarder", infra.destroyInfraTokenURL)
+	}
+	if !strings.HasPrefix(infra.destroyIAMTokenURL, "http://127.0.0.1:") {
+		t.Fatalf("destroy IAM token_url = %q, want localhost forwarder", infra.destroyIAMTokenURL)
+	}
+	if infra.destroyInfraToken != "workforce-token" {
+		t.Fatalf("destroy infra forwarded token = %q, want workforce-token", infra.destroyInfraToken)
+	}
+	if infra.destroyIAMToken != "workforce-token" {
+		t.Fatalf("destroy IAM forwarded token = %q, want workforce-token", infra.destroyIAMToken)
+	}
+	if infra.destroyInfraSubjectToken == "" {
+		t.Fatal("destroy infra subject token is empty, want nonce")
+	}
+	if infra.destroyInfraSubjectToken == "caller-token" {
+		t.Fatalf("destroy infra subject token = %q, do not persist raw caller token in forwarder mode", infra.destroyInfraSubjectToken)
+	}
+	if infra.destroyIAMSubjectToken == "" {
+		t.Fatal("destroy IAM subject token is empty, want nonce")
+	}
+	if infra.destroyIAMSubjectToken == "caller-token" {
+		t.Fatalf("destroy IAM subject token = %q, do not persist raw caller token in forwarder mode", infra.destroyIAMSubjectToken)
+	}
+	if infra.destroyInfraQuotaProject != "test-project" {
+		t.Fatalf("destroy infra quota_project_id = %q, want test-project", infra.destroyInfraQuotaProject)
+	}
+	if infra.destroyIAMQuotaProject != "test-project" {
+		t.Fatalf("destroy IAM quota_project_id = %q, want test-project", infra.destroyIAMQuotaProject)
 	}
 }
 
@@ -1941,19 +2207,20 @@ func TestCleanupCreateResources_NeitherCreatedReturnsNil(t *testing.T) {
 
 func TestReconcilerReconcile_FailureSnapshotEmittedOnError(t *testing.T) {
 	origNewBrokerAuth := newBrokerAuth
-	origBuildCreateWorkspace := buildCreateHypershiftWorkspace
+	origBuildCreateWorkspace := buildCreateWorkspaceWithTokenURL
 	origPollClusterReady := pollClusterReadyFn
 	defer func() {
 		newBrokerAuth = origNewBrokerAuth
-		buildCreateHypershiftWorkspace = origBuildCreateWorkspace
+		buildCreateWorkspaceWithTokenURL = origBuildCreateWorkspace
 		pollClusterReadyFn = origPollClusterReady
 	}()
 
 	fakeAuth := &fakeBrokerAuth{
 		result: BrokerAuthResult{
-			BrokerToken:    "broker-token",
-			BrokerEmail:    "broker@example.com",
-			WorkforceToken: "workforce-token",
+			BrokerToken:          "broker-token",
+			BrokerEmail:          "broker@example.com",
+			WorkforceToken:       "workforce-token",
+			WorkforceTokenExpiry: time.Now().Add(time.Hour),
 		},
 	}
 	newBrokerAuth = func(BrokerAuthConfig) brokerAuthExchanger {
@@ -1983,11 +2250,21 @@ func TestReconcilerReconcile_FailureSnapshotEmittedOnError(t *testing.T) {
 	if err != nil {
 		t.Fatalf("os.MkdirTemp() error = %v", err)
 	}
-	buildCreateHypershiftWorkspace = func(token string, _ TargetConfig, jwksJSON []byte) (*HypershiftWorkspace, error) {
+	buildCreateWorkspaceWithTokenURL = func(token string, _ TargetConfig, jwksJSON []byte, tokenURL string, cleanupCallbacks ...func() error) (*HypershiftWorkspace, error) {
+		if token == "" {
+			t.Fatal("workspace token is empty, want nonce")
+		}
+		if token == "caller-token" {
+			t.Fatalf("workspace token = %q, do not pass raw caller token to forwarder-mode workspace", token)
+		}
+		if !strings.HasPrefix(tokenURL, "http://127.0.0.1:") {
+			t.Fatalf("token_url = %q, want localhost forwarder", tokenURL)
+		}
 		return &HypershiftWorkspace{
-			Env:      []string{"PATH=/usr/bin"},
-			JWKSPath: workspaceDir + "/jwks.json",
-			tempDir:  workspaceDir,
+			Env:              []string{"PATH=/usr/bin"},
+			JWKSPath:         workspaceDir + "/jwks.json",
+			tempDir:          workspaceDir,
+			cleanupCallbacks: cleanupCallbacks,
 		}, nil
 	}
 
