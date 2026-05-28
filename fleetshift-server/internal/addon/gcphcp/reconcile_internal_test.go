@@ -59,6 +59,7 @@ type fakeCleanupInfra struct {
 	createInfraResults       []createAttemptResult
 	destroyInfraResults      []error
 	createIAMDelay           time.Duration
+	waitPSCDelay            time.Duration
 	createIAMCalls           int
 	createInfraCalls         int
 	waitPSCCalls             int
@@ -169,6 +170,9 @@ func (f *fakeCleanupInfra) WaitForPSCCleanup(
 	f.ops = append(f.ops, "psc:"+clusterID+":"+projectID+":"+region)
 	f.waitPSCCalls++
 	f.waitPSCWorkforceToken = workforceToken
+	if f.waitPSCDelay > 0 {
+		time.Sleep(f.waitPSCDelay)
+	}
 	return f.waitPSCErr
 }
 
@@ -1688,7 +1692,7 @@ func TestReconcilerDelete_ContinuesCleanupAfterLongPSCCleanupWait(t *testing.T) 
 			BrokerToken:          "broker-token",
 			BrokerEmail:          "broker@example.com",
 			WorkforceToken:       "near-expiry-workforce-token",
-			WorkforceTokenExpiry: time.Now().Add(15 * time.Second),
+			WorkforceTokenExpiry: time.Now().Add(3 * time.Second),
 		},
 	}
 	newBrokerAuth = func(BrokerAuthConfig) brokerAuthExchanger {
@@ -1711,7 +1715,7 @@ func TestReconcilerDelete_ContinuesCleanupAfterLongPSCCleanupWait(t *testing.T) 
 	}))
 	defer server.Close()
 
-	infra := &fakeCleanupInfra{}
+	infra := &fakeCleanupInfra{waitPSCDelay: 1100 * time.Millisecond}
 	reconciler := &Reconciler{
 		gateway: GatewayConfig{
 			URL:      server.URL,
@@ -1720,6 +1724,7 @@ func TestReconcilerDelete_ContinuesCleanupAfterLongPSCCleanupWait(t *testing.T) 
 		infra: infra,
 	}
 
+	start := time.Now()
 	err := reconciler.Delete(
 		context.Background(),
 		ClusterSpec{Name: "test-cluster"},
@@ -1735,6 +1740,9 @@ func TestReconcilerDelete_ContinuesCleanupAfterLongPSCCleanupWait(t *testing.T) 
 	)
 	if err != nil {
 		t.Fatalf("Delete() error = %v", err)
+	}
+	if elapsed := time.Since(start); elapsed < infra.waitPSCDelay {
+		t.Fatalf("Delete() elapsed = %v, want at least %v PSC wait", elapsed, infra.waitPSCDelay)
 	}
 
 	if infra.waitPSCWorkforceToken != "near-expiry-workforce-token" {
