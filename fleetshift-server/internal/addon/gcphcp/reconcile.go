@@ -245,6 +245,7 @@ func (r *Reconciler) Reconcile(
 				forwarder.Close,
 			)
 			if err != nil {
+				_ = forwarder.Close()
 				return fmt.Errorf("prepare hypershift workspace: %w", err)
 			}
 			defer workspace.CleanupOnReturn(&retErr)

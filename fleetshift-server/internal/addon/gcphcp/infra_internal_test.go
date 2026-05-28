@@ -455,10 +455,11 @@ func TestPrepareDestroyHypershiftWorkspaceWithTokenURL_OverridesTokenURL(t *test
 	if got := string(subjectTokenData); got != "workspace-nonce" {
 		t.Fatalf("subject token content = %q, want workspace-nonce", got)
 	}
+	tempDir := workspace.tempDir
 	if err := workspace.Cleanup(); err != nil {
 		t.Fatalf("Cleanup() error = %v", err)
 	}
-	if _, err := os.Stat(workspace.tempDir); !os.IsNotExist(err) {
+	if _, err := os.Stat(tempDir); !os.IsNotExist(err) {
 		t.Fatalf("workspace temp dir still exists after cleanup: %v", err)
 	}
 }
