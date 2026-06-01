@@ -17,23 +17,6 @@ type ResumeDeploymentInput struct {
 	ValidUntil    time.Time    // client-supplied attestation expiry; zero for unsigned
 }
 
-// ProvenanceBuilder constructs [Provenance] for a mutation that
-// requires re-signing. Implementations live in the application layer
-// and wrap key resolution and signature verification.
-type ProvenanceBuilder interface {
-	BuildProvenance(
-		ctx context.Context,
-		enrollments SignerEnrollmentRepository,
-		caller *SubjectClaims,
-		id DeploymentID,
-		ms ManifestStrategySpec,
-		ps PlacementStrategySpec,
-		generation Generation,
-		userSig []byte,
-		validUntil time.Time,
-	) (*Provenance, error)
-}
-
 // ResumeDeploymentWorkflowSpec transitions a [FulfillmentStatePausedAuth]
 // fulfillment back to active by updating auth/provenance, bumping its
 // generation, and running a convergence loop.
@@ -41,9 +24,9 @@ type ProvenanceBuilder interface {
 // Pass this spec to [Registry.RegisterResumeDeployment] to obtain a
 // [ResumeDeploymentWorkflow] that can start instances.
 type ResumeDeploymentWorkflowSpec struct {
-	Store             Store
-	Orchestration     OrchestrationWorkflow
-	ProvenanceBuilder ProvenanceBuilder // nil when signing is not configured
+	Store         Store
+	Orchestration OrchestrationWorkflow
+	ProvenanceSvc *ProvenanceService
 }
 
 func (s *ResumeDeploymentWorkflowSpec) Name() string { return "resume-deployment" }
@@ -52,63 +35,48 @@ func (s *ResumeDeploymentWorkflowSpec) Name() string { return "resume-deployment
 // and bumps its generation inside a serialized write transaction.
 // The provenance is built against the actual next generation seen in
 // the write transaction, not a pre-read snapshot.
-func (s *ResumeDeploymentWorkflowSpec) MutateToResumed() Activity[ResumeDeploymentInput, MutationResult] {
-	return NewActivity("mutate-to-resumed", func(ctx context.Context, in ResumeDeploymentInput) (MutationResult, error) {
+func (s *ResumeDeploymentWorkflowSpec) MutateToResumed() Activity[ResumeDeploymentInput, deploymentMutationResult] {
+	return NewActivity("mutate-to-resumed", func(ctx context.Context, in ResumeDeploymentInput) (deploymentMutationResult, error) {
 		tx, err := s.Store.Begin(ctx)
 		if err != nil {
-			return MutationResult{}, fmt.Errorf("begin tx: %w", err)
+			return deploymentMutationResult{}, fmt.Errorf("begin tx: %w", err)
 		}
 		defer tx.Rollback()
 
 		dep, err := tx.Deployments().Get(ctx, in.ID)
 		if err != nil {
-			return MutationResult{}, err
+			return deploymentMutationResult{}, err
 		}
 
 		f, err := tx.Fulfillments().Get(ctx, dep.FulfillmentID)
 		if err != nil {
-			return MutationResult{}, err
+			return deploymentMutationResult{}, err
 		}
 
-		if f.State != FulfillmentStatePausedAuth {
-			return MutationResult{}, fmt.Errorf("%w: deployment %q is in state %q, not paused_auth",
-				ErrInvalidArgument, in.ID, f.State)
-		}
-
-		f.Auth = in.Auth
-
-		hadProvenance := f.Provenance != nil
-		if hadProvenance || len(in.UserSignature) > 0 {
-			if hadProvenance && len(in.UserSignature) == 0 {
-				return MutationResult{}, fmt.Errorf(
-					"%w: deployment %q has provenance; re-signing is required to resume",
-					ErrInvalidArgument, in.ID)
-			}
-			if s.ProvenanceBuilder == nil {
-				return MutationResult{}, fmt.Errorf(
-					"%w: signing not configured but deployment %q requires provenance",
-					ErrInvalidArgument, in.ID)
-			}
+		var prov *Provenance
+		if f.Provenance != nil || len(in.UserSignature) > 0 {
 			nextGen := f.Generation + 1
-			prov, err := s.ProvenanceBuilder.BuildProvenance(
+			prov, err = s.ProvenanceSvc.BuildDeploymentProvenance(
 				ctx, tx.SignerEnrollments(), in.Auth.Caller,
 				dep.ID, f.ManifestStrategy, f.PlacementStrategy,
 				nextGen, in.UserSignature, in.ValidUntil,
 			)
 			if err != nil {
-				return MutationResult{}, fmt.Errorf("build provenance: %w", err)
+				return deploymentMutationResult{}, fmt.Errorf("build provenance: %w", err)
 			}
-			f.Provenance = prov
 		}
 
-		f.BumpGeneration()
+		if err := f.Resume(in.Auth, prov); err != nil {
+			return deploymentMutationResult{}, err
+		}
+
 		if err := tx.Fulfillments().Update(ctx, f); err != nil {
-			return MutationResult{}, fmt.Errorf("update fulfillment: %w", err)
+			return deploymentMutationResult{}, fmt.Errorf("update fulfillment: %w", err)
 		}
 		if err := tx.Commit(); err != nil {
-			return MutationResult{}, fmt.Errorf("commit: %w", err)
+			return deploymentMutationResult{}, fmt.Errorf("commit: %w", err)
 		}
-		return MutationResult{
+		return deploymentMutationResult{
 			View:          DeploymentView{Deployment: dep, Fulfillment: *f},
 			FulfillmentID: dep.FulfillmentID,
 			MyGen:         f.Generation,

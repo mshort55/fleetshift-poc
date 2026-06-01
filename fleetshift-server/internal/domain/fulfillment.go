@@ -1,6 +1,9 @@
 package domain
 
-import "time"
+import (
+	"fmt"
+	"time"
+)
 
 // FulfillmentID uniquely identifies a fulfillment.
 type FulfillmentID string
@@ -57,6 +60,34 @@ type Fulfillment struct {
 // BumpGeneration increments the fulfillment's generation counter.
 func (f *Fulfillment) BumpGeneration() {
 	f.Generation++
+}
+
+// Resume transitions a paused fulfillment back to active reconciliation
+// by replacing its delivery credentials and optionally its provenance,
+// then bumping the generation to trigger orchestration.
+//
+// Returns [ErrInvalidArgument] if the fulfillment is not in
+// [FulfillmentStatePausedAuth], or if the fulfillment previously had
+// provenance but no replacement is supplied (re-signing is required).
+//
+// TODO: revisit the provenance requirement
+// TODO: also revisit state requirement – maybe it's fine to "resume" something that is still active with new auth
+func (f *Fulfillment) Resume(auth DeliveryAuth, provenance *Provenance) error {
+	if f.State != FulfillmentStatePausedAuth {
+		return fmt.Errorf("%w: fulfillment is in state %q, not paused_auth",
+			ErrInvalidArgument, f.State)
+	}
+	if f.Provenance != nil && provenance == nil {
+		return fmt.Errorf(
+			"%w: fulfillment has provenance; re-signing is required to resume",
+			ErrInvalidArgument)
+	}
+	f.Auth = auth
+	if provenance != nil {
+		f.Provenance = provenance
+	}
+	f.BumpGeneration()
+	return nil
 }
 
 // AdvanceManifestStrategy advances the manifest strategy version,
@@ -205,4 +236,3 @@ type ReconciliationResult struct {
 	ResolvedTargets []TargetID
 	Auth            DeliveryAuth
 }
-

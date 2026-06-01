@@ -1,6 +1,7 @@
 package managedresource
 
 import (
+	"context"
 	"io"
 	"net/http"
 	"strconv"
@@ -9,6 +10,7 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/reflect/protoreflect"
@@ -70,6 +72,10 @@ func buildHTTPHandler(svc *RegisteredService, grpcAddr string) (*httpHandlerEntr
 		switch {
 		case r.Method == http.MethodPost && (rest == "" || rest == "/"):
 			handleHTTPCreate(w, r, conn, svc)
+		case r.Method == http.MethodPost && strings.HasSuffix(rest, ":resume"):
+			id := strings.TrimPrefix(rest, "/")
+			id = strings.TrimSuffix(id, ":resume")
+			handleHTTPResume(w, r, conn, svc, id)
 		case r.Method == http.MethodGet && (rest == "" || rest == "/"):
 			handleHTTPList(w, r, conn, svc)
 		case r.Method == http.MethodGet && len(rest) > 1:
@@ -115,7 +121,7 @@ func handleHTTPCreate(w http.ResponseWriter, r *http.Request, conn *grpc.ClientC
 
 	resp := dynamicpb.NewMessage(svc.Descriptors.Resource)
 	method := "/" + svc.Config.ServiceName() + "/Create" + svc.Config.Singular
-	if err := conn.Invoke(r.Context(), method, createReq, resp); err != nil {
+	if err := conn.Invoke(grpcContext(r), method, createReq, resp); err != nil {
 		grpcHTTPError(w, err)
 		return
 	}
@@ -130,7 +136,7 @@ func handleHTTPGet(w http.ResponseWriter, r *http.Request, conn *grpc.ClientConn
 
 	resp := dynamicpb.NewMessage(svc.Descriptors.Resource)
 	method := "/" + svc.Config.ServiceName() + "/Get" + svc.Config.Singular
-	if err := conn.Invoke(r.Context(), method, getReq, resp); err != nil {
+	if err := conn.Invoke(grpcContext(r), method, getReq, resp); err != nil {
 		grpcHTTPError(w, err)
 		return
 	}
@@ -159,7 +165,7 @@ func handleHTTPList(w http.ResponseWriter, r *http.Request, conn *grpc.ClientCon
 
 	resp := dynamicpb.NewMessage(svc.Descriptors.ListResponse)
 	method := "/" + svc.Config.ServiceName() + "/List" + svc.Config.Plural
-	if err := conn.Invoke(r.Context(), method, listReq, resp); err != nil {
+	if err := conn.Invoke(grpcContext(r), method, listReq, resp); err != nil {
 		grpcHTTPError(w, err)
 		return
 	}
@@ -174,12 +180,53 @@ func handleHTTPDelete(w http.ResponseWriter, r *http.Request, conn *grpc.ClientC
 
 	resp := dynamicpb.NewMessage(svc.Descriptors.Resource)
 	method := "/" + svc.Config.ServiceName() + "/Delete" + svc.Config.Singular
-	if err := conn.Invoke(r.Context(), method, deleteReq, resp); err != nil {
+	if err := conn.Invoke(grpcContext(r), method, deleteReq, resp); err != nil {
 		grpcHTTPError(w, err)
 		return
 	}
 
 	writeJSON(w, http.StatusOK, resp)
+}
+
+func handleHTTPResume(w http.ResponseWriter, r *http.Request, conn *grpc.ClientConn, svc *RegisteredService, id string) {
+	resumeReq := dynamicpb.NewMessage(svc.Descriptors.ResumeRequest)
+	nameField := svc.Descriptors.ResumeRequest.Fields().ByName("name")
+	resumeReq.Set(nameField, stringValue(svc.Config.Collection()+id))
+
+	// Parse optional request body for user_signature / valid_until.
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		httpError(w, codes.InvalidArgument, "read body: "+err.Error())
+		return
+	}
+	if len(body) > 0 {
+		if err := protojson.Unmarshal(body, resumeReq); err != nil {
+			httpError(w, codes.InvalidArgument, "parse body: "+err.Error())
+			return
+		}
+		// Re-set name since body unmarshal might have cleared it.
+		resumeReq.Set(nameField, stringValue(svc.Config.Collection()+id))
+	}
+
+	resp := dynamicpb.NewMessage(svc.Descriptors.Resource)
+	method := "/" + svc.Config.ServiceName() + "/Resume" + svc.Config.Singular
+	if err := conn.Invoke(grpcContext(r), method, resumeReq, resp); err != nil {
+		grpcHTTPError(w, err)
+		return
+	}
+
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// grpcContext returns a context that forwards the HTTP Authorization
+// header as outgoing gRPC metadata so that the server-side authn
+// interceptor can authenticate the caller.
+func grpcContext(r *http.Request) context.Context {
+	auth := r.Header.Get("Authorization")
+	if auth == "" {
+		return r.Context()
+	}
+	return metadata.AppendToOutgoingContext(r.Context(), "authorization", auth)
 }
 
 func stringValue(s string) protoreflect.Value {
