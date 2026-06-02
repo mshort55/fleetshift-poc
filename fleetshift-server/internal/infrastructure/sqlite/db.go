@@ -22,6 +22,27 @@ var migrations embed.FS
 // Read-only transactions ([Store.BeginReadOnly]) bypass this via
 // sql.TxOptions{ReadOnly: true}.
 func Open(dsn string) (*sql.DB, error) {
+	db, err := openWithPragmas(dsn)
+	if err != nil {
+		return nil, err
+	}
+
+	goose.SetBaseFS(migrations)
+	if err := goose.SetDialect("sqlite3"); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("set goose dialect: %w", err)
+	}
+	if err := goose.Up(db, "migrations"); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("run migrations: %w", err)
+	}
+
+	return db, nil
+}
+
+// openWithPragmas opens a SQLite connection with standard pragmas
+// but without running migrations.
+func openWithPragmas(dsn string) (*sql.DB, error) {
 	dsn = withTxLock(dsn)
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
@@ -39,16 +60,6 @@ func Open(dsn string) (*sql.DB, error) {
 	if _, err := db.Exec("PRAGMA foreign_keys=ON"); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("enable foreign keys: %w", err)
-	}
-
-	goose.SetBaseFS(migrations)
-	if err := goose.SetDialect("sqlite3"); err != nil {
-		db.Close()
-		return nil, fmt.Errorf("set goose dialect: %w", err)
-	}
-	if err := goose.Up(db, "migrations"); err != nil {
-		db.Close()
-		return nil, fmt.Errorf("run migrations: %w", err)
 	}
 
 	return db, nil

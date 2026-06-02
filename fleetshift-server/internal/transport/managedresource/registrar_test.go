@@ -23,6 +23,7 @@ import (
 	"github.com/fleetshift/fleetshift-poc/fleetshift-server/internal/infrastructure/delivery"
 	"github.com/fleetshift/fleetshift-poc/fleetshift-server/internal/infrastructure/memworkflow"
 	"github.com/fleetshift/fleetshift-poc/fleetshift-server/internal/infrastructure/sqlite"
+	"github.com/fleetshift/fleetshift-poc/fleetshift-server/internal/testutil"
 	"github.com/fleetshift/fleetshift-poc/fleetshift-server/internal/transport/managedresource"
 )
 
@@ -158,10 +159,11 @@ func setupWithDelivery(
 	router.Register(clusterTargetType, recordingAgent)
 
 	orchSpec := &domain.OrchestrationWorkflowSpec{
-		Store:           store,
-		Delivery:        router,
-		Strategies:      domain.StrategyFactory{Store: store},
-		CleanupSignaler: reg,
+		Store:            store,
+		Delivery:         router,
+		Strategies:       domain.StrategyFactory{Store: store},
+		CleanupSignaler:  reg,
+		AckRetryInterval: 5 * time.Second,
 	}
 	orchWf, err := reg.RegisterOrchestration(orchSpec)
 	if err != nil {
@@ -434,7 +436,7 @@ func TestDynamic_ListAndDelete(t *testing.T) {
 }
 
 func TestDynamic_DeleteKeepsResourceVisibleDuringCleanup(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), testutil.ServiceTimeout)
 	defer cancel()
 
 	var blocker *blockingRemoveDynamicDelivery
@@ -478,7 +480,7 @@ func TestDynamic_DeleteKeepsResourceVisibleDuringCleanup(t *testing.T) {
 
 	select {
 	case <-blocker.started:
-	case <-time.After(5 * time.Second):
+	case <-ctx.Done():
 		t.Fatal("timed out waiting for remove to start")
 	}
 
@@ -789,7 +791,8 @@ func TestDynamic_ProvenanceOnResponse(t *testing.T) {
 
 func TestDynamic_ResumeRPC(t *testing.T) {
 	env := setup(t)
-	ctx := context.Background()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
 
 	// Create a resource.
 	createReq := dynamicpb.NewMessage(env.svc.Descriptors.CreateRequest)
@@ -806,6 +809,9 @@ func TestDynamic_ResumeRPC(t *testing.T) {
 	if err := env.conn.Invoke(ctx, "/fleetshift.v1.KindClusterService/CreateKindCluster", createReq, createResp); err != nil {
 		t.Fatalf("CreateKindCluster: %v", err)
 	}
+
+	// Wait for orchestration to finish before manipulating state directly.
+	awaitDynamicState(t, ctx, env, "resume-cluster", 2)
 
 	// Transition to paused_auth state.
 	tx, err := env.store.Begin(ctx)

@@ -6,14 +6,31 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"sigs.k8s.io/kind/pkg/cluster"
 	"sigs.k8s.io/kind/pkg/log"
 
 	"github.com/fleetshift/fleetshift-poc/fleetshift-server/internal/addon/kind"
 	"github.com/fleetshift/fleetshift-poc/fleetshift-server/internal/domain"
+	"github.com/fleetshift/fleetshift-poc/fleetshift-server/internal/testutil"
 )
+
+// awaitDone drains one result from ch with a safety-net timeout so
+// that a regression in the fake delivery pipeline hangs for at most
+// [testutil.UnitTimeout] rather than the global go-test deadline.
+func awaitDone(t *testing.T, ch <-chan domain.DeliveryResult) domain.DeliveryResult {
+	t.Helper()
+	select {
+	case r := <-ch:
+		return r
+	case <-time.After(testutil.UnitTimeout):
+		t.Fatal("timed out waiting for delivery result")
+		return domain.DeliveryResult{}
+	}
+}
 
 // fakeProvider is a reusable in-memory implementation of
 // [kind.ClusterProvider] for tests. It signals on created after each
@@ -199,7 +216,7 @@ func TestAgent_Deliver_MissingNameReturnsFailedResult(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Deliver should not return dispatch error: %v", err)
 	}
-	result := <-reporter.done
+	result := awaitDone(t, reporter.done)
 	if result.State != domain.DeliveryStateFailed {
 		t.Errorf("State = %q, want %q", result.State, domain.DeliveryStateFailed)
 	}
@@ -250,7 +267,7 @@ func TestAgent_Remove_DeletesCluster(t *testing.T) {
 		t.Fatalf("Remove: %v", err)
 	}
 
-	result := <-reporter.done
+	result := awaitDone(t, reporter.done)
 	if result.State != domain.DeliveryStateDelivered {
 		t.Fatalf("result.State = %q, want %q", result.State, domain.DeliveryStateDelivered)
 	}
@@ -275,7 +292,7 @@ func TestAgent_Remove_ClusterAlreadyGone(t *testing.T) {
 		t.Fatalf("Remove should succeed for non-existent cluster: %v", err)
 	}
 
-	result := <-reporter.done
+	result := awaitDone(t, reporter.done)
 	if result.State != domain.DeliveryStateDelivered {
 		t.Fatalf("result.State = %q, want %q", result.State, domain.DeliveryStateDelivered)
 	}
@@ -347,7 +364,7 @@ func TestAgent_Deliver_ProducesTargetOutputs(t *testing.T) {
 		t.Fatalf("Deliver: %v", err)
 	}
 
-	result := <-reporter.done
+	result := awaitDone(t, reporter.done)
 
 	if result.State != domain.DeliveryStateDelivered {
 		t.Fatalf("State = %q, want %q", result.State, domain.DeliveryStateDelivered)
@@ -391,7 +408,7 @@ func TestAgent_Deliver_MultipleManifests_ProducesMultipleOutputs(t *testing.T) {
 		t.Fatalf("Deliver: %v", err)
 	}
 
-	result := <-reporter.done
+	result := awaitDone(t, reporter.done)
 
 	if len(result.ProvisionedTargets) != 2 {
 		t.Errorf("ProvisionedTargets count = %d, want 2", len(result.ProvisionedTargets))
@@ -477,7 +494,7 @@ func TestAgent_Observer_DefaultConfig(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Deliver: %v", err)
 	}
-	<-reporter.done
+	awaitDone(t, reporter.done)
 
 	agentObs.mu.Lock()
 	defer agentObs.mu.Unlock()
@@ -513,7 +530,7 @@ func TestAgent_Observer_CustomConfig(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Deliver: %v", err)
 	}
-	<-reporter.done
+	awaitDone(t, reporter.done)
 
 	agentObs.mu.Lock()
 	defer agentObs.mu.Unlock()
@@ -569,7 +586,7 @@ func TestAgent_Deliver_WithTokenVerifier_ValidToken(t *testing.T) {
 		t.Fatalf("Deliver: %v", err)
 	}
 
-	doneResult := <-reporter.done
+	doneResult := awaitDone(t, reporter.done)
 	if doneResult.State != domain.DeliveryStateDelivered {
 		t.Errorf("async State = %q, want %q", doneResult.State, domain.DeliveryStateDelivered)
 	}
@@ -607,7 +624,7 @@ func TestAgent_Deliver_WithTokenVerifier_ExpiredToken(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Deliver should not return a dispatch error: %v", err)
 	}
-	result := <-reporter.done
+	result := awaitDone(t, reporter.done)
 	if result.State != domain.DeliveryStateAuthFailed {
 		t.Errorf("State = %q, want %q", result.State, domain.DeliveryStateAuthFailed)
 	}
@@ -642,7 +659,7 @@ func TestAgent_Deliver_WithTokenVerifier_NoToken_SkipsVerification(t *testing.T)
 		t.Fatalf("Deliver: %v", err)
 	}
 
-	doneResult := <-reporter.done
+	doneResult := awaitDone(t, reporter.done)
 	if doneResult.State != domain.DeliveryStateDelivered {
 		t.Errorf("async State = %q, want %q", doneResult.State, domain.DeliveryStateDelivered)
 	}
@@ -664,7 +681,7 @@ func TestAgent_Observer_MultipleSpecs(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Deliver: %v", err)
 	}
-	<-reporter.done
+	awaitDone(t, reporter.done)
 
 	agentObs.mu.Lock()
 	defer agentObs.mu.Unlock()
@@ -709,7 +726,7 @@ func TestAgent_Deliver_TrustBundle_StoresAndCompletes(t *testing.T) {
 		t.Fatalf("Deliver: %v", err)
 	}
 
-	done := <-reporter.done
+	done := awaitDone(t, reporter.done)
 	if done.State != domain.DeliveryStateDelivered {
 		t.Fatalf("async State = %q, want Delivered", done.State)
 	}
@@ -744,7 +761,7 @@ func TestAgent_Deliver_TrustBundle_IncludedInProvisionedTarget(t *testing.T) {
 		Raw:          trustRaw,
 	}}
 	_ = agent.Deliver(context.Background(), domain.TargetInfo{}, "d-trust", trustManifests, domain.DeliveryAuth{}, nil, 1)
-	<-reporter.done
+	awaitDone(t, reporter.done)
 
 	// Now deliver a cluster spec. The same agent retains the trust
 	// bundle in memory, and the done channel has been drained.
@@ -759,7 +776,7 @@ func TestAgent_Deliver_TrustBundle_IncludedInProvisionedTarget(t *testing.T) {
 		t.Fatalf("Deliver: %v", err)
 	}
 
-	done := <-reporter.done
+	done := awaitDone(t, reporter.done)
 	if done.State != domain.DeliveryStateDelivered {
 		t.Fatalf("async State = %q (message: %s)", done.State, done.Message)
 	}
@@ -783,4 +800,171 @@ func TestAgent_Deliver_TrustBundle_IncludedInProvisionedTarget(t *testing.T) {
 	if entries[0].IssuerURL != "https://issuer.example.com" {
 		t.Errorf("issuer = %q", entries[0].IssuerURL)
 	}
+}
+
+// blockingProvider wraps fakeProvider but blocks Create until unblocked.
+type blockingProvider struct {
+	*fakeProvider
+	gate        chan struct{} // close to unblock Create
+	entered     chan struct{} // closed when first Create is entered
+	enteredOnce sync.Once
+	createCount int32
+}
+
+func newBlockingProvider() *blockingProvider {
+	return &blockingProvider{
+		fakeProvider: newFakeProvider(),
+		gate:         make(chan struct{}),
+		entered:      make(chan struct{}),
+	}
+}
+
+func (p *blockingProvider) Create(name string, opts ...cluster.CreateOption) error {
+	atomic.AddInt32(&p.createCount, 1)
+	if p.logger != nil {
+		p.logger.V(0).Infof("Creating cluster %q", name)
+	}
+	p.enteredOnce.Do(func() { close(p.entered) })
+	<-p.gate
+	return p.fakeProvider.Create(name, opts...)
+}
+
+func TestAgent_Deliver_RetryWhileInFlight_Skipped(t *testing.T) {
+	bp := newBlockingProvider()
+	reporter := newChannelReporter()
+	agent := kind.NewAgent(reporter, func(logger log.Logger) kind.ClusterProvider {
+		bp.fakeProvider.logger = logger
+		return bp
+	})
+
+	manifests := []domain.Manifest{{
+		ResourceType: kind.ClusterResourceType,
+		Raw:          json.RawMessage(`{"name": "retry-cluster"}`),
+	}}
+
+	// First deliver — enters Create and blocks.
+	err := agent.Deliver(context.Background(), domain.TargetInfo{}, "d-retry:t1", manifests, domain.DeliveryAuth{}, nil, 1)
+	if err != nil {
+		t.Fatalf("first Deliver: %v", err)
+	}
+	<-bp.entered // wait until goroutine is inside Create
+
+	// Second deliver with same delivery ID — should be a no-op.
+	err = agent.Deliver(context.Background(), domain.TargetInfo{}, "d-retry:t1", manifests, domain.DeliveryAuth{}, nil, 1)
+	if err != nil {
+		t.Fatalf("second Deliver: %v", err)
+	}
+
+	// Unblock the first goroutine.
+	close(bp.gate)
+
+	result := awaitDone(t, reporter.done)
+	if result.State != domain.DeliveryStateDelivered {
+		t.Fatalf("State = %q, want %q", result.State, domain.DeliveryStateDelivered)
+	}
+
+	if n := atomic.LoadInt32(&bp.createCount); n != 1 {
+		t.Fatalf("Create called %d times, want 1", n)
+	}
+}
+
+func TestAgent_Remove_RetryWhileInFlight_Skipped(t *testing.T) {
+	fp := newFakeProvider()
+	fp.clusters["rm-cluster"] = nil
+	reporter := newChannelReporter()
+
+	bdp := &blockingDeleteProvider{
+		fakeProvider: fp,
+		gate:         make(chan struct{}),
+		entered:      make(chan struct{}),
+		count:        new(int32),
+	}
+	agent := kind.NewAgent(reporter, func(_ log.Logger) kind.ClusterProvider {
+		return bdp
+	})
+
+	manifests := []domain.Manifest{{
+		Raw: json.RawMessage(`{"name":"rm-cluster"}`),
+	}}
+
+	err := agent.Remove(context.Background(), domain.TargetInfo{}, "d-rm:t1", manifests, domain.DeliveryAuth{}, nil, 1)
+	if err != nil {
+		t.Fatalf("first Remove: %v", err)
+	}
+	<-bdp.entered
+
+	err = agent.Remove(context.Background(), domain.TargetInfo{}, "d-rm:t1", manifests, domain.DeliveryAuth{}, nil, 1)
+	if err != nil {
+		t.Fatalf("second Remove: %v", err)
+	}
+
+	close(bdp.gate)
+
+	result := awaitDone(t, reporter.done)
+	if result.State != domain.DeliveryStateDelivered {
+		t.Fatalf("State = %q, want %q", result.State, domain.DeliveryStateDelivered)
+	}
+
+	if n := atomic.LoadInt32(bdp.count); n != 1 {
+		t.Fatalf("Delete called %d times, want 1", n)
+	}
+}
+
+func TestAgent_Deliver_TrustBundle_RetryDoesNotDuplicate(t *testing.T) {
+	bp := newBlockingProvider()
+	reporter := newChannelReporter()
+	agent := kind.NewAgent(reporter, func(logger log.Logger) kind.ClusterProvider {
+		bp.fakeProvider.logger = logger
+		return bp
+	})
+
+	trustEntry := domain.TrustBundleEntry{
+		IssuerURL:          "https://issuer.example.com",
+		JWKSURI:            "https://issuer.example.com/jwks",
+		EnrollmentAudience: "fleetshift-enroll",
+	}
+	trustRaw, _ := json.Marshal(trustEntry)
+
+	manifests := []domain.Manifest{
+		{ResourceType: domain.TrustBundleResourceType, Raw: trustRaw},
+		{ResourceType: kind.ClusterResourceType, Raw: json.RawMessage(`{"name": "tb-retry-cluster"}`)},
+	}
+
+	// First deliver — trust bundle is stored, cluster Create blocks.
+	err := agent.Deliver(context.Background(), domain.TargetInfo{}, "d-tb-retry", manifests, domain.DeliveryAuth{}, nil, 1)
+	if err != nil {
+		t.Fatalf("first Deliver: %v", err)
+	}
+	<-bp.entered
+
+	// Retry with same delivery ID while first is in-flight.
+	// The inflight gate must prevent a second storeTrustBundle call.
+	err = agent.Deliver(context.Background(), domain.TargetInfo{}, "d-tb-retry", manifests, domain.DeliveryAuth{}, nil, 1)
+	if err != nil {
+		t.Fatalf("second Deliver: %v", err)
+	}
+
+	bundles := agent.TrustBundles()
+	if len(bundles) != 1 {
+		t.Fatalf("trust bundles len = %d, want 1 (retry must not duplicate)", len(bundles))
+	}
+
+	close(bp.gate)
+	awaitDone(t, reporter.done)
+}
+
+// blockingDeleteProvider blocks Delete until gate is closed.
+type blockingDeleteProvider struct {
+	*fakeProvider
+	gate    chan struct{}
+	entered chan struct{}
+	count   *int32
+	once    sync.Once
+}
+
+func (p *blockingDeleteProvider) Delete(name, kc string) error {
+	atomic.AddInt32(p.count, 1)
+	p.once.Do(func() { close(p.entered) })
+	<-p.gate
+	return p.fakeProvider.Delete(name, kc)
 }

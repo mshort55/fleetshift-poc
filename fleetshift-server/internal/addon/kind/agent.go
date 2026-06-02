@@ -87,6 +87,11 @@ type Agent struct {
 
 	trustMu      sync.RWMutex
 	trustBundles []domain.TrustBundleEntry
+
+	// inflight tracks delivery IDs with work currently in progress.
+	// The platform provides at-least-once delivery; a retry for a
+	// delivery that is already being processed is safely skipped.
+	inflight sync.Map // map[domain.DeliveryID]struct{}
 }
 
 // AgentOption configures an [Agent].
@@ -165,11 +170,16 @@ func (a *Agent) agentObserver() AgentObserver {
 // existing async flow. All delivery outcomes are reported through the
 // [domain.DeliveryReporter].
 func (a *Agent) Deliver(ctx context.Context, _ domain.TargetInfo, deliveryID domain.DeliveryID, manifests []domain.Manifest, auth domain.DeliveryAuth, _ *domain.Attestation, generation domain.Generation) error {
+	if _, loaded := a.inflight.LoadOrStore(deliveryID, struct{}{}); loaded {
+		return nil
+	}
+
 	var clusterManifests []domain.Manifest
 	for _, m := range manifests {
 		switch m.ResourceType {
 		case domain.TrustBundleResourceType:
 			if err := a.storeTrustBundle(m); err != nil {
+				a.inflight.Delete(deliveryID)
 				_ = a.reporter.ReportResult(ctx, deliveryID, generation, domain.DeliveryResult{
 					State:   domain.DeliveryStateFailed,
 					Message: fmt.Sprintf("store trust bundle: %v", err),
@@ -182,6 +192,7 @@ func (a *Agent) Deliver(ctx context.Context, _ domain.TargetInfo, deliveryID dom
 	}
 
 	if len(clusterManifests) == 0 {
+		a.inflight.Delete(deliveryID)
 		asyncCtx := context.WithoutCancel(ctx)
 		go func() {
 			_ = a.reporter.ReportResult(asyncCtx, deliveryID, generation, domain.DeliveryResult{State: domain.DeliveryStateDelivered})
@@ -191,6 +202,7 @@ func (a *Agent) Deliver(ctx context.Context, _ domain.TargetInfo, deliveryID dom
 
 	specs, err := a.validateManifests(clusterManifests)
 	if err != nil {
+		a.inflight.Delete(deliveryID)
 		_ = a.reporter.ReportResult(ctx, deliveryID, generation, domain.DeliveryResult{
 			State:   domain.DeliveryStateFailed,
 			Message: fmt.Sprintf("invalid manifests: %v", err),
@@ -199,6 +211,7 @@ func (a *Agent) Deliver(ctx context.Context, _ domain.TargetInfo, deliveryID dom
 	}
 
 	if err := a.verifyToken(ctx, auth); err != nil {
+		a.inflight.Delete(deliveryID)
 		_ = a.reporter.ReportResult(ctx, deliveryID, generation, domain.DeliveryResult{
 			State:   domain.DeliveryStateAuthFailed,
 			Message: fmt.Sprintf("token verification failed: %v", err),
@@ -261,7 +274,13 @@ func (a *Agent) Remove(_ context.Context, _ domain.TargetInfo, deliveryID domain
 		return fmt.Errorf("validate manifests: %w", err)
 	}
 
+	if _, loaded := a.inflight.LoadOrStore(deliveryID, struct{}{}); loaded {
+		return nil
+	}
+
 	go func() {
+		defer a.inflight.Delete(deliveryID)
+
 		provider := a.providerFactory(nil)
 		for _, spec := range specs {
 			exists, err := a.clusterExistsErr(provider, spec.Name)
@@ -301,6 +320,8 @@ func (a *Agent) validateManifests(manifests []domain.Manifest) ([]ClusterSpec, e
 }
 
 func (a *Agent) deliverAsync(ctx context.Context, provider ClusterProvider, specs []ClusterSpec, auth domain.DeliveryAuth, deliveryID domain.DeliveryID, generation domain.Generation) {
+	defer a.inflight.Delete(deliveryID)
+
 	var outputs []ClusterOutput
 
 	for _, spec := range specs {
