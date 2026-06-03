@@ -2,9 +2,14 @@ package gcphcp
 
 import (
 	"context"
+	"crypto/sha256"
+	"crypto/tls"
 	"crypto/x509"
 	"errors"
 	"fmt"
+	"net"
+	"net/http"
+	"time"
 
 	authv1 "k8s.io/api/authentication/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -189,4 +194,74 @@ func isCertVerificationError(err error) bool {
 	}
 	var unknownAuthPtr *x509.UnknownAuthorityError
 	return errors.As(err, &unknownAuthPtr)
+}
+
+func probeWithSystemTrust(guestEndpoint, brokerToken string) (kubernetes.Interface, []byte, error) {
+	var capturedLeafDER []byte
+
+	cfg := &rest.Config{
+		Host:        guestEndpoint,
+		BearerToken: brokerToken,
+		TLSClientConfig: rest.TLSClientConfig{},
+	}
+	cfg.Wrap(func(rt http.RoundTripper) http.RoundTripper {
+		return &leafCaptureTransport{base: rt, capture: &capturedLeafDER}
+	})
+
+	client, err := newKubernetesClientForConfig(cfg)
+	if err != nil {
+		if isCertVerificationError(err) && capturedLeafDER != nil {
+			return nil, capturedLeafDER, err
+		}
+		return nil, nil, err
+	}
+
+	_, err = client.Discovery().ServerVersion()
+	if err != nil {
+		if isCertVerificationError(err) && capturedLeafDER != nil {
+			return nil, capturedLeafDER, err
+		}
+		return nil, nil, err
+	}
+
+	return client, nil, nil
+}
+
+type leafCaptureTransport struct {
+	base    http.RoundTripper
+	capture *[]byte
+}
+
+func (t *leafCaptureTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	resp, err := t.base.RoundTrip(req)
+	if err != nil && req.TLS == nil {
+		host := req.URL.Hostname()
+		port := req.URL.Port()
+		if port == "" {
+			port = "443"
+		}
+		*t.capture = probeLeafCert(host + ":" + port)
+	}
+	return resp, err
+}
+
+func probeLeafCert(addr string) []byte {
+	conn, err := tls.DialWithDialer(
+		&net.Dialer{Timeout: 5 * time.Second},
+		"tcp", addr,
+		&tls.Config{InsecureSkipVerify: true},
+	)
+	if err != nil {
+		return nil
+	}
+	defer conn.Close()
+	certs := conn.ConnectionState().PeerCertificates
+	if len(certs) == 0 {
+		return nil
+	}
+	return certs[0].Raw
+}
+
+func leafFingerprint(der []byte) [32]byte {
+	return sha256.Sum256(der)
 }

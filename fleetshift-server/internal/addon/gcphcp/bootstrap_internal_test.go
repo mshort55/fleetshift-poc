@@ -234,3 +234,44 @@ func TestIsCertVerificationError(t *testing.T) {
 		})
 	}
 }
+
+func TestProbeWithSystemTrust_SuccessReturnsClientAndNilLeafDER(t *testing.T) {
+	origNewClient := newKubernetesClientForConfig
+	defer func() { newKubernetesClientForConfig = origNewClient }()
+
+	client := fake.NewSimpleClientset()
+	newKubernetesClientForConfig = func(cfg *rest.Config) (kubernetes.Interface, error) {
+		return client, nil
+	}
+
+	gotClient, leafDER, err := probeWithSystemTrust("https://guest.example:6443", "broker-token")
+	if err != nil {
+		t.Fatalf("probeWithSystemTrust() error = %v", err)
+	}
+	if gotClient == nil {
+		t.Fatal("expected non-nil client on success")
+	}
+	if leafDER != nil {
+		t.Fatalf("leafDER = %v, want nil on success", leafDER)
+	}
+}
+
+func TestProbeWithSystemTrust_NonX509ErrorReturnsNilLeafDER(t *testing.T) {
+	origNewClient := newKubernetesClientForConfig
+	defer func() { newKubernetesClientForConfig = origNewClient }()
+
+	newKubernetesClientForConfig = func(cfg *rest.Config) (kubernetes.Interface, error) {
+		return nil, fmt.Errorf("connection refused")
+	}
+
+	gotClient, leafDER, err := probeWithSystemTrust("https://guest.example:6443", "broker-token")
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if gotClient != nil {
+		t.Fatal("expected nil client on error")
+	}
+	if leafDER != nil {
+		t.Fatalf("leafDER = %v, want nil for non-x509 error", leafDER)
+	}
+}
