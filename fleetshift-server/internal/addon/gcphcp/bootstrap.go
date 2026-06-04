@@ -30,13 +30,14 @@ const (
 	rootCAConfigMapName                     = "kube-root-ca.crt"
 )
 
-var newKubernetesClientForConfig = func(c *rest.Config) (kubernetes.Interface, error) {
-	return kubernetes.NewForConfig(c)
-}
-
-var probeWithSystemTrustFn = probeWithSystemTrust
-
-var extractCAFromGuestFn = extractCAFromGuest
+// Swappable in tests to avoid real TLS connections and API server calls.
+var (
+	newKubernetesClientForConfig = func(c *rest.Config) (kubernetes.Interface, error) {
+		return kubernetes.NewForConfig(c)
+	}
+	probeWithSystemTrustFn = probeWithSystemTrust
+	extractCAFromGuestFn   = extractCAFromGuest
+)
 
 // BootstrapResult contains the credentials and metadata obtained from
 // bootstrapping a guest cluster.
@@ -283,6 +284,9 @@ func probeLeafCert(addr string) []byte {
 	return certs[0].Raw
 }
 
+// TODO: Review insecure TLS usage here and in probeLeafCert once migrated to
+// CLM backend — the insecure connection may be avoidable if CLM provides a
+// trusted CA path or certificate bundle.
 func extractCAFromGuest(
 	ctx context.Context,
 	guestEndpoint, brokerToken string,
