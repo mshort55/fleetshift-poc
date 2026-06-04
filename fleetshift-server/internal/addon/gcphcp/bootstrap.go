@@ -2,7 +2,6 @@ package gcphcp
 
 import (
 	"context"
-	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
 	"errors"
@@ -76,9 +75,8 @@ func BootstrapGuestCluster(
 		}
 
 		// Phase 2: extract CA from guest cluster
-		fingerprint := leafFingerprint(leafDER)
 		var err error
-		caCert, err = extractCAFromGuestFn(ctx, guestEndpoint, brokerToken, fingerprint, leafDER)
+		caCert, err = extractCAFromGuestFn(ctx, guestEndpoint, brokerToken, leafDER)
 		if err != nil {
 			return BootstrapResult{}, fmt.Errorf("extract guest cluster CA: %w", err)
 		}
@@ -231,21 +229,15 @@ func probeWithSystemTrust(guestEndpoint, brokerToken string) (kubernetes.Interfa
 	cfg := &rest.Config{
 		Host:        guestEndpoint,
 		BearerToken: brokerToken,
-		TLSClientConfig: rest.TLSClientConfig{},
 	}
 	cfg.Wrap(func(rt http.RoundTripper) http.RoundTripper {
 		return &leafCaptureTransport{base: rt, capture: &capturedLeafDER}
 	})
 
 	client, err := newKubernetesClientForConfig(cfg)
-	if err != nil {
-		if isCertVerificationError(err) && capturedLeafDER != nil {
-			return nil, capturedLeafDER, err
-		}
-		return nil, nil, err
+	if err == nil {
+		_, err = client.Discovery().ServerVersion()
 	}
-
-	_, err = client.Discovery().ServerVersion()
 	if err != nil {
 		if isCertVerificationError(err) && capturedLeafDER != nil {
 			return nil, capturedLeafDER, err
@@ -263,7 +255,7 @@ type leafCaptureTransport struct {
 
 func (t *leafCaptureTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	resp, err := t.base.RoundTrip(req)
-	if err != nil && req.TLS == nil {
+	if err != nil {
 		host := req.URL.Hostname()
 		port := req.URL.Port()
 		if port == "" {
@@ -291,14 +283,9 @@ func probeLeafCert(addr string) []byte {
 	return certs[0].Raw
 }
 
-func leafFingerprint(der []byte) [32]byte {
-	return sha256.Sum256(der)
-}
-
 func extractCAFromGuest(
 	ctx context.Context,
 	guestEndpoint, brokerToken string,
-	expectedFingerprint [32]byte,
 	leafDER []byte,
 ) ([]byte, error) {
 	cfg := &rest.Config{
@@ -346,6 +333,10 @@ func validateCASignsLeaf(caPEM, leafDER []byte) error {
 		return fmt.Errorf("parse captured leaf certificate: %w", err)
 	}
 
+	// Pin to the leaf's own validity window so we only check the cryptographic
+	// signing relationship, not temporal validity. The cert was just served in a
+	// live TLS handshake; clock skew or short-lived OpenShift CAs could cause
+	// spurious rejections with time.Now(). Phase 3's TLS stack enforces expiry.
 	_, err = leaf.Verify(x509.VerifyOptions{
 		Roots:       roots,
 		CurrentTime: leaf.NotBefore.Add(time.Second),

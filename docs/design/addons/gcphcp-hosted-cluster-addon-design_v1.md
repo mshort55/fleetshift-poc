@@ -677,10 +677,10 @@ The addon uses a three-phase connection strategy for the guest API endpoint:
    without any custom CA configuration.
 
 2. **Phase 2 — Guarded CA extraction:** if Phase 1 fails with `x509.UnknownAuthorityError`,
-   the addon captures the leaf certificate fingerprint from the failed handshake, then makes a
-   single insecure connection (pinned to the same leaf fingerprint) to read the
-   `kube-root-ca.crt` ConfigMap from `kube-system`. The extracted CA is validated against the
-   captured leaf cert before use.
+   the addon captures the leaf certificate from the server via a separate insecure TLS dial, then
+   makes an insecure connection to read the `kube-root-ca.crt` ConfigMap from `kube-system`. The
+   extracted CA is validated against the captured leaf cert (cryptographic chain verification)
+   before use.
 
 3. **Phase 3 — Secure reconnect:** all privileged bootstrap operations (ServiceAccount creation,
    RBAC binding, token request) use a REST config verified against the extracted CA.
