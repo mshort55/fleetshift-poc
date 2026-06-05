@@ -674,13 +674,13 @@ The addon uses a three-phase connection strategy for the guest API endpoint:
 
 1. **Phase 1 — Optimistic secure connect:** probe with the host's normal system trust store. If
    the guest API endpoint presents a publicly trusted certificate chain, bootstrap proceeds
-   without any custom CA configuration.
+   without any custom CA configuration. On TLS failure, a fallback insecure dial captures the
+   server's leaf certificate for use in Phase 2.
 
 2. **Phase 2 — Guarded CA extraction:** if Phase 1 fails with `x509.UnknownAuthorityError`,
-   the addon captures the leaf certificate from the server via a separate insecure TLS dial, then
-   makes an insecure connection to read the `kube-root-ca.crt` ConfigMap from `kube-system`. The
-   extracted CA is validated against the captured leaf cert (cryptographic chain verification)
-   before use.
+   the addon makes an insecure connection to read the `kube-root-ca.crt` ConfigMap from
+   `kube-system`. The extracted CA is validated against the leaf cert captured in Phase 1
+   (cryptographic chain verification) before use.
 
 3. **Phase 3 — Secure reconnect:** all privileged bootstrap operations (ServiceAccount creation,
    RBAC binding, token request) use a REST config verified against the extracted CA.
