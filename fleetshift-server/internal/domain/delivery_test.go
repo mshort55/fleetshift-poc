@@ -432,6 +432,7 @@ func TestDelivery_ResetInProgress(t *testing.T) {
 		for _, state := range []DeliveryState{
 			DeliveryStateDelivered,
 			DeliveryStateFailed,
+			DeliveryStatePartial,
 			DeliveryStateAuthFailed,
 		} {
 			t.Run(string(state), func(t *testing.T) {
