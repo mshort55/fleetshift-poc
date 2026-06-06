@@ -226,30 +226,6 @@ func (d *Delivery) Retry(generation Generation, now time.Time) bool {
 	return true
 }
 
-// ResetInProgress resets a non-terminal, non-pending delivery back to
-// [DeliveryStatePending] for at-least-once re-dispatch. After a crash
-// or ContinueAsNew, the addon goroutine that was processing this
-// delivery is gone and no completion signal will arrive. Addons are
-// idempotent, so resetting to Pending is safe.
-//
-// This is the in-progress counterpart to [Delivery.ResetForRetry],
-// which handles terminal deliveries.
-func (d *Delivery) ResetInProgress(now time.Time) error {
-	if d.state == DeliveryStatePending {
-		return fmt.Errorf(
-			"%w: delivery %s is already pending",
-			ErrIllegalStateTransition, d.id)
-	}
-	if d.state.IsTerminal() {
-		return fmt.Errorf(
-			"%w: delivery %s is in terminal state %q, use ResetForRetry",
-			ErrIllegalStateTransition, d.id, d.state)
-	}
-	d.state = DeliveryStatePending
-	d.updatedAt = now
-	return nil
-}
-
 // Accessor methods -- read-only getters for private fields.
 
 // ID returns the delivery's unique identifier.
