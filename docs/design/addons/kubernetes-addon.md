@@ -252,7 +252,13 @@ Edges are computed lazily, at flush time in the Writer, not on every event. When
 
 ### Edge persistence
 
-Edges are written through the `InventoryWriter` interface alongside inventory items. `ApplyDelta` includes edge add/delete parameters alongside item upserts and deletes. `Resync` replaces all edges for a target+type alongside items.
+Edges are written through the `InventoryWriter` interface alongside inventory items, but persisted in a separate table rather than embedded on items. This separation reflects that edges describe relationships between items — embedding them on one side creates update anomalies (deleting item B requires updating item A's edges even though A itself is unchanged) and makes incoming-edge queries expensive (scanning all items to find edges pointing to a given destination).
+
+The edge table is keyed by target ID, source UID, destination UID, and edge type. A source can have multiple edge types to the same destination. A secondary index on destination UID enables efficient incoming-edge queries such as "which pods run on this node."
+
+`ApplyDelta` includes edge add and edge delete parameters alongside item upserts and deletes, all within a single transaction. `Resync` scopes edge replacement to the source UIDs of the items being resynced — it deletes edges for those sources, then inserts the new set. This avoids needing a type-mapping between inventory types and edge source kinds.
+
+The `InventoryRepository` provides the underlying operations: `UpsertEdges`, `DeleteEdges`, and `DeleteEdgesBySourceUIDs`. Target termination cleanup deletes all edges for the target alongside items via `DeleteByTarget`.
 
 ## Indexing pipeline
 
@@ -427,9 +433,9 @@ The indexing pipeline observes cluster state but does not compare it against del
 
 The two-tier model and allow/deny configuration address the core extensibility gap for controlling what is watched. However, enriched extraction rules (JSONPath fields, hooks) are compiled into the binary. Whether enriched schema entries should be configurable at runtime — via target properties, a configuration API, or a custom resource — remains open. Allow/deny lists and namespace filters are runtime-configurable; enriched extraction rules are not.
 
-### Edge storage and querying
+### Edge querying
 
-Edges are written through `InventoryWriter` alongside inventory items, but the platform's inventory storage and query model does not yet support edge-aware queries. The edge data model (source UID, destination UID, edge type) needs corresponding persistence and API support. How edges are stored (separate table, embedded in items, graph-native storage) and how they are queried (traversal API, filter joins) is platform-level design work outside this addon doc.
+Edges are persisted in a dedicated table alongside inventory items, but the platform's search API does not yet expose edge-aware queries. How edges are queried — traversal API, filter joins, or topology endpoints — is platform-level design work outside this addon doc. The persistence model (separate table with destination index) is designed to support both outgoing and incoming edge lookups efficiently.
 
 ### Informer startup serialization at scale
 
