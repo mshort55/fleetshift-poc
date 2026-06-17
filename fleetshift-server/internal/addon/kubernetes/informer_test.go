@@ -1,0 +1,324 @@
+package kubernetes
+
+import (
+	"context"
+	"log/slog"
+	"testing"
+	"time"
+
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	fakediscovery "k8s.io/client-go/discovery/fake"
+	dynamicfake "k8s.io/client-go/dynamic/fake"
+	fakeclientset "k8s.io/client-go/kubernetes/fake"
+)
+
+// fakeDiscoveryWithPreferred wraps FakeDiscovery and overrides
+// ServerPreferredResources to return the Resources field, since the upstream
+// fake always returns nil.
+type fakeDiscoveryWithPreferred struct {
+	*fakediscovery.FakeDiscovery
+}
+
+func (f *fakeDiscoveryWithPreferred) ServerPreferredResources() ([]*metav1.APIResourceList, error) {
+	return f.Resources, nil
+}
+
+func newFakeDiscovery(resources []*metav1.APIResourceList) *fakeDiscoveryWithPreferred {
+	fd := &fakediscovery.FakeDiscovery{
+		Fake: &fakeclientset.NewSimpleClientset().Fake,
+	}
+	fd.Resources = resources
+	return &fakeDiscoveryWithPreferred{FakeDiscovery: fd}
+}
+
+// newFakeDynamicClient creates a fake dynamic client with a scheme that knows
+// about unstructured lists for the given GVRs.
+func newFakeDynamicClient(gvrs ...schema.GroupVersionResource) *dynamicfake.FakeDynamicClient {
+	scheme := runtime.NewScheme()
+	gvrToListKind := make(map[schema.GroupVersionResource]string)
+	for _, gvr := range gvrs {
+		// Register a list kind so the fake can return empty lists.
+		gvrToListKind[gvr] = gvr.Resource + "List"
+	}
+	return dynamicfake.NewSimpleDynamicClientWithCustomListKinds(scheme, gvrToListKind)
+}
+
+// --- SupportedResources tests ---
+
+func TestSupportedResources_WatchableOnly(t *testing.T) {
+	disc := newFakeDiscovery([]*metav1.APIResourceList{
+		{
+			GroupVersion: "v1",
+			APIResources: []metav1.APIResource{
+				{Name: "pods", Verbs: metav1.Verbs{"get", "list", "watch"}},
+				{Name: "bindings", Verbs: metav1.Verbs{"create"}}, // not watchable
+			},
+		},
+		{
+			GroupVersion: "apps/v1",
+			APIResources: []metav1.APIResource{
+				{Name: "deployments", Verbs: metav1.Verbs{"get", "list", "watch", "create"}},
+				{Name: "controllerrevisions", Verbs: metav1.Verbs{"get", "list"}}, // not watchable
+			},
+		},
+	})
+
+	result, err := SupportedResources(disc)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	expected := map[schema.GroupVersionResource]struct{}{
+		{Group: "", Version: "v1", Resource: "pods"}:            {},
+		{Group: "apps", Version: "v1", Resource: "deployments"}: {},
+	}
+
+	if len(result) != len(expected) {
+		t.Fatalf("expected %d GVRs, got %d: %v", len(expected), len(result), result)
+	}
+	for gvr := range expected {
+		if _, ok := result[gvr]; !ok {
+			t.Errorf("expected GVR %s not found in result", gvr)
+		}
+	}
+}
+
+func TestSupportedResources_EmptyList(t *testing.T) {
+	disc := newFakeDiscovery([]*metav1.APIResourceList{})
+
+	result, err := SupportedResources(disc)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(result) != 0 {
+		t.Fatalf("expected 0 GVRs, got %d", len(result))
+	}
+}
+
+func TestSupportedResources_NoWatchVerb(t *testing.T) {
+	disc := newFakeDiscovery([]*metav1.APIResourceList{
+		{
+			GroupVersion: "v1",
+			APIResources: []metav1.APIResource{
+				{Name: "bindings", Verbs: metav1.Verbs{"create"}},
+				{Name: "componentstatuses", Verbs: metav1.Verbs{"get", "list"}},
+			},
+		},
+	})
+
+	result, err := SupportedResources(disc)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(result) != 0 {
+		t.Fatalf("expected 0 GVRs, got %d", len(result))
+	}
+}
+
+// --- IsResourceAllowed tests ---
+
+func TestIsResourceAllowed_EmptyLists(t *testing.T) {
+	// Empty allow list means allow-all, empty deny list means deny-nothing.
+	if !IsResourceAllowed("apps", "deployments", nil, nil) {
+		t.Error("expected allowed with empty lists")
+	}
+}
+
+func TestIsResourceAllowed_DenyWinsOverAllow(t *testing.T) {
+	allow := []Resource{{ApiGroups: []string{"*"}, Resources: []string{"*"}}}
+	deny := []Resource{{ApiGroups: []string{"apps"}, Resources: []string{"deployments"}}}
+
+	if IsResourceAllowed("apps", "deployments", allow, deny) {
+		t.Error("expected denied: resource in both allow and deny list")
+	}
+}
+
+func TestIsResourceAllowed_DenyOnly(t *testing.T) {
+	deny := []Resource{{ApiGroups: []string{""}, Resources: []string{"secrets"}}}
+
+	if IsResourceAllowed("", "secrets", nil, deny) {
+		t.Error("expected denied: secrets in deny list")
+	}
+	if !IsResourceAllowed("", "pods", nil, deny) {
+		t.Error("expected allowed: pods not in deny list")
+	}
+}
+
+func TestIsResourceAllowed_AllowOnly(t *testing.T) {
+	allow := []Resource{{ApiGroups: []string{"apps"}, Resources: []string{"deployments"}}}
+
+	if !IsResourceAllowed("apps", "deployments", allow, nil) {
+		t.Error("expected allowed: deployments in allow list")
+	}
+	if IsResourceAllowed("apps", "statefulsets", allow, nil) {
+		t.Error("expected denied: statefulsets not in allow list")
+	}
+}
+
+func TestIsResourceAllowed_WildcardAllow(t *testing.T) {
+	allow := []Resource{{ApiGroups: []string{"*"}, Resources: []string{"*"}}}
+
+	if !IsResourceAllowed("anything", "anything", allow, nil) {
+		t.Error("expected allowed: wildcard allow")
+	}
+}
+
+func TestIsResourceMatchingList_NoMatch(t *testing.T) {
+	list := []Resource{{ApiGroups: []string{"apps"}, Resources: []string{"deployments"}}}
+
+	_, _, matched := IsResourceMatchingList(list, "batch", "jobs")
+	if matched {
+		t.Error("expected no match")
+	}
+}
+
+func TestIsResourceMatchingList_WildcardGroup(t *testing.T) {
+	list := []Resource{{ApiGroups: []string{"*"}, Resources: []string{"pods"}}}
+
+	g, k, matched := IsResourceMatchingList(list, "anything", "pods")
+	if !matched {
+		t.Error("expected match with wildcard group")
+	}
+	if g != "*" || k != "pods" {
+		t.Errorf("unexpected match values: group=%s, kind=%s", g, k)
+	}
+}
+
+// --- InformerManager.Reconcile tests ---
+
+func TestInformerManager_Reconcile_StartNew(t *testing.T) {
+	eventCh := make(chan ResourceEvent, 100)
+	resyncCh := make(chan ResyncEvent, 100)
+	logger := slog.Default()
+
+	podsGVR := schema.GroupVersionResource{Group: "", Version: "v1", Resource: "pods"}
+	svcsGVR := schema.GroupVersionResource{Group: "", Version: "v1", Resource: "services"}
+
+	disc := newFakeDiscovery([]*metav1.APIResourceList{
+		{
+			GroupVersion: "v1",
+			APIResources: []metav1.APIResource{
+				{Name: "pods", Verbs: metav1.Verbs{"get", "list", "watch"}},
+				{Name: "services", Verbs: metav1.Verbs{"get", "list", "watch"}},
+			},
+		},
+	})
+
+	dynClient := newFakeDynamicClient(podsGVR, svcsGVR)
+	mgr := NewInformerManager(dynClient, disc, eventCh, resyncCh, logger)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	mgr.Reconcile(ctx, []schema.GroupVersionResource{podsGVR, svcsGVR})
+
+	// After reconcile, both GVRs should have stoppers.
+	if len(mgr.stoppers) != 2 {
+		t.Errorf("expected 2 stoppers, got %d", len(mgr.stoppers))
+	}
+	if _, ok := mgr.stoppers[podsGVR]; !ok {
+		t.Error("expected stopper for pods")
+	}
+	if _, ok := mgr.stoppers[svcsGVR]; !ok {
+		t.Error("expected stopper for services")
+	}
+}
+
+func TestInformerManager_Reconcile_StopRemoved(t *testing.T) {
+	eventCh := make(chan ResourceEvent, 100)
+	resyncCh := make(chan ResyncEvent, 100)
+	logger := slog.Default()
+
+	podsGVR := schema.GroupVersionResource{Group: "", Version: "v1", Resource: "pods"}
+	svcsGVR := schema.GroupVersionResource{Group: "", Version: "v1", Resource: "services"}
+
+	disc := newFakeDiscovery([]*metav1.APIResourceList{
+		{
+			GroupVersion: "v1",
+			APIResources: []metav1.APIResource{
+				{Name: "pods", Verbs: metav1.Verbs{"get", "list", "watch"}},
+			},
+		},
+	})
+
+	mgr := NewInformerManager(nil, disc, eventCh, resyncCh, logger)
+
+	// Pre-populate stoppers to simulate previously-running informers.
+	stopped := false
+	mgr.stoppers[svcsGVR] = func() { stopped = true }
+	mgr.stoppers[podsGVR] = func() { t.Error("pods stopper should not have been called") }
+
+	// Desired only includes pods; services should be stopped.
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	mgr.Reconcile(ctx, []schema.GroupVersionResource{podsGVR})
+
+	if !stopped {
+		t.Error("expected services informer to be stopped")
+	}
+	if _, ok := mgr.stoppers[svcsGVR]; ok {
+		t.Error("services should have been removed from stoppers")
+	}
+	// Pods should still be there (it was already running and still desired).
+	if _, ok := mgr.stoppers[podsGVR]; !ok {
+		t.Error("pods stopper should still exist")
+	}
+}
+
+func TestInformerManager_Reconcile_UnsupportedFilteredOut(t *testing.T) {
+	eventCh := make(chan ResourceEvent, 100)
+	resyncCh := make(chan ResyncEvent, 100)
+	logger := slog.Default()
+
+	podsGVR := schema.GroupVersionResource{Group: "", Version: "v1", Resource: "pods"}
+	widgetsGVR := schema.GroupVersionResource{Group: "custom.example.com", Version: "v1", Resource: "widgets"}
+
+	// Only pods are supported on the cluster.
+	disc := newFakeDiscovery([]*metav1.APIResourceList{
+		{
+			GroupVersion: "v1",
+			APIResources: []metav1.APIResource{
+				{Name: "pods", Verbs: metav1.Verbs{"get", "list", "watch"}},
+			},
+		},
+	})
+
+	dynClient := newFakeDynamicClient(podsGVR)
+	mgr := NewInformerManager(dynClient, disc, eventCh, resyncCh, logger)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	mgr.Reconcile(ctx, []schema.GroupVersionResource{podsGVR, widgetsGVR})
+
+	// Only pods should have a stopper; widgets is not supported.
+	if len(mgr.stoppers) != 1 {
+		t.Errorf("expected 1 stopper, got %d", len(mgr.stoppers))
+	}
+	if _, ok := mgr.stoppers[podsGVR]; !ok {
+		t.Error("expected stopper for pods")
+	}
+	_ = widgetsGVR
+}
+
+func TestInformerManager_StopAll(t *testing.T) {
+	eventCh := make(chan ResourceEvent, 100)
+	resyncCh := make(chan ResyncEvent, 100)
+	logger := slog.Default()
+
+	disc := newFakeDiscovery(nil)
+	mgr := NewInformerManager(nil, disc, eventCh, resyncCh, logger)
+
+	called := 0
+	mgr.stoppers[schema.GroupVersionResource{Resource: "a"}] = func() { called++ }
+	mgr.stoppers[schema.GroupVersionResource{Resource: "b"}] = func() { called++ }
+
+	mgr.StopAll()
+
+	if called != 2 {
+		t.Errorf("expected 2 stoppers called, got %d", called)
+	}
+	if len(mgr.stoppers) != 0 {
+		t.Errorf("expected empty stoppers map, got %d entries", len(mgr.stoppers))
+	}
+}

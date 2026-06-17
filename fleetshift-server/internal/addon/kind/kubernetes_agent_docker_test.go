@@ -9,6 +9,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"testing"
 	"time"
@@ -26,6 +27,18 @@ import (
 	"github.com/fleetshift/fleetshift-poc/fleetshift-server/internal/infrastructure/oidc/oidctest"
 	"github.com/fleetshift/fleetshift-poc/fleetshift-server/internal/infrastructure/sqlite"
 )
+
+// mockInventoryWriter is a no-op inventory writer for delivery tests that
+// don't need indexing.
+type mockInventoryWriter struct{}
+
+func (mockInventoryWriter) ApplyDelta(_ context.Context, _ domain.TargetID, _ []domain.InventoryItem, _ []domain.InventoryItemID) error {
+	return nil
+}
+
+func (mockInventoryWriter) Resync(_ context.Context, _ domain.TargetID, _ domain.InventoryType, _ []domain.InventoryItem) error {
+	return nil
+}
 
 // kindClusterFixture is the shared state for a kind cluster created
 // once and reused across subtests.
@@ -160,7 +173,21 @@ func TestKubernetesAgent_RealCluster(t *testing.T) {
 
 	t.Run("TokenPassthrough", func(t *testing.T) {
 		reporter := newChannelReporter()
-		agent := kubeaddon.NewAgent(reporter)
+
+		// Create a test store for Manager
+		store := &sqlite.Store{DB: sqlite.OpenTestDB(t)}
+
+		// Create Manager with no-op vault (token is passed through, not resolved)
+		mgr := kubeaddon.NewManager(
+			store,
+			nil, // vault - not needed for token passthrough
+			mockInventoryWriter{},
+			reporter,
+			nil, // keyResolver - not needed
+			nil, // httpClient - not needed
+			slog.Default(),
+		)
+		defer mgr.StopAll()
 
 		manifests := []domain.Manifest{{
 			ResourceType: kubeaddon.ManifestResourceType,
@@ -171,7 +198,12 @@ func TestKubernetesAgent_RealCluster(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 
-		err := agent.Deliver(ctx, k8sTarget, "tp-1", manifests, auth, nil, 1)
+		// Register target so Manager can route to it
+		if err := mgr.HandleTargetReady(ctx, k8sTarget); err != nil {
+			t.Fatalf("HandleTargetReady: %v", err)
+		}
+
+		err := mgr.Deliver(ctx, k8sTarget, "tp-1", manifests, auth, nil, 1)
 		if err != nil {
 			t.Fatalf("Deliver: %v", err)
 		}
@@ -196,7 +228,19 @@ func TestKubernetesAgent_RealCluster(t *testing.T) {
 
 	t.Run("Idempotent", func(t *testing.T) {
 		reporter := newChannelReporter()
-		agent := kubeaddon.NewAgent(reporter)
+		store := &sqlite.Store{DB: sqlite.OpenTestDB(t)}
+
+		mgr := kubeaddon.NewManager(
+			store,
+			nil,
+			mockInventoryWriter{},
+			reporter,
+			nil,
+			nil,
+			slog.Default(),
+		)
+		defer mgr.StopAll()
+
 		auth := domain.DeliveryAuth{Token: domain.RawToken(saToken)}
 		manifest := json.RawMessage(`{"apiVersion":"v1","kind":"ConfigMap","metadata":{"name":"idempotent-test","namespace":"default"},"data":{"v":"1"}}`)
 		manifests := []domain.Manifest{{ResourceType: kubeaddon.ManifestResourceType, Raw: manifest}}
@@ -204,8 +248,12 @@ func TestKubernetesAgent_RealCluster(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 
+		if err := mgr.HandleTargetReady(ctx, k8sTarget); err != nil {
+			t.Fatalf("HandleTargetReady: %v", err)
+		}
+
 		for i := range 2 {
-			err := agent.Deliver(ctx, k8sTarget, domain.DeliveryID("idem-"+string(rune('0'+i))), manifests, auth, nil, 1)
+			err := mgr.Deliver(ctx, k8sTarget, domain.DeliveryID("idem-"+string(rune('0'+i))), manifests, auth, nil, 1)
 			if err != nil {
 				t.Fatalf("Deliver[%d]: %v", i, err)
 			}
@@ -222,7 +270,19 @@ func TestKubernetesAgent_RealCluster(t *testing.T) {
 
 	t.Run("MultipleManifests", func(t *testing.T) {
 		reporter := newChannelReporter()
-		agent := kubeaddon.NewAgent(reporter)
+		store := &sqlite.Store{DB: sqlite.OpenTestDB(t)}
+
+		mgr := kubeaddon.NewManager(
+			store,
+			nil,
+			mockInventoryWriter{},
+			reporter,
+			nil,
+			nil,
+			slog.Default(),
+		)
+		defer mgr.StopAll()
+
 		auth := domain.DeliveryAuth{Token: domain.RawToken(saToken)}
 
 		manifests := []domain.Manifest{
@@ -233,7 +293,11 @@ func TestKubernetesAgent_RealCluster(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 
-		err := agent.Deliver(ctx, k8sTarget, "multi-1", manifests, auth, nil, 1)
+		if err := mgr.HandleTargetReady(ctx, k8sTarget); err != nil {
+			t.Fatalf("HandleTargetReady: %v", err)
+		}
+
+		err := mgr.Deliver(ctx, k8sTarget, "multi-1", manifests, auth, nil, 1)
 		if err != nil {
 			t.Fatalf("Deliver: %v", err)
 		}
@@ -265,11 +329,18 @@ func TestKubernetesAgent_RealCluster(t *testing.T) {
 		att := buildTestAttestation(t, "attested-dep", manifests)
 
 		reporter := newChannelReporter()
-		agent := kubeaddon.NewAgent(reporter,
-			kubeaddon.WithKeyResolver(att.keyResolver),
-			kubeaddon.WithHTTPClient(att.httpClient),
-			kubeaddon.WithVault(vault),
+		store := &sqlite.Store{DB: sqlite.OpenTestDB(t)}
+
+		mgr := kubeaddon.NewManager(
+			store,
+			vault,
+			mockInventoryWriter{},
+			reporter,
+			att.keyResolver,
+			att.httpClient,
+			slog.Default(),
 		)
+		defer mgr.StopAll()
 
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
@@ -279,7 +350,11 @@ func TestKubernetesAgent_RealCluster(t *testing.T) {
 		targetWithTrustSnap.Properties["trust_bundle"] = att.trustBundleJSON
 		targetWithTrust := domain.TargetInfoFromSnapshot(targetWithTrustSnap)
 
-		err := agent.Deliver(ctx, targetWithTrust, "att-vault-1", manifests, domain.DeliveryAuth{}, att.attestation, 1)
+		if err := mgr.HandleTargetReady(ctx, targetWithTrust); err != nil {
+			t.Fatalf("HandleTargetReady: %v", err)
+		}
+
+		err := mgr.Deliver(ctx, targetWithTrust, "att-vault-1", manifests, domain.DeliveryAuth{}, att.attestation, 1)
 		if err != nil {
 			t.Fatalf("Deliver: %v", err)
 		}
@@ -304,13 +379,30 @@ func TestKubernetesAgent_RealCluster(t *testing.T) {
 
 	t.Run("AttestedDelivery_VerificationFailure", func(t *testing.T) {
 		reporter := newChannelReporter()
-		agent := kubeaddon.NewAgent(reporter)
+		store := &sqlite.Store{DB: sqlite.OpenTestDB(t)}
+
+		mgr := kubeaddon.NewManager(
+			store,
+			nil,
+			mockInventoryWriter{},
+			reporter,
+			nil,
+			nil,
+			slog.Default(),
+		)
+		defer mgr.StopAll()
 
 		trustBundle := `[{"issuer_url":"https://trusted.example.com","jwks_uri":"https://trusted.example.com/jwks","enrollment_audience":"enroll"}]`
 		targetWithTrustSnap := k8sTarget.Snapshot()
 		targetWithTrustSnap.Properties = copyProps(targetWithTrustSnap.Properties)
 		targetWithTrustSnap.Properties["trust_bundle"] = trustBundle
 		targetWithTrust := domain.TargetInfoFromSnapshot(targetWithTrustSnap)
+
+		ctx := context.Background()
+
+		if err := mgr.HandleTargetReady(ctx, targetWithTrust); err != nil {
+			t.Fatalf("HandleTargetReady: %v", err)
+		}
 
 		bogusAtt := &domain.Attestation{
 			Input: domain.SignedInput{
@@ -324,7 +416,7 @@ func TestKubernetesAgent_RealCluster(t *testing.T) {
 			},
 		}
 
-		err := agent.Deliver(context.Background(), targetWithTrust, "att-bad", nil, domain.DeliveryAuth{}, bogusAtt, 1)
+		err := mgr.Deliver(ctx, targetWithTrust, "att-bad", nil, domain.DeliveryAuth{}, bogusAtt, 1)
 		if err != nil {
 			t.Fatalf("Deliver should not return error: %v", err)
 		}

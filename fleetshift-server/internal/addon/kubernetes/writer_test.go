@@ -1,0 +1,247 @@
+package kubernetes
+
+import (
+	"context"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/fleetshift/fleetshift-poc/fleetshift-server/internal/domain"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+)
+
+type deltaCall struct {
+	targetID   domain.TargetID
+	upserts    []domain.InventoryItem
+	deletedIDs []domain.InventoryItemID
+}
+
+type resyncCall struct {
+	targetID      domain.TargetID
+	inventoryType domain.InventoryType
+	items         []domain.InventoryItem
+}
+
+type mockInventoryWriter struct {
+	mu      sync.Mutex
+	deltas  []deltaCall
+	resyncs []resyncCall
+}
+
+func (m *mockInventoryWriter) ApplyDelta(_ context.Context, targetID domain.TargetID, upserts []domain.InventoryItem, deletedIDs []domain.InventoryItemID) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.deltas = append(m.deltas, deltaCall{targetID: targetID, upserts: upserts, deletedIDs: deletedIDs})
+	return nil
+}
+
+func (m *mockInventoryWriter) Resync(_ context.Context, targetID domain.TargetID, inventoryType domain.InventoryType, items []domain.InventoryItem) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.resyncs = append(m.resyncs, resyncCall{targetID: targetID, inventoryType: inventoryType, items: items})
+	return nil
+}
+
+func (m *mockInventoryWriter) getDeltas() []deltaCall {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make([]deltaCall, len(m.deltas))
+	copy(out, m.deltas)
+	return out
+}
+
+func (m *mockInventoryWriter) getResyncs() []resyncCall {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make([]resyncCall, len(m.resyncs))
+	copy(out, m.resyncs)
+	return out
+}
+
+var testGVR = schema.GroupVersionResource{Group: "apps", Version: "v1", Resource: "deployments"}
+
+var testSchema = map[schema.GroupVersionResource]SchemaEntry{
+	testGVR: {
+		GVR:  testGVR,
+		Kind: "Deployment",
+	},
+}
+
+func makeResource(uid, name, rv string) *unstructured.Unstructured {
+	return &unstructured.Unstructured{
+		Object: map[string]any{
+			"apiVersion": "apps/v1",
+			"kind":       "Deployment",
+			"metadata": map[string]any{
+				"uid":               uid,
+				"name":              name,
+				"namespace":         "default",
+				"resourceVersion":   rv,
+				"creationTimestamp": "2025-06-01T12:00:00Z",
+			},
+		},
+	}
+}
+
+func TestBatching(t *testing.T) {
+	mock := &mockInventoryWriter{}
+	w := NewWriter("target-1", mock, testSchema, 100*time.Millisecond)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	go w.Run(ctx)
+
+	// Send 3 Add events within the batch window.
+	w.EventCh() <- ResourceEvent{Op: EventAdd, Resource: makeResource("uid-1", "deploy-1", "100"), GVR: testGVR}
+	w.EventCh() <- ResourceEvent{Op: EventAdd, Resource: makeResource("uid-2", "deploy-2", "101"), GVR: testGVR}
+	w.EventCh() <- ResourceEvent{Op: EventAdd, Resource: makeResource("uid-3", "deploy-3", "102"), GVR: testGVR}
+
+	// Wait for the batch to flush.
+	time.Sleep(250 * time.Millisecond)
+
+	deltas := mock.getDeltas()
+	if len(deltas) == 0 {
+		t.Fatal("expected at least one delta, got none")
+	}
+
+	// All 3 upserts should be in a single batch (the first delta).
+	first := deltas[0]
+	if got := len(first.upserts); got != 3 {
+		t.Fatalf("expected 3 upserts in first delta, got %d", got)
+	}
+
+	// Verify target ID.
+	if first.targetID != "target-1" {
+		t.Errorf("expected targetID=target-1, got %s", first.targetID)
+	}
+
+	// Verify item names are present.
+	names := make(map[string]bool)
+	for _, item := range first.upserts {
+		names[item.Name()] = true
+	}
+	for _, expected := range []string{"deploy-1", "deploy-2", "deploy-3"} {
+		if !names[expected] {
+			t.Errorf("expected item name %s in upserts", expected)
+		}
+	}
+}
+
+func TestDelete(t *testing.T) {
+	mock := &mockInventoryWriter{}
+	w := NewWriter("target-1", mock, testSchema, 100*time.Millisecond)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	go w.Run(ctx)
+
+	w.EventCh() <- ResourceEvent{Op: EventDelete, Resource: makeResource("uid-del", "deploy-del", "200"), GVR: testGVR}
+
+	time.Sleep(250 * time.Millisecond)
+
+	deltas := mock.getDeltas()
+	var found bool
+	for _, d := range deltas {
+		for _, id := range d.deletedIDs {
+			if id == "target-1/uid-del" {
+				found = true
+			}
+		}
+	}
+	if !found {
+		t.Fatal("expected target-1/uid-del in deletedIDs, not found")
+	}
+}
+
+func TestResync(t *testing.T) {
+	mock := &mockInventoryWriter{}
+	w := NewWriter("target-1", mock, testSchema, 10*time.Second)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	go w.Run(ctx)
+
+	w.ResyncCh() <- ResyncEvent{
+		GVR: testGVR,
+		Resources: []*unstructured.Unstructured{
+			makeResource("uid-r1", "deploy-r1", "300"),
+			makeResource("uid-r2", "deploy-r2", "301"),
+		},
+	}
+
+	time.Sleep(100 * time.Millisecond)
+
+	resyncs := mock.getResyncs()
+	if len(resyncs) == 0 {
+		t.Fatal("expected at least one resync, got none")
+	}
+
+	rs := resyncs[0]
+	if rs.inventoryType != "apps/v1/Deployment" {
+		t.Errorf("expected inventoryType=apps/v1/Deployment, got %s", rs.inventoryType)
+	}
+	if len(rs.items) != 2 {
+		t.Fatalf("expected 2 items in resync, got %d", len(rs.items))
+	}
+	if rs.targetID != "target-1" {
+		t.Errorf("expected targetID=target-1, got %s", rs.targetID)
+	}
+}
+
+func TestDedup(t *testing.T) {
+	mock := &mockInventoryWriter{}
+	w := NewWriter("target-1", mock, testSchema, 100*time.Millisecond)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	go w.Run(ctx)
+
+	// Send two Updates for the same UID with the same resourceVersion.
+	w.EventCh() <- ResourceEvent{Op: EventUpdate, Resource: makeResource("uid-dup", "deploy-dup", "500"), GVR: testGVR}
+	w.EventCh() <- ResourceEvent{Op: EventUpdate, Resource: makeResource("uid-dup", "deploy-dup", "500"), GVR: testGVR}
+
+	time.Sleep(250 * time.Millisecond)
+
+	deltas := mock.getDeltas()
+	var upsertCount int
+	for _, d := range deltas {
+		for _, item := range d.upserts {
+			if item.Name() == "deploy-dup" {
+				upsertCount++
+			}
+		}
+	}
+	if upsertCount != 1 {
+		t.Fatalf("expected 1 upsert for uid-dup (dedup), got %d", upsertCount)
+	}
+}
+
+func TestLateDeleteProtection(t *testing.T) {
+	mock := &mockInventoryWriter{}
+	w := NewWriter("target-1", mock, testSchema, 100*time.Millisecond)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	go w.Run(ctx)
+
+	// Delete then Add within the same batch window — the Add should be dropped.
+	w.EventCh() <- ResourceEvent{Op: EventDelete, Resource: makeResource("uid-late", "deploy-late", "600"), GVR: testGVR}
+	w.EventCh() <- ResourceEvent{Op: EventAdd, Resource: makeResource("uid-late", "deploy-late", "601"), GVR: testGVR}
+
+	time.Sleep(250 * time.Millisecond)
+
+	deltas := mock.getDeltas()
+	for _, d := range deltas {
+		for _, item := range d.upserts {
+			if item.Name() == "deploy-late" {
+				t.Fatal("expected uid-late to be dropped by late-delete protection, but found in upserts")
+			}
+		}
+	}
+}

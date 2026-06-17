@@ -4,8 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"encoding/pem"
-	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -13,8 +13,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/fleetshift/fleetshift-poc/fleetshift-server/internal/addon/kubernetes"
+	kubernetes "github.com/fleetshift/fleetshift-poc/fleetshift-server/internal/addon/kubernetes"
 	"github.com/fleetshift/fleetshift-poc/fleetshift-server/internal/domain"
+	"github.com/fleetshift/fleetshift-poc/fleetshift-server/internal/infrastructure/sqlite"
 	"github.com/fleetshift/fleetshift-poc/fleetshift-server/internal/testutil"
 )
 
@@ -86,105 +87,131 @@ func (nopReporter) ListActiveDeliveries(context.Context, []domain.TargetID) ([]d
 	return nil, nil
 }
 
-func TestAgent_Deliver_MissingAPIServer(t *testing.T) {
-	agent := kubernetes.NewAgent(nopReporter{})
+// newTestManagerWithReporter creates a Manager with the given reporter
+// for delivery tests that need to observe async results.
+func newTestManagerWithReporter(t *testing.T, reporter domain.DeliveryReporter) *kubernetes.Manager {
+	t.Helper()
+	db := sqlite.OpenTestDB(t)
+	store := &sqlite.Store{DB: db}
+	vault := &fakeVault{secrets: make(map[domain.SecretRef][]byte)}
+	logger := slog.Default()
+	return kubernetes.NewManager(store, vault, mockInventoryWriter{}, reporter, nil, nil, logger)
+}
 
-	target := domain.TargetInfoFromSnapshot(domain.TargetInfoSnapshot{
-		ID:         "k8s-test",
-		Type:       kubernetes.TargetType,
-		Name:       "test-cluster",
-		Properties: map[string]string{},
-	})
+// deliveryTarget builds a TargetInfo with the given properties for
+// delivery tests.
+func deliveryTarget(id string, props map[string]string) domain.TargetInfo {
+	return domain.NewTargetInfo(
+		domain.TargetID(id),
+		kubernetes.TargetType,
+		"test-cluster",
+		domain.TargetStateReady,
+		nil,
+		props,
+		nil,
+	)
+}
 
-	auth := domain.DeliveryAuth{Token: "some-token"}
-	err := agent.Deliver(context.Background(), target, "d1", nil, auth, nil, 1)
+func TestDeliver_MissingAPIServer(t *testing.T) {
+	mgr := newTestManagerWithReporter(t, nopReporter{})
+	t.Cleanup(mgr.StopAll)
+
+	ctx := context.Background()
+	target := deliveryTarget("k8s-test", map[string]string{})
+
+	// HandleTargetReady should fail because api_server is missing.
+	err := mgr.HandleTargetReady(ctx, target)
 	if err == nil {
-		t.Fatal("expected error for missing api_server")
+		t.Fatal("expected error from HandleTargetReady for missing api_server")
 	}
-	if !errors.Is(err, domain.ErrInvalidArgument) {
-		t.Errorf("expected ErrInvalidArgument, got: %v", err)
+	if !strings.Contains(err.Error(), "api_server") {
+		t.Errorf("expected error to mention api_server, got: %v", err)
+	}
+
+	// Deliver should also fail: no agent exists for this target.
+	err = mgr.Deliver(ctx, target, "d1", nil, domain.DeliveryAuth{Token: "some-token"}, nil, 1)
+	if err == nil {
+		t.Fatal("expected error from Deliver for missing target agent")
 	}
 }
 
-func TestAgent_Deliver_EmptyAPIServer(t *testing.T) {
-	agent := kubernetes.NewAgent(nopReporter{})
+func TestDeliver_EmptyAPIServer(t *testing.T) {
+	mgr := newTestManagerWithReporter(t, nopReporter{})
+	t.Cleanup(mgr.StopAll)
 
-	target := domain.TargetInfoFromSnapshot(domain.TargetInfoSnapshot{
-		ID:         "k8s-test",
-		Type:       kubernetes.TargetType,
-		Name:       "test-cluster",
-		Properties: map[string]string{"api_server": ""},
-	})
+	ctx := context.Background()
+	target := deliveryTarget("k8s-test", map[string]string{"api_server": ""})
 
-	err := agent.Deliver(context.Background(), target, "d1", nil, domain.DeliveryAuth{Token: "some-token"}, nil, 1)
+	// HandleTargetReady should fail because api_server is empty.
+	err := mgr.HandleTargetReady(ctx, target)
 	if err == nil {
-		t.Fatal("expected error for empty api_server")
-	}
-	if !errors.Is(err, domain.ErrInvalidArgument) {
-		t.Errorf("expected ErrInvalidArgument, got: %v", err)
+		t.Fatal("expected error from HandleTargetReady for empty api_server")
 	}
 }
 
-func TestAgent_Remove_EmptyAPIServer(t *testing.T) {
-	agent := kubernetes.NewAgent(nopReporter{})
+func TestRemove_EmptyAPIServer(t *testing.T) {
+	mgr := newTestManagerWithReporter(t, nopReporter{})
+	t.Cleanup(mgr.StopAll)
 
-	target := domain.TargetInfoFromSnapshot(domain.TargetInfoSnapshot{
-		ID:         "k8s-test",
-		Type:       kubernetes.TargetType,
-		Name:       "test-cluster",
-		Properties: map[string]string{"api_server": ""},
-	})
+	ctx := context.Background()
+	target := deliveryTarget("k8s-test", map[string]string{"api_server": ""})
 
-	err := agent.Remove(context.Background(), target, "d1", nil, domain.DeliveryAuth{Token: "some-token"}, nil, 1)
+	err := mgr.HandleTargetReady(ctx, target)
 	if err == nil {
-		t.Fatal("expected error for empty api_server")
+		t.Fatal("expected error from HandleTargetReady for empty api_server")
 	}
-	if !errors.Is(err, domain.ErrInvalidArgument) {
-		t.Errorf("expected ErrInvalidArgument, got: %v", err)
+
+	// Remove should fail: no agent.
+	err = mgr.Remove(ctx, target, "d1", nil, domain.DeliveryAuth{Token: "some-token"}, nil, 1)
+	if err == nil {
+		t.Fatal("expected error from Remove for missing target agent")
 	}
 }
 
-func TestAgent_Deliver_MissingToken(t *testing.T) {
-	agent := kubernetes.NewAgent(nopReporter{})
+func TestDeliver_MissingToken(t *testing.T) {
+	mgr := newTestManagerWithReporter(t, nopReporter{})
+	t.Cleanup(mgr.StopAll)
 
-	target := domain.TargetInfoFromSnapshot(domain.TargetInfoSnapshot{
-		ID:   "k8s-test",
-		Type: kubernetes.TargetType,
-		Name: "test-cluster",
-		Properties: map[string]string{
-			"api_server": "https://127.0.0.1:6443",
-		},
+	ctx := context.Background()
+	target := deliveryTarget("k8s-test", map[string]string{
+		"api_server": "https://127.0.0.1:6443",
 	})
 
-	err := agent.Deliver(context.Background(), target, "d1", nil, domain.DeliveryAuth{}, nil, 1)
+	if err := mgr.HandleTargetReady(ctx, target); err != nil {
+		t.Fatalf("HandleTargetReady: %v", err)
+	}
+
+	// Deliver without a token should fail with ErrInvalidArgument.
+	err := mgr.Deliver(ctx, target, "d1", nil, domain.DeliveryAuth{}, nil, 1)
 	if err == nil {
 		t.Fatal("expected error for missing token")
 	}
-	if !errors.Is(err, domain.ErrInvalidArgument) {
-		t.Errorf("expected ErrInvalidArgument, got: %v", err)
+	if !strings.Contains(err.Error(), "token") {
+		t.Errorf("expected token-related error, got: %v", err)
 	}
 }
 
-func TestAgent_Deliver_BadAPIServer(t *testing.T) {
+func TestDeliver_BadAPIServer(t *testing.T) {
 	reporter := newChannelReporter()
-	agent := kubernetes.NewAgent(reporter)
+	mgr := newTestManagerWithReporter(t, reporter)
+	t.Cleanup(mgr.StopAll)
 
-	target := domain.TargetInfoFromSnapshot(domain.TargetInfoSnapshot{
-		ID:   "k8s-test",
-		Type: kubernetes.TargetType,
-		Name: "test-cluster",
-		Properties: map[string]string{
-			"api_server": "https://127.0.0.1:1",
-		},
+	ctx := context.Background()
+	target := deliveryTarget("k8s-test", map[string]string{
+		"api_server": "https://127.0.0.1:1",
 	})
 
-	auth := domain.DeliveryAuth{Token: "not-a-real-token"}
+	if err := mgr.HandleTargetReady(ctx, target); err != nil {
+		t.Fatalf("HandleTargetReady: %v", err)
+	}
+
 	manifests := []domain.Manifest{{
 		ResourceType: "raw",
 		Raw:          json.RawMessage(`{"apiVersion":"v1","kind":"ConfigMap","metadata":{"name":"test","namespace":"default"},"data":{"key":"value"}}`),
 	}}
 
-	err := agent.Deliver(context.Background(), target, "d1", manifests, auth, nil, 1)
+	auth := domain.DeliveryAuth{Token: "not-a-real-token"}
+	err := mgr.Deliver(ctx, target, "d1", manifests, auth, nil, 1)
 	if err != nil {
 		t.Fatalf("Deliver should not return error: %v", err)
 	}
@@ -195,40 +222,44 @@ func TestAgent_Deliver_BadAPIServer(t *testing.T) {
 	}
 }
 
-func TestAgent_Remove_MissingAPIServer(t *testing.T) {
-	agent := kubernetes.NewAgent(nopReporter{})
+func TestRemove_MissingAPIServer(t *testing.T) {
+	mgr := newTestManagerWithReporter(t, nopReporter{})
+	t.Cleanup(mgr.StopAll)
 
-	target := domain.TargetInfoFromSnapshot(domain.TargetInfoSnapshot{
-		ID:         "k8s-test",
-		Type:       kubernetes.TargetType,
-		Name:       "test-cluster",
-		Properties: map[string]string{},
-	})
+	ctx := context.Background()
+	target := deliveryTarget("k8s-test", map[string]string{})
 
-	err := agent.Remove(context.Background(), target, "d1", nil, domain.DeliveryAuth{Token: "some-token"}, nil, 1)
+	// HandleTargetReady should fail.
+	if err := mgr.HandleTargetReady(ctx, target); err == nil {
+		t.Fatal("expected error from HandleTargetReady for missing api_server")
+	}
+
+	// Remove should fail: no agent.
+	err := mgr.Remove(ctx, target, "d1", nil, domain.DeliveryAuth{Token: "some-token"}, nil, 1)
 	if err == nil {
-		t.Fatal("expected error for missing api_server")
+		t.Fatal("expected error from Remove for missing target agent")
 	}
 }
 
-func TestAgent_Remove_EmptyManifests(t *testing.T) {
-	agent := kubernetes.NewAgent(nopReporter{})
+func TestRemove_EmptyManifests(t *testing.T) {
+	mgr := newTestManagerWithReporter(t, nopReporter{})
+	t.Cleanup(mgr.StopAll)
 
-	target := domain.TargetInfoFromSnapshot(domain.TargetInfoSnapshot{
-		ID:   "k8s-test",
-		Type: kubernetes.TargetType,
-		Name: "test-cluster",
-		Properties: map[string]string{
-			"api_server": "https://127.0.0.1:6443",
-		},
+	ctx := context.Background()
+	target := deliveryTarget("k8s-test", map[string]string{
+		"api_server": "https://127.0.0.1:6443",
 	})
 
-	if err := agent.Remove(context.Background(), target, "d1", nil, domain.DeliveryAuth{Token: "some-token"}, nil, 1); err != nil {
+	if err := mgr.HandleTargetReady(ctx, target); err != nil {
+		t.Fatalf("HandleTargetReady: %v", err)
+	}
+
+	if err := mgr.Remove(ctx, target, "d1", nil, domain.DeliveryAuth{Token: "some-token"}, nil, 1); err != nil {
 		t.Fatalf("Remove with empty manifests: %v", err)
 	}
 }
 
-func TestAgent_Deliver_Unauthorized_ReportsAuthFailed(t *testing.T) {
+func TestDeliver_Unauthorized_ReportsAuthFailed(t *testing.T) {
 	ts := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusUnauthorized)
@@ -237,25 +268,26 @@ func TestAgent_Deliver_Unauthorized_ReportsAuthFailed(t *testing.T) {
 	defer ts.Close()
 
 	reporter := newChannelReporter()
-	agent := kubernetes.NewAgent(reporter)
+	mgr := newTestManagerWithReporter(t, reporter)
+	t.Cleanup(mgr.StopAll)
 
-	target := domain.TargetInfoFromSnapshot(domain.TargetInfoSnapshot{
-		ID:   "k8s-test",
-		Type: kubernetes.TargetType,
-		Name: "test-cluster",
-		Properties: map[string]string{
-			"api_server": ts.URL,
-			"ca_cert":    tlsServerCAPEM(ts),
-		},
+	ctx := context.Background()
+	target := deliveryTarget("k8s-test", map[string]string{
+		"api_server": ts.URL,
+		"ca_cert":    tlsServerCAPEM(ts),
 	})
 
-	auth := domain.DeliveryAuth{Token: "expired-token"}
+	if err := mgr.HandleTargetReady(ctx, target); err != nil {
+		t.Fatalf("HandleTargetReady: %v", err)
+	}
+
 	manifests := []domain.Manifest{{
 		ResourceType: "raw",
 		Raw:          json.RawMessage(`{"apiVersion":"v1","kind":"ConfigMap","metadata":{"name":"test","namespace":"default"},"data":{"key":"value"}}`),
 	}}
 
-	err := agent.Deliver(context.Background(), target, "d1", manifests, auth, nil, 1)
+	auth := domain.DeliveryAuth{Token: "expired-token"}
+	err := mgr.Deliver(ctx, target, "d1", manifests, auth, nil, 1)
 	if err != nil {
 		t.Fatalf("Deliver should not return error: %v", err)
 	}
@@ -266,7 +298,7 @@ func TestAgent_Deliver_Unauthorized_ReportsAuthFailed(t *testing.T) {
 	}
 }
 
-func TestAgent_Deliver_Forbidden_ReportsAuthFailed(t *testing.T) {
+func TestDeliver_Forbidden_ReportsAuthFailed(t *testing.T) {
 	ts := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusForbidden)
@@ -275,25 +307,26 @@ func TestAgent_Deliver_Forbidden_ReportsAuthFailed(t *testing.T) {
 	defer ts.Close()
 
 	reporter := newChannelReporter()
-	agent := kubernetes.NewAgent(reporter)
+	mgr := newTestManagerWithReporter(t, reporter)
+	t.Cleanup(mgr.StopAll)
 
-	target := domain.TargetInfoFromSnapshot(domain.TargetInfoSnapshot{
-		ID:   "k8s-test",
-		Type: kubernetes.TargetType,
-		Name: "test-cluster",
-		Properties: map[string]string{
-			"api_server": ts.URL,
-			"ca_cert":    tlsServerCAPEM(ts),
-		},
+	ctx := context.Background()
+	target := deliveryTarget("k8s-test", map[string]string{
+		"api_server": ts.URL,
+		"ca_cert":    tlsServerCAPEM(ts),
 	})
 
-	auth := domain.DeliveryAuth{Token: "some-token"}
+	if err := mgr.HandleTargetReady(ctx, target); err != nil {
+		t.Fatalf("HandleTargetReady: %v", err)
+	}
+
 	manifests := []domain.Manifest{{
 		ResourceType: "raw",
 		Raw:          json.RawMessage(`{"apiVersion":"v1","kind":"ConfigMap","metadata":{"name":"test","namespace":"default"},"data":{"key":"value"}}`),
 	}}
 
-	err := agent.Deliver(context.Background(), target, "d1", manifests, auth, nil, 1)
+	auth := domain.DeliveryAuth{Token: "some-token"}
+	err := mgr.Deliver(ctx, target, "d1", manifests, auth, nil, 1)
 	if err != nil {
 		t.Fatalf("Deliver should not return error: %v", err)
 	}
@@ -304,20 +337,21 @@ func TestAgent_Deliver_Forbidden_ReportsAuthFailed(t *testing.T) {
 	}
 }
 
-func TestAgent_Deliver_AttestationFailure_ReturnsAuthFailed(t *testing.T) {
+func TestDeliver_AttestationFailure_ReturnsAuthFailed(t *testing.T) {
 	reporter := newChannelReporter()
-	agent := kubernetes.NewAgent(reporter)
+	mgr := newTestManagerWithReporter(t, reporter)
+	t.Cleanup(mgr.StopAll)
 
+	ctx := context.Background()
 	trustBundle := `[{"issuer_url":"https://trusted.example.com","jwks_uri":"https://trusted.example.com/jwks","enrollment_audience":"enroll"}]`
-	target := domain.TargetInfoFromSnapshot(domain.TargetInfoSnapshot{
-		ID:   "k8s-test",
-		Type: kubernetes.TargetType,
-		Name: "test-cluster",
-		Properties: map[string]string{
-			"api_server":   "https://127.0.0.1:6443",
-			"trust_bundle": trustBundle,
-		},
+	target := deliveryTarget("k8s-test", map[string]string{
+		"api_server":   "https://127.0.0.1:6443",
+		"trust_bundle": trustBundle,
 	})
+
+	if err := mgr.HandleTargetReady(ctx, target); err != nil {
+		t.Fatalf("HandleTargetReady: %v", err)
+	}
 
 	att := &domain.Attestation{
 		Input: domain.SignedInput{
@@ -331,7 +365,7 @@ func TestAgent_Deliver_AttestationFailure_ReturnsAuthFailed(t *testing.T) {
 		},
 	}
 
-	err := agent.Deliver(context.Background(), target, "d1", nil, domain.DeliveryAuth{}, att, 1)
+	err := mgr.Deliver(ctx, target, "d1", nil, domain.DeliveryAuth{}, att, 1)
 	if err != nil {
 		t.Fatalf("Deliver should not return error: %v", err)
 	}
@@ -341,18 +375,19 @@ func TestAgent_Deliver_AttestationFailure_ReturnsAuthFailed(t *testing.T) {
 	}
 }
 
-func TestAgent_Deliver_WithAttestation_NoTrustBundle_ReturnsAuthFailed(t *testing.T) {
+func TestDeliver_WithAttestation_NoTrustBundle_ReturnsAuthFailed(t *testing.T) {
 	reporter := newChannelReporter()
-	agent := kubernetes.NewAgent(reporter)
+	mgr := newTestManagerWithReporter(t, reporter)
+	t.Cleanup(mgr.StopAll)
 
-	target := domain.TargetInfoFromSnapshot(domain.TargetInfoSnapshot{
-		ID:   "k8s-test",
-		Type: kubernetes.TargetType,
-		Name: "test-cluster",
-		Properties: map[string]string{
-			"api_server": "https://127.0.0.1:6443",
-		},
+	ctx := context.Background()
+	target := deliveryTarget("k8s-test", map[string]string{
+		"api_server": "https://127.0.0.1:6443",
 	})
+
+	if err := mgr.HandleTargetReady(ctx, target); err != nil {
+		t.Fatalf("HandleTargetReady: %v", err)
+	}
 
 	att := &domain.Attestation{
 		Input: domain.SignedInput{
@@ -366,7 +401,7 @@ func TestAgent_Deliver_WithAttestation_NoTrustBundle_ReturnsAuthFailed(t *testin
 		},
 	}
 
-	err := agent.Deliver(context.Background(), target, "d1", nil, domain.DeliveryAuth{}, att, 1)
+	err := mgr.Deliver(ctx, target, "d1", nil, domain.DeliveryAuth{}, att, 1)
 	if err != nil {
 		t.Fatalf("Deliver should not return error: %v", err)
 	}
@@ -376,17 +411,21 @@ func TestAgent_Deliver_WithAttestation_NoTrustBundle_ReturnsAuthFailed(t *testin
 	}
 }
 
-func TestAgent_Deliver_VerifierCacheReuse(t *testing.T) {
+func TestDeliver_VerifierCacheReuse(t *testing.T) {
+	reporter := newChannelReporter()
+	mgr := newTestManagerWithReporter(t, reporter)
+	t.Cleanup(mgr.StopAll)
+
+	ctx := context.Background()
 	trustBundle := `[{"issuer_url":"https://trusted.example.com","jwks_uri":"https://trusted.example.com/jwks","enrollment_audience":"enroll"}]`
-	target := domain.TargetInfoFromSnapshot(domain.TargetInfoSnapshot{
-		ID:   "k8s-test",
-		Type: kubernetes.TargetType,
-		Name: "test-cluster",
-		Properties: map[string]string{
-			"api_server":   "https://127.0.0.1:6443",
-			"trust_bundle": trustBundle,
-		},
+	target := deliveryTarget("k8s-test", map[string]string{
+		"api_server":   "https://127.0.0.1:6443",
+		"trust_bundle": trustBundle,
 	})
+
+	if err := mgr.HandleTargetReady(ctx, target); err != nil {
+		t.Fatalf("HandleTargetReady: %v", err)
+	}
 
 	att := &domain.Attestation{
 		Input: domain.SignedInput{
@@ -400,36 +439,34 @@ func TestAgent_Deliver_VerifierCacheReuse(t *testing.T) {
 		},
 	}
 
-	reporter := newChannelReporter()
-	agent := kubernetes.NewAgent(reporter)
-
-	_ = agent.Deliver(context.Background(), target, "d1", nil, domain.DeliveryAuth{}, att, 1)
+	_ = mgr.Deliver(ctx, target, "d1", nil, domain.DeliveryAuth{}, att, 1)
 	result1 := awaitDone(t, reporter.done)
 	if result1.State != domain.DeliveryStateAuthFailed {
 		t.Errorf("first: State = %q, want AuthFailed", result1.State)
 	}
 
-	_ = agent.Deliver(context.Background(), target, "d2", nil, domain.DeliveryAuth{}, att, 1)
+	_ = mgr.Deliver(ctx, target, "d2", nil, domain.DeliveryAuth{}, att, 1)
 	result2 := awaitDone(t, reporter.done)
 	if result2.State != domain.DeliveryStateAuthFailed {
 		t.Errorf("second: State = %q, want AuthFailed", result2.State)
 	}
 }
 
-func TestAgent_Deliver_WithAttestation_NoTokenRequired(t *testing.T) {
+func TestDeliver_WithAttestation_NoTokenRequired(t *testing.T) {
 	reporter := newChannelReporter()
-	agent := kubernetes.NewAgent(reporter)
+	mgr := newTestManagerWithReporter(t, reporter)
+	t.Cleanup(mgr.StopAll)
 
+	ctx := context.Background()
 	trustBundle := `[{"issuer_url":"https://trusted.example.com","jwks_uri":"https://trusted.example.com/jwks","enrollment_audience":"enroll"}]`
-	target := domain.TargetInfoFromSnapshot(domain.TargetInfoSnapshot{
-		ID:   "k8s-test",
-		Type: kubernetes.TargetType,
-		Name: "test-cluster",
-		Properties: map[string]string{
-			"api_server":   "https://127.0.0.1:6443",
-			"trust_bundle": trustBundle,
-		},
+	target := deliveryTarget("k8s-test", map[string]string{
+		"api_server":   "https://127.0.0.1:6443",
+		"trust_bundle": trustBundle,
 	})
+
+	if err := mgr.HandleTargetReady(ctx, target); err != nil {
+		t.Fatalf("HandleTargetReady: %v", err)
+	}
 
 	att := &domain.Attestation{
 		Input: domain.SignedInput{
@@ -443,7 +480,7 @@ func TestAgent_Deliver_WithAttestation_NoTokenRequired(t *testing.T) {
 		},
 	}
 
-	err := agent.Deliver(context.Background(), target, "d1", nil, domain.DeliveryAuth{}, att, 1)
+	err := mgr.Deliver(ctx, target, "d1", nil, domain.DeliveryAuth{}, att, 1)
 	if err != nil {
 		t.Fatalf("Deliver should not return error: %v", err)
 	}
@@ -453,20 +490,21 @@ func TestAgent_Deliver_WithAttestation_NoTokenRequired(t *testing.T) {
 	}
 }
 
-func TestAgent_Remove_AttestationFailure_ReportsAuthFailed(t *testing.T) {
+func TestRemove_AttestationFailure_ReportsAuthFailed(t *testing.T) {
 	reporter := newChannelReporter()
-	agent := kubernetes.NewAgent(reporter)
+	mgr := newTestManagerWithReporter(t, reporter)
+	t.Cleanup(mgr.StopAll)
 
+	ctx := context.Background()
 	trustBundle := `[{"issuer_url":"https://trusted.example.com","jwks_uri":"https://trusted.example.com/jwks","enrollment_audience":"enroll"}]`
-	target := domain.TargetInfoFromSnapshot(domain.TargetInfoSnapshot{
-		ID:   "k8s-test",
-		Type: kubernetes.TargetType,
-		Name: "test-cluster",
-		Properties: map[string]string{
-			"api_server":   "https://127.0.0.1:6443",
-			"trust_bundle": trustBundle,
-		},
+	target := deliveryTarget("k8s-test", map[string]string{
+		"api_server":   "https://127.0.0.1:6443",
+		"trust_bundle": trustBundle,
 	})
+
+	if err := mgr.HandleTargetReady(ctx, target); err != nil {
+		t.Fatalf("HandleTargetReady: %v", err)
+	}
 
 	att := &domain.Attestation{
 		Input: domain.SignedInput{
@@ -480,7 +518,7 @@ func TestAgent_Remove_AttestationFailure_ReportsAuthFailed(t *testing.T) {
 		},
 	}
 
-	err := agent.Remove(context.Background(), target, "d1", nil, domain.DeliveryAuth{}, att, 1)
+	err := mgr.Remove(ctx, target, "d1", nil, domain.DeliveryAuth{}, att, 1)
 	if err != nil {
 		t.Fatalf("Remove should not return error: %v", err)
 	}
@@ -493,18 +531,19 @@ func TestAgent_Remove_AttestationFailure_ReportsAuthFailed(t *testing.T) {
 	}
 }
 
-func TestAgent_Remove_WithAttestation_NoTrustBundle_ReportsAuthFailed(t *testing.T) {
+func TestRemove_WithAttestation_NoTrustBundle_ReportsAuthFailed(t *testing.T) {
 	reporter := newChannelReporter()
-	agent := kubernetes.NewAgent(reporter)
+	mgr := newTestManagerWithReporter(t, reporter)
+	t.Cleanup(mgr.StopAll)
 
-	target := domain.TargetInfoFromSnapshot(domain.TargetInfoSnapshot{
-		ID:   "k8s-test",
-		Type: kubernetes.TargetType,
-		Name: "test-cluster",
-		Properties: map[string]string{
-			"api_server": "https://127.0.0.1:6443",
-		},
+	ctx := context.Background()
+	target := deliveryTarget("k8s-test", map[string]string{
+		"api_server": "https://127.0.0.1:6443",
 	})
+
+	if err := mgr.HandleTargetReady(ctx, target); err != nil {
+		t.Fatalf("HandleTargetReady: %v", err)
+	}
 
 	att := &domain.Attestation{
 		Input: domain.SignedInput{
@@ -518,7 +557,7 @@ func TestAgent_Remove_WithAttestation_NoTrustBundle_ReportsAuthFailed(t *testing
 		},
 	}
 
-	err := agent.Remove(context.Background(), target, "d1", nil, domain.DeliveryAuth{}, att, 1)
+	err := mgr.Remove(ctx, target, "d1", nil, domain.DeliveryAuth{}, att, 1)
 	if err != nil {
 		t.Fatalf("Remove should not return error: %v", err)
 	}

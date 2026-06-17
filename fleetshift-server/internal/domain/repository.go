@@ -45,6 +45,8 @@ type InventoryRepository interface {
 	ListByType(ctx context.Context, t InventoryType) ([]InventoryItem, error)
 	Update(ctx context.Context, item InventoryItem) error
 	Delete(ctx context.Context, id InventoryItemID) error
+	DeleteByTarget(ctx context.Context, targetID TargetID) error
+	ReplaceByTargetAndType(ctx context.Context, targetID TargetID, t InventoryType, items []InventoryItem) error
 }
 
 // DeliveryRepository persists deliveries for each fulfillment-target pair.
