@@ -258,7 +258,7 @@ The edge table is keyed by target ID, source UID, destination UID, and edge type
 
 `ApplyDelta` includes edge add and edge delete parameters alongside item upserts and deletes, all within a single transaction. `Resync` scopes edge replacement to the source UIDs of the items being resynced — it deletes edges for those sources, then inserts the new set. This avoids needing a type-mapping between inventory types and edge source kinds.
 
-The `InventoryRepository` provides the underlying operations: `UpsertEdges`, `DeleteEdges`, and `DeleteEdgesBySourceUIDs`. Target termination cleanup deletes all edges for the target alongside items via `DeleteByTarget`.
+The `InventoryRepository` provides the underlying operations: `AddEdges`, `DeleteEdges`, and `DeleteEdgesBySourceUIDs`. Target termination cleanup deletes all edges for the target alongside items via `DeleteByTarget`.
 
 ## Indexing pipeline
 
