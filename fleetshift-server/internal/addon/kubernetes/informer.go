@@ -195,7 +195,7 @@ func (i *GenericInformer) watch(ctx context.Context) {
 	}
 	defer watcher.Stop()
 
-	i.logger.Debug("watching", "group", i.gvr.Group, "resource", i.gvr.Resource)
+	i.logger.Info("watching", "group", i.gvr.Group, "resource", i.gvr.Resource)
 	i.retries = 0 // Reset retries on successful list + watch.
 
 	for {
@@ -260,11 +260,11 @@ func (i *GenericInformer) watch(ctx context.Context) {
 				delete(i.resourceIndex, string(obj.GetUID()))
 
 			case watch.Error:
-				i.logger.Debug("received ERROR event, ending watch", "event", event)
+				i.logger.Warn("received ERROR event, ending watch", "event", event)
 				return
 
 			default:
-				i.logger.Debug("received unexpected event type, ending watch", "type", event.Type)
+				i.logger.Warn("received unexpected event type, ending watch", "type", event.Type)
 				return
 			}
 		}
@@ -277,7 +277,7 @@ func (i *GenericInformer) WaitUntilInitialized(ctx context.Context, timeout time
 	start := time.Now()
 	for !i.initialized.Load() {
 		if time.Since(start) > timeout {
-			i.logger.Debug("timed out waiting for initialization", "timeout", timeout)
+			i.logger.Warn("timed out waiting for initialization", "timeout", timeout)
 			break
 		}
 		select {
@@ -328,7 +328,7 @@ func NewInformerManager(
 // New informers are started serially and each waits up to 10s for
 // initialization to avoid memory spikes.
 func (m *InformerManager) Reconcile(ctx context.Context, desired []schema.GroupVersionResource) {
-	m.logger.Debug("reconciling informers", "running", len(m.stoppers), "desired", len(desired))
+	m.logger.Info("reconciling informers", "running", len(m.stoppers), "desired", len(desired))
 
 	supported, err := SupportedResources(m.discovery)
 	if err != nil {
@@ -355,7 +355,7 @@ func (m *InformerManager) Reconcile(ctx context.Context, desired []schema.GroupV
 			delete(effective, gvr)
 		} else {
 			// No longer desired, stop.
-			m.logger.Debug("stopping informer", "gvr", gvr.String())
+			m.logger.Info("stopping informer", "gvr", gvr.String())
 			stopper()
 			delete(m.stoppers, gvr)
 		}
@@ -363,7 +363,7 @@ func (m *InformerManager) Reconcile(ctx context.Context, desired []schema.GroupV
 
 	// Start new informers for the remaining effective GVRs.
 	for gvr := range effective {
-		m.logger.Debug("starting informer", "gvr", gvr.String())
+		m.logger.Info("informer started", "gvr", gvr.String())
 		informer := NewInformer(m.client, gvr, m.eventCh, m.resyncCh, m.nsFilter, m.logger)
 		informerCtx, cancel := context.WithCancel(ctx)
 		m.stoppers[gvr] = cancel
@@ -372,13 +372,13 @@ func (m *InformerManager) Reconcile(ctx context.Context, desired []schema.GroupV
 		informer.WaitUntilInitialized(ctx, 10*time.Second)
 	}
 
-	m.logger.Debug("reconcile complete", "running", len(m.stoppers))
+	m.logger.Info("reconcile complete", "running", len(m.stoppers))
 }
 
 // StopAll cancels all running informers.
 func (m *InformerManager) StopAll() {
 	for gvr, stopper := range m.stoppers {
-		m.logger.Debug("stopping informer", "gvr", gvr.String())
+		m.logger.Info("stopping informer", "gvr", gvr.String())
 		stopper()
 		delete(m.stoppers, gvr)
 	}
