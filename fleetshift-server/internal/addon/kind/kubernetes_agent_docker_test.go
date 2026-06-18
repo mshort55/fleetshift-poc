@@ -40,6 +40,25 @@ func (mockInventoryWriter) Resync(_ context.Context, _ domain.TargetID, _ domain
 	return nil
 }
 
+// newTestManager creates a kubernetes Manager with no-op inventory,
+// nil vault, and the given reporter. Use this for delivery-only tests
+// that don't need vault-backed credential resolution or real indexing.
+func newTestManager(t *testing.T, reporter domain.DeliveryReporter) *kubeaddon.Manager {
+	t.Helper()
+	store := &sqlite.Store{DB: sqlite.OpenTestDB(t)}
+	mgr := kubeaddon.NewManager(
+		store,
+		nil,
+		mockInventoryWriter{},
+		reporter,
+		nil,
+		nil,
+		slog.Default(),
+	)
+	t.Cleanup(func() { mgr.StopAll() })
+	return mgr
+}
+
 // kindClusterFixture is the shared state for a kind cluster created
 // once and reused across subtests.
 type kindClusterFixture struct {
@@ -171,23 +190,22 @@ func TestKubernetesAgent_RealCluster(t *testing.T) {
 	}
 	saToken := string(saTokenBytes)
 
+	// Build a target variant with the SA token inlined (no vault ref).
+	// Tests that verify nil-vault behavior use this so HandleTargetReady
+	// can build a REST config without vault.
+	directProps := copyProps(pt.Properties)
+	directProps["service_account_token"] = saToken
+	delete(directProps, "service_account_token_ref")
+	k8sTargetWithToken := domain.TargetInfoFromSnapshot(domain.TargetInfoSnapshot{
+		ID:         pt.ID,
+		Type:       pt.Type,
+		Name:       pt.Name,
+		Properties: directProps,
+	})
+
 	t.Run("TokenPassthrough", func(t *testing.T) {
 		reporter := newChannelReporter()
-
-		// Create a test store for Manager
-		store := &sqlite.Store{DB: sqlite.OpenTestDB(t)}
-
-		// Create Manager with no-op vault (token is passed through, not resolved)
-		mgr := kubeaddon.NewManager(
-			store,
-			nil, // vault - not needed for token passthrough
-			mockInventoryWriter{},
-			reporter,
-			nil, // keyResolver - not needed
-			nil, // httpClient - not needed
-			slog.Default(),
-		)
-		defer mgr.StopAll()
+		mgr := newTestManager(t, reporter)
 
 		manifests := []domain.Manifest{{
 			ResourceType: kubeaddon.ManifestResourceType,
@@ -198,12 +216,11 @@ func TestKubernetesAgent_RealCluster(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 
-		// Register target so Manager can route to it
-		if err := mgr.HandleTargetReady(ctx, k8sTarget); err != nil {
+		if err := mgr.HandleTargetReady(ctx, k8sTargetWithToken); err != nil {
 			t.Fatalf("HandleTargetReady: %v", err)
 		}
 
-		err := mgr.Deliver(ctx, k8sTarget, "tp-1", manifests, auth, nil, 1)
+		err := mgr.Deliver(ctx, k8sTargetWithToken, "tp-1", manifests, auth, nil, 1)
 		if err != nil {
 			t.Fatalf("Deliver: %v", err)
 		}
@@ -228,18 +245,7 @@ func TestKubernetesAgent_RealCluster(t *testing.T) {
 
 	t.Run("Idempotent", func(t *testing.T) {
 		reporter := newChannelReporter()
-		store := &sqlite.Store{DB: sqlite.OpenTestDB(t)}
-
-		mgr := kubeaddon.NewManager(
-			store,
-			nil,
-			mockInventoryWriter{},
-			reporter,
-			nil,
-			nil,
-			slog.Default(),
-		)
-		defer mgr.StopAll()
+		mgr := newTestManager(t, reporter)
 
 		auth := domain.DeliveryAuth{Token: domain.RawToken(saToken)}
 		manifest := json.RawMessage(`{"apiVersion":"v1","kind":"ConfigMap","metadata":{"name":"idempotent-test","namespace":"default"},"data":{"v":"1"}}`)
@@ -248,12 +254,12 @@ func TestKubernetesAgent_RealCluster(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 
-		if err := mgr.HandleTargetReady(ctx, k8sTarget); err != nil {
+		if err := mgr.HandleTargetReady(ctx, k8sTargetWithToken); err != nil {
 			t.Fatalf("HandleTargetReady: %v", err)
 		}
 
 		for i := range 2 {
-			err := mgr.Deliver(ctx, k8sTarget, domain.DeliveryID("idem-"+string(rune('0'+i))), manifests, auth, nil, 1)
+			err := mgr.Deliver(ctx, k8sTargetWithToken, domain.DeliveryID("idem-"+string(rune('0'+i))), manifests, auth, nil, 1)
 			if err != nil {
 				t.Fatalf("Deliver[%d]: %v", i, err)
 			}
@@ -270,18 +276,7 @@ func TestKubernetesAgent_RealCluster(t *testing.T) {
 
 	t.Run("MultipleManifests", func(t *testing.T) {
 		reporter := newChannelReporter()
-		store := &sqlite.Store{DB: sqlite.OpenTestDB(t)}
-
-		mgr := kubeaddon.NewManager(
-			store,
-			nil,
-			mockInventoryWriter{},
-			reporter,
-			nil,
-			nil,
-			slog.Default(),
-		)
-		defer mgr.StopAll()
+		mgr := newTestManager(t, reporter)
 
 		auth := domain.DeliveryAuth{Token: domain.RawToken(saToken)}
 
@@ -293,11 +288,11 @@ func TestKubernetesAgent_RealCluster(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 
-		if err := mgr.HandleTargetReady(ctx, k8sTarget); err != nil {
+		if err := mgr.HandleTargetReady(ctx, k8sTargetWithToken); err != nil {
 			t.Fatalf("HandleTargetReady: %v", err)
 		}
 
-		err := mgr.Deliver(ctx, k8sTarget, "multi-1", manifests, auth, nil, 1)
+		err := mgr.Deliver(ctx, k8sTargetWithToken, "multi-1", manifests, auth, nil, 1)
 		if err != nil {
 			t.Fatalf("Deliver: %v", err)
 		}
@@ -331,6 +326,9 @@ func TestKubernetesAgent_RealCluster(t *testing.T) {
 		reporter := newChannelReporter()
 		store := &sqlite.Store{DB: sqlite.OpenTestDB(t)}
 
+		// Real vault + keyResolver + httpClient — unlike newTestManager,
+		// this test exercises vault-backed credential resolution and
+		// attestation verification.
 		mgr := kubeaddon.NewManager(
 			store,
 			vault,
@@ -379,21 +377,10 @@ func TestKubernetesAgent_RealCluster(t *testing.T) {
 
 	t.Run("AttestedDelivery_VerificationFailure", func(t *testing.T) {
 		reporter := newChannelReporter()
-		store := &sqlite.Store{DB: sqlite.OpenTestDB(t)}
-
-		mgr := kubeaddon.NewManager(
-			store,
-			nil,
-			mockInventoryWriter{},
-			reporter,
-			nil,
-			nil,
-			slog.Default(),
-		)
-		defer mgr.StopAll()
+		mgr := newTestManager(t, reporter)
 
 		trustBundle := `[{"issuer_url":"https://trusted.example.com","jwks_uri":"https://trusted.example.com/jwks","enrollment_audience":"enroll"}]`
-		targetWithTrustSnap := k8sTarget.Snapshot()
+		targetWithTrustSnap := k8sTargetWithToken.Snapshot()
 		targetWithTrustSnap.Properties = copyProps(targetWithTrustSnap.Properties)
 		targetWithTrustSnap.Properties["trust_bundle"] = trustBundle
 		targetWithTrust := domain.TargetInfoFromSnapshot(targetWithTrustSnap)
