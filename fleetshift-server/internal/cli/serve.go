@@ -312,6 +312,7 @@ func runServe(ctx context.Context, f *serveFlags) error {
 		CreateDeployment: createWf,
 		EventSink:        setupHub,
 	}
+	// TODO: change in future to support multiple gcphcp targets
 	var gcphcpTargetID string
 	if enabledAddons["gcphcp"] {
 		gcphcpTargetID = addons.gcphcpCfg.Targets[0].ID

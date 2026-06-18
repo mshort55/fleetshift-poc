@@ -51,9 +51,9 @@ type InventoryRepository interface {
 
 // EdgeRepository persists and retrieves inventory edges.
 type EdgeRepository interface {
-	UpsertEdges(ctx context.Context, targetID TargetID, edges []InventoryEdge) error
-	DeleteEdges(ctx context.Context, targetID TargetID, edges []InventoryEdge) error
-	DeleteEdgesBySourceUIDs(ctx context.Context, targetID TargetID, sourceUIDs []string) error
+	CreateOrUpdate(ctx context.Context, targetID TargetID, edges []InventoryEdge) error
+	Delete(ctx context.Context, targetID TargetID, edges []InventoryEdge) error
+	DeleteBySourceUIDs(ctx context.Context, targetID TargetID, sourceUIDs []string) error
 	DeleteByTarget(ctx context.Context, targetID TargetID) error
 }
 

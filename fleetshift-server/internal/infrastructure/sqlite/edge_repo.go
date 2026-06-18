@@ -14,7 +14,7 @@ type EdgeRepo struct {
 	DB *sql.Tx
 }
 
-func (r *EdgeRepo) UpsertEdges(ctx context.Context, targetID domain.TargetID, edges []domain.InventoryEdge) error {
+func (r *EdgeRepo) CreateOrUpdate(ctx context.Context, targetID domain.TargetID, edges []domain.InventoryEdge) error {
 	for _, e := range edges {
 		_, err := r.DB.ExecContext(ctx,
 			`INSERT OR REPLACE INTO inventory_edges (target_id, source_uid, dest_uid, edge_type, source_kind, dest_kind)
@@ -27,7 +27,7 @@ func (r *EdgeRepo) UpsertEdges(ctx context.Context, targetID domain.TargetID, ed
 	return nil
 }
 
-func (r *EdgeRepo) DeleteEdges(ctx context.Context, targetID domain.TargetID, edges []domain.InventoryEdge) error {
+func (r *EdgeRepo) Delete(ctx context.Context, targetID domain.TargetID, edges []domain.InventoryEdge) error {
 	for _, e := range edges {
 		_, err := r.DB.ExecContext(ctx,
 			`DELETE FROM inventory_edges WHERE target_id = ? AND source_uid = ? AND dest_uid = ? AND edge_type = ?`,
@@ -39,7 +39,7 @@ func (r *EdgeRepo) DeleteEdges(ctx context.Context, targetID domain.TargetID, ed
 	return nil
 }
 
-func (r *EdgeRepo) DeleteEdgesBySourceUIDs(ctx context.Context, targetID domain.TargetID, sourceUIDs []string) error {
+func (r *EdgeRepo) DeleteBySourceUIDs(ctx context.Context, targetID domain.TargetID, sourceUIDs []string) error {
 	if len(sourceUIDs) == 0 {
 		return nil
 	}

@@ -45,13 +45,13 @@ func (s *InventoryWriteService) ApplyDelta(ctx context.Context, targetID domain.
 	}
 
 	if len(edgeAdds) > 0 {
-		if err := edgeRepo.UpsertEdges(ctx, targetID, edgeAdds); err != nil {
+		if err := edgeRepo.CreateOrUpdate(ctx, targetID, edgeAdds); err != nil {
 			return fmt.Errorf("upsert edges: %w", err)
 		}
 	}
 
 	if len(edgeDels) > 0 {
-		if err := edgeRepo.DeleteEdges(ctx, targetID, edgeDels); err != nil {
+		if err := edgeRepo.Delete(ctx, targetID, edgeDels); err != nil {
 			return fmt.Errorf("delete edges: %w", err)
 		}
 	}
@@ -83,13 +83,13 @@ func (s *InventoryWriteService) Resync(ctx context.Context, targetID domain.Targ
 				sourceUIDs = append(sourceUIDs, parts[1])
 			}
 		}
-		if err := edgeRepo.DeleteEdgesBySourceUIDs(ctx, targetID, sourceUIDs); err != nil {
+		if err := edgeRepo.DeleteBySourceUIDs(ctx, targetID, sourceUIDs); err != nil {
 			return fmt.Errorf("delete edges for resync: %w", err)
 		}
 	}
 
 	if len(edges) > 0 {
-		if err := edgeRepo.UpsertEdges(ctx, targetID, edges); err != nil {
+		if err := edgeRepo.CreateOrUpdate(ctx, targetID, edges); err != nil {
 			return fmt.Errorf("upsert edges for resync: %w", err)
 		}
 	}
