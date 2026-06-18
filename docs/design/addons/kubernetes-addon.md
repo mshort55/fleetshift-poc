@@ -437,6 +437,12 @@ The two-tier model and allow/deny configuration address the core extensibility g
 
 Edges are persisted in a dedicated table alongside inventory items, but the platform's search API does not yet expose edge-aware queries. How edges are queried — traversal API, filter joins, or topology endpoints — is platform-level design work outside this addon doc. The persistence model (separate table with destination index) is designed to support both outgoing and incoming edge lookups efficiently.
 
+### Resync write amplification on watch reconnection
+
+The informer sends a full Resync after every LIST — both on initial startup and on every watch reconnection. Watch reconnections are routine (API server timeouts, network blips, 410 Gone errors). Each Resync deletes and re-inserts all items and edges for the affected GVR, even when nothing on the cluster has changed. The informer also sends individual Add and Delete events from the same LIST, which would produce a correct ApplyDelta diff on their own — the Resync is a redundant safety net.
+
+For a single target with SQLite this is negligible. At scale with Postgres and frequent watch reconnections across many targets, the write amplification could matter. The mitigation is for the Writer to distinguish first-sync Resyncs (which must hit the database) from watch-reconnection Resyncs (which can be skipped, letting the individual events flow through ApplyDelta as normal diffs). The Resync path would only hit the database on initial startup and after repeated ApplyDelta failures.
+
 ### Informer startup serialization at scale
 
 The current serialized startup (one informer at a time, with initialization timeout) works for a bounded set of GVRs. With watch-all mode on a large cluster (200-400+ GVRs), serialized startup could take significant time. A bounded-parallelism approach (e.g., start N informers concurrently) may be needed, balanced against memory spike risk during initial LIST phases.
