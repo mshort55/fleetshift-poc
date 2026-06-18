@@ -1,6 +1,8 @@
 package domain
 
-import "context"
+import (
+	"context"
+)
 
 // TargetRepository persists and retrieves target metadata.
 type TargetRepository interface {
@@ -82,4 +84,20 @@ type ManagedResourceRepository interface {
 	GetView(ctx context.Context, rt ResourceType, name ResourceName) (ManagedResourceView, error)
 	ListViewsByType(ctx context.Context, rt ResourceType) ([]ManagedResourceView, error)
 	DeleteInstance(ctx context.Context, rt ResourceType, name ResourceName) error
+}
+
+// ResourceIdentityRepository persists and retrieves canonical platform
+// resource identities. The [PlatformResource] aggregate owns its child
+// entities (representations, aliases, relationships); the repository
+// reconciles the full aggregate state on Create/Update.
+type ResourceIdentityRepository interface {
+	Create(ctx context.Context, r *PlatformResource) error
+	Get(ctx context.Context, uid PlatformResourceUID) (*PlatformResource, error)
+	GetByName(ctx context.Context, name RelativeResourceName) (*PlatformResource, error)
+	Update(ctx context.Context, r *PlatformResource) error
+	ListByCollection(ctx context.Context, collection CollectionID) ([]*PlatformResource, error)
+
+	// Cross-resource lookups (can't live on the aggregate).
+	ResolveAlias(ctx context.Context, alias Alias) (PlatformResourceUID, error)
+	GetRepresentation(ctx context.Context, name FullResourceName) (ResourceRepresentation, error)
 }
