@@ -53,7 +53,7 @@ func TestMain(m *testing.M) {
 	_ = provider.Delete(clusterName, "")
 
 	// Create cluster via the kind addon's delivery pipeline.
-	reporter := &channelReporter{done: make(chan domain.DeliveryResult, 1)}
+	reporter := newChannelReporter()
 	kindAgent := kindaddon.NewAgent(reporter, func(logger kindlog.Logger) kindaddon.ClusterProvider {
 		return cluster.NewProvider(cluster.ProviderWithLogger(logger))
 	})
@@ -137,24 +137,6 @@ func TestMain(m *testing.M) {
 	code := m.Run()
 	_ = provider.Delete(clusterName, "")
 	os.Exit(code)
-}
-
-// channelReporter implements [domain.DeliveryReporter] for TestMain.
-type channelReporter struct {
-	done chan domain.DeliveryResult
-}
-
-func (r *channelReporter) ReportEvent(_ context.Context, _ domain.DeliveryID, _ domain.Generation, _ domain.DeliveryEvent) error {
-	return nil
-}
-
-func (r *channelReporter) ReportResult(_ context.Context, _ domain.DeliveryID, _ domain.Generation, result domain.DeliveryResult) error {
-	r.done <- result
-	return nil
-}
-
-func (r *channelReporter) ListActiveDeliveries(_ context.Context, _ []domain.TargetID) ([]domain.ActiveDelivery, error) {
-	return nil, nil
 }
 
 type e2eFixture struct {
