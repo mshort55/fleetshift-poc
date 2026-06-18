@@ -193,7 +193,6 @@ func extractConditions(r *unstructured.Unstructured) []domain.InventoryCondition
 	return out
 }
 
-
 // extractSingleField evaluates one field extraction against the resource.
 func extractSingleField(r *unstructured.Unstructured, f FieldExtraction) any {
 	// Normalize JSONPath: accept both ".spec.field" and "{.spec.field}".

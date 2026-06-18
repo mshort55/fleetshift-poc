@@ -790,9 +790,9 @@ func TestExtractAnnotations_WithSizeCap(t *testing.T) {
 				"name":              "ann-pod",
 				"creationTimestamp": "2025-01-01T00:00:00Z",
 				"annotations": map[string]any{
-					"short":                                               "ok",
-					"kubectl.kubernetes.io/last-applied-configuration":    `{"apiVersion":"v1","kind":"Pod","metadata":{"name":"ann-pod"}}`,
-					"long":                                                 "this is a very long annotation that exceeds the size cap and should be filtered out",
+					"short": "ok",
+					"kubectl.kubernetes.io/last-applied-configuration": `{"apiVersion":"v1","kind":"Pod","metadata":{"name":"ann-pod"}}`,
+					"long": "this is a very long annotation that exceeds the size cap and should be filtered out",
 				},
 			},
 		},

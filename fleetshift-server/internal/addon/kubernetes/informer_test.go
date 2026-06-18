@@ -327,11 +327,11 @@ func TestInformerManager_StopAll(t *testing.T) {
 
 func TestFilterSupportedResources_DefaultDenyApplied(t *testing.T) {
 	supported := map[schema.GroupVersionResource]struct{}{
-		{Group: "", Version: "v1", Resource: "pods"}:                         {},
-		{Group: "", Version: "v1", Resource: "events"}:                       {},
-		{Group: "apps", Version: "v1", Resource: "deployments"}:              {},
-		{Group: "coordination.k8s.io", Version: "v1", Resource: "leases"}:    {},
-		{Group: "events.k8s.io", Version: "v1", Resource: "events"}:          {},
+		{Group: "", Version: "v1", Resource: "pods"}:                           {},
+		{Group: "", Version: "v1", Resource: "events"}:                         {},
+		{Group: "apps", Version: "v1", Resource: "deployments"}:                {},
+		{Group: "coordination.k8s.io", Version: "v1", Resource: "leases"}:      {},
+		{Group: "events.k8s.io", Version: "v1", Resource: "events"}:            {},
 		{Group: "discovery.k8s.io", Version: "v1", Resource: "endpointslices"}: {},
 	}
 
@@ -363,9 +363,9 @@ func TestFilterSupportedResources_DefaultDenyApplied(t *testing.T) {
 
 func TestFilterSupportedResources_UserDenyMergedWithDefault(t *testing.T) {
 	supported := map[schema.GroupVersionResource]struct{}{
-		{Group: "", Version: "v1", Resource: "pods"}:               {},
-		{Group: "", Version: "v1", Resource: "secrets"}:            {},
-		{Group: "apps", Version: "v1", Resource: "deployments"}:    {},
+		{Group: "", Version: "v1", Resource: "pods"}:            {},
+		{Group: "", Version: "v1", Resource: "secrets"}:         {},
+		{Group: "apps", Version: "v1", Resource: "deployments"}: {},
 	}
 
 	// User denies secrets in addition to default deny list.
@@ -388,9 +388,9 @@ func TestFilterSupportedResources_UserDenyMergedWithDefault(t *testing.T) {
 
 func TestFilterSupportedResources_AllowListRestricts(t *testing.T) {
 	supported := map[schema.GroupVersionResource]struct{}{
-		{Group: "", Version: "v1", Resource: "pods"}:               {},
-		{Group: "", Version: "v1", Resource: "configmaps"}:         {},
-		{Group: "apps", Version: "v1", Resource: "deployments"}:    {},
+		{Group: "", Version: "v1", Resource: "pods"}:            {},
+		{Group: "", Version: "v1", Resource: "configmaps"}:      {},
+		{Group: "apps", Version: "v1", Resource: "deployments"}: {},
 	}
 
 	// Only allow pods.
