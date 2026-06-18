@@ -70,3 +70,39 @@ func (r *EdgeRepo) DeleteByTarget(ctx context.Context, targetID domain.TargetID)
 	}
 	return nil
 }
+
+func (r *EdgeRepo) ListBySourceUID(ctx context.Context, targetID domain.TargetID, sourceUID string) ([]domain.InventoryEdge, error) {
+	rows, err := r.DB.QueryContext(ctx,
+		`SELECT edge_type, source_uid, dest_uid, source_kind, dest_kind
+		 FROM inventory_edges WHERE target_id = $1 AND source_uid = $2`,
+		string(targetID), sourceUID)
+	if err != nil {
+		return nil, fmt.Errorf("list edges by source UID: %w", err)
+	}
+	defer rows.Close()
+	return scanEdges(rows)
+}
+
+func (r *EdgeRepo) ListByDestUID(ctx context.Context, targetID domain.TargetID, destUID string) ([]domain.InventoryEdge, error) {
+	rows, err := r.DB.QueryContext(ctx,
+		`SELECT edge_type, source_uid, dest_uid, source_kind, dest_kind
+		 FROM inventory_edges WHERE target_id = $1 AND dest_uid = $2`,
+		string(targetID), destUID)
+	if err != nil {
+		return nil, fmt.Errorf("list edges by dest UID: %w", err)
+	}
+	defer rows.Close()
+	return scanEdges(rows)
+}
+
+func scanEdges(rows *sql.Rows) ([]domain.InventoryEdge, error) {
+	var edges []domain.InventoryEdge
+	for rows.Next() {
+		var e domain.InventoryEdge
+		if err := rows.Scan(&e.EdgeType, &e.SourceUID, &e.DestUID, &e.SourceKind, &e.DestKind); err != nil {
+			return nil, fmt.Errorf("scan edge: %w", err)
+		}
+		edges = append(edges, e)
+	}
+	return edges, rows.Err()
+}

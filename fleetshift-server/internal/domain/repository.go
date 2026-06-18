@@ -55,6 +55,8 @@ type EdgeRepository interface {
 	Delete(ctx context.Context, targetID TargetID, edges []InventoryEdge) error
 	DeleteBySourceUIDs(ctx context.Context, targetID TargetID, sourceUIDs []string) error
 	DeleteByTarget(ctx context.Context, targetID TargetID) error
+	ListBySourceUID(ctx context.Context, targetID TargetID, sourceUID string) ([]InventoryEdge, error)
+	ListByDestUID(ctx context.Context, targetID TargetID, destUID string) ([]InventoryEdge, error)
 }
 
 // DeliveryRepository persists deliveries for each fulfillment-target pair.
