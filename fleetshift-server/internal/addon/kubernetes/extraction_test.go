@@ -51,7 +51,7 @@ func TestExtractIdentityFields(t *testing.T) {
 		Kind: "Deployment",
 	}
 
-	item := ExtractObservedResource(r, entry, "target-1")
+	item, _ := ExtractObservedResource(r, entry, "target-1")
 
 	if item.ID() != "target-1/abc-123" {
 		t.Errorf("ID = %q, want %q", item.ID(), "target-1/abc-123")
@@ -82,7 +82,7 @@ func TestExtractIdentityFields_CoreAPIGroup(t *testing.T) {
 	}
 
 	entry := SchemaEntry{Kind: "Pod"}
-	item := ExtractObservedResource(r, entry, "target-1")
+	item, _ := ExtractObservedResource(r, entry, "target-1")
 
 	if item.Type() != "v1/Pod" {
 		t.Errorf("Type = %q, want %q for core API", item.Type(), "v1/Pod")
@@ -119,7 +119,7 @@ func TestExtractConditions_Enabled(t *testing.T) {
 	}
 
 	entry := SchemaEntry{Kind: "Deployment", ExtractConditions: true}
-	item := ExtractObservedResource(r, entry, "target-1")
+	item, _ := ExtractObservedResource(r, entry, "target-1")
 
 	conds := item.Conditions()
 	if len(conds) != 2 {
@@ -179,7 +179,7 @@ func TestExtractConditions_Disabled(t *testing.T) {
 	}
 
 	entry := SchemaEntry{Kind: "Deployment", ExtractConditions: false}
-	item := ExtractObservedResource(r, entry, "target-1")
+	item, _ := ExtractObservedResource(r, entry, "target-1")
 
 	if len(item.Conditions()) != 0 {
 		t.Errorf("Conditions should be empty when ExtractConditions=false, got %d", len(item.Conditions()))
@@ -214,7 +214,7 @@ func TestExtractObservedFields_NumberType(t *testing.T) {
 		},
 	}
 
-	item := ExtractObservedResource(r, entry, "target-1")
+	item, _ := ExtractObservedResource(r, entry, "target-1")
 
 	observed := item.Observed()
 	if observed == nil {
@@ -268,7 +268,7 @@ func TestExtractObservedFields_BytesType(t *testing.T) {
 		},
 	}
 
-	item := ExtractObservedResource(r, entry, "target-1")
+	item, _ := ExtractObservedResource(r, entry, "target-1")
 
 	observed := item.Observed()
 	if observed == nil {
@@ -314,7 +314,7 @@ func TestExtractObservedFields_StringType(t *testing.T) {
 		},
 	}
 
-	item := ExtractObservedResource(r, entry, "target-1")
+	item, _ := ExtractObservedResource(r, entry, "target-1")
 
 	observed := item.Observed()
 	if observed == nil {
@@ -361,7 +361,7 @@ func TestExtractObservedFields_SliceType(t *testing.T) {
 		},
 	}
 
-	item := ExtractObservedResource(r, entry, "target-1")
+	item, _ := ExtractObservedResource(r, entry, "target-1")
 
 	observed := item.Observed()
 	if observed == nil {
@@ -415,7 +415,7 @@ func TestExtractObservedFields_BoolNativeNotString(t *testing.T) {
 		},
 	}
 
-	item := ExtractObservedResource(r, entry, "target-1")
+	item, _ := ExtractObservedResource(r, entry, "target-1")
 
 	observed := item.Observed()
 	if observed == nil {
@@ -460,7 +460,7 @@ func TestExtractObservedFields_JSONPathNormalization(t *testing.T) {
 		},
 	}
 
-	item := ExtractObservedResource(r, entry, "target-1")
+	item, _ := ExtractObservedResource(r, entry, "target-1")
 
 	observed := item.Observed()
 	if observed == nil {
@@ -506,7 +506,7 @@ func TestExtractObservedFields_MissingFieldIsSkipped(t *testing.T) {
 		},
 	}
 
-	item := ExtractObservedResource(r, entry, "target-1")
+	item, _ := ExtractObservedResource(r, entry, "target-1")
 
 	observed := item.Observed()
 	if observed == nil {
@@ -549,7 +549,7 @@ func TestExtractAnnotations_StripsInternalKeys(t *testing.T) {
 	}
 
 	entry := SchemaEntry{Kind: "Pod"}
-	item := ExtractObservedResource(r, entry, "target-1")
+	item, _ := ExtractObservedResource(r, entry, "target-1")
 
 	// The item should be created successfully
 	if item.Name() != "strip-pod" {
@@ -583,7 +583,7 @@ func TestExtractObservedFields_MapStringType(t *testing.T) {
 		},
 	}
 
-	item := ExtractObservedResource(r, entry, "target-1")
+	item, _ := ExtractObservedResource(r, entry, "target-1")
 
 	observed := item.Observed()
 	if observed == nil {
@@ -608,5 +608,431 @@ func TestExtractObservedFields_MapStringType(t *testing.T) {
 	}
 	if sv["region"].(string) != "us-east" {
 		t.Errorf("nodeSelector.region = %q, want %q", sv["region"], "us-east")
+	}
+}
+
+func TestExtractOwnerReferences_ControllerOwner(t *testing.T) {
+	r := &unstructured.Unstructured{
+		Object: map[string]any{
+			"apiVersion": "apps/v1",
+			"kind":       "ReplicaSet",
+			"metadata": map[string]any{
+				"uid":               "rs-uid",
+				"name":              "my-rs",
+				"namespace":         "default",
+				"creationTimestamp": "2025-01-01T00:00:00Z",
+				"ownerReferences": []any{
+					map[string]any{
+						"apiVersion": "apps/v1",
+						"kind":       "Deployment",
+						"name":       "my-deploy",
+						"uid":        "deploy-uid",
+						"controller": true,
+					},
+				},
+			},
+		},
+	}
+
+	entry := SchemaEntry{Kind: "ReplicaSet"}
+	_, node := ExtractObservedResource(r, entry, "target-1")
+
+	if node.OwnerUID != "deploy-uid" {
+		t.Errorf("OwnerUID = %q, want %q", node.OwnerUID, "deploy-uid")
+	}
+}
+
+func TestExtractOwnerReferences_MultipleOwnersSelectsController(t *testing.T) {
+	r := &unstructured.Unstructured{
+		Object: map[string]any{
+			"apiVersion": "v1",
+			"kind":       "Pod",
+			"metadata": map[string]any{
+				"uid":               "pod-uid",
+				"name":              "my-pod",
+				"creationTimestamp": "2025-01-01T00:00:00Z",
+				"ownerReferences": []any{
+					map[string]any{
+						"apiVersion": "v1",
+						"kind":       "ConfigMap",
+						"name":       "my-cm",
+						"uid":        "cm-uid",
+					},
+					map[string]any{
+						"apiVersion": "apps/v1",
+						"kind":       "ReplicaSet",
+						"name":       "my-rs",
+						"uid":        "rs-uid",
+						"controller": true,
+					},
+				},
+			},
+		},
+	}
+
+	entry := SchemaEntry{Kind: "Pod"}
+	_, node := ExtractObservedResource(r, entry, "target-1")
+
+	if node.OwnerUID != "rs-uid" {
+		t.Errorf("OwnerUID = %q, want %q (should select controller)", node.OwnerUID, "rs-uid")
+	}
+}
+
+func TestExtractOwnerReferences_NoController(t *testing.T) {
+	r := &unstructured.Unstructured{
+		Object: map[string]any{
+			"apiVersion": "v1",
+			"kind":       "Pod",
+			"metadata": map[string]any{
+				"uid":               "pod-uid",
+				"name":              "my-pod",
+				"creationTimestamp": "2025-01-01T00:00:00Z",
+				"ownerReferences": []any{
+					map[string]any{
+						"apiVersion": "v1",
+						"kind":       "ConfigMap",
+						"name":       "my-cm",
+						"uid":        "cm-uid",
+					},
+				},
+			},
+		},
+	}
+
+	entry := SchemaEntry{Kind: "Pod"}
+	_, node := ExtractObservedResource(r, entry, "target-1")
+
+	if node.OwnerUID != "" {
+		t.Errorf("OwnerUID = %q, want empty (no controller)", node.OwnerUID)
+	}
+}
+
+func TestExtractGeneration(t *testing.T) {
+	r := &unstructured.Unstructured{
+		Object: map[string]any{
+			"apiVersion": "apps/v1",
+			"kind":       "Deployment",
+			"metadata": map[string]any{
+				"uid":               "gen-uid",
+				"name":              "gen-deploy",
+				"creationTimestamp": "2025-01-01T00:00:00Z",
+				"generation":        int64(5),
+			},
+		},
+	}
+
+	entry := SchemaEntry{Kind: "Deployment"}
+	item, _ := ExtractObservedResource(r, entry, "target-1")
+
+	observed := item.Observed()
+	if observed == nil {
+		t.Fatal("Observed is nil")
+	}
+
+	var fields map[string]any
+	if err := json.Unmarshal(observed, &fields); err != nil {
+		t.Fatalf("failed to unmarshal Observed: %v", err)
+	}
+
+	gen, ok := fields["generation"]
+	if !ok {
+		t.Fatal("Observed missing 'generation'")
+	}
+	// JSON numbers are float64
+	if gen.(float64) != 5 {
+		t.Errorf("generation = %v, want 5", gen)
+	}
+}
+
+func TestExtractDeletionTimestamp(t *testing.T) {
+	r := &unstructured.Unstructured{
+		Object: map[string]any{
+			"apiVersion": "v1",
+			"kind":       "Pod",
+			"metadata": map[string]any{
+				"uid":               "del-uid",
+				"name":              "del-pod",
+				"creationTimestamp": "2025-01-01T00:00:00Z",
+				"deletionTimestamp": "2025-06-01T12:00:00Z",
+			},
+		},
+	}
+
+	entry := SchemaEntry{Kind: "Pod"}
+	item, _ := ExtractObservedResource(r, entry, "target-1")
+
+	observed := item.Observed()
+	if observed == nil {
+		t.Fatal("Observed is nil")
+	}
+
+	var fields map[string]any
+	if err := json.Unmarshal(observed, &fields); err != nil {
+		t.Fatalf("failed to unmarshal Observed: %v", err)
+	}
+
+	dt, ok := fields["deletionTimestamp"]
+	if !ok {
+		t.Fatal("Observed missing 'deletionTimestamp'")
+	}
+	if dt.(string) != "2025-06-01T12:00:00Z" {
+		t.Errorf("deletionTimestamp = %q, want %q", dt, "2025-06-01T12:00:00Z")
+	}
+}
+
+func TestExtractAnnotations_WithSizeCap(t *testing.T) {
+	r := &unstructured.Unstructured{
+		Object: map[string]any{
+			"apiVersion": "v1",
+			"kind":       "Pod",
+			"metadata": map[string]any{
+				"uid":               "ann-uid",
+				"name":              "ann-pod",
+				"creationTimestamp": "2025-01-01T00:00:00Z",
+				"annotations": map[string]any{
+					"short":                                               "ok",
+					"kubectl.kubernetes.io/last-applied-configuration":    `{"apiVersion":"v1","kind":"Pod","metadata":{"name":"ann-pod"}}`,
+					"long":                                                 "this is a very long annotation that exceeds the size cap and should be filtered out",
+				},
+			},
+		},
+	}
+
+	entry := SchemaEntry{
+		Kind:               "Pod",
+		ExtractAnnotations: true,
+		AnnotationSizeCap:  20,
+	}
+	item, _ := ExtractObservedResource(r, entry, "target-1")
+
+	observed := item.Observed()
+	if observed == nil {
+		t.Fatal("Observed is nil")
+	}
+
+	var fields map[string]any
+	if err := json.Unmarshal(observed, &fields); err != nil {
+		t.Fatalf("failed to unmarshal Observed: %v", err)
+	}
+
+	annotations, ok := fields["annotations"]
+	if !ok {
+		t.Fatal("Observed missing 'annotations'")
+	}
+
+	annMap, ok := annotations.(map[string]any)
+	if !ok {
+		t.Fatal("annotations is not a map")
+	}
+
+	if annMap["short"].(string) != "ok" {
+		t.Errorf("annotations[short] = %q, want %q", annMap["short"], "ok")
+	}
+
+	if _, exists := annMap["kubectl.kubernetes.io/last-applied-configuration"]; exists {
+		t.Error("kubectl.kubernetes.io/last-applied-configuration should be filtered out")
+	}
+
+	if _, exists := annMap["long"]; exists {
+		t.Error("long annotation should be filtered out due to size cap")
+	}
+}
+
+func TestExtractAnnotations_DefaultSizeCap(t *testing.T) {
+	r := &unstructured.Unstructured{
+		Object: map[string]any{
+			"apiVersion": "v1",
+			"kind":       "Pod",
+			"metadata": map[string]any{
+				"uid":               "ann-uid2",
+				"name":              "ann-pod2",
+				"creationTimestamp": "2025-01-01T00:00:00Z",
+				"annotations": map[string]any{
+					"short": "ok",
+					"long":  "this is a very long annotation that exceeds the default 64 character size cap and should be filtered out completely",
+				},
+			},
+		},
+	}
+
+	entry := SchemaEntry{
+		Kind:               "Pod",
+		ExtractAnnotations: true,
+		// AnnotationSizeCap not set, should default to 64
+	}
+	item, _ := ExtractObservedResource(r, entry, "target-1")
+
+	observed := item.Observed()
+	if observed == nil {
+		t.Fatal("Observed is nil")
+	}
+
+	var fields map[string]any
+	if err := json.Unmarshal(observed, &fields); err != nil {
+		t.Fatalf("failed to unmarshal Observed: %v", err)
+	}
+
+	annotations, ok := fields["annotations"]
+	if !ok {
+		t.Fatal("Observed missing 'annotations'")
+	}
+
+	annMap, ok := annotations.(map[string]any)
+	if !ok {
+		t.Fatal("annotations is not a map")
+	}
+
+	if annMap["short"].(string) != "ok" {
+		t.Errorf("annotations[short] = %q, want %q", annMap["short"], "ok")
+	}
+
+	if _, exists := annMap["long"]; exists {
+		t.Error("long annotation should be filtered out due to default 64-char size cap")
+	}
+}
+
+func TestExtractAnnotations_Disabled(t *testing.T) {
+	r := &unstructured.Unstructured{
+		Object: map[string]any{
+			"apiVersion": "v1",
+			"kind":       "Pod",
+			"metadata": map[string]any{
+				"uid":               "ann-uid3",
+				"name":              "ann-pod3",
+				"creationTimestamp": "2025-01-01T00:00:00Z",
+				"annotations": map[string]any{
+					"note": "hello",
+				},
+			},
+		},
+	}
+
+	entry := SchemaEntry{
+		Kind:               "Pod",
+		ExtractAnnotations: false,
+	}
+	item, _ := ExtractObservedResource(r, entry, "target-1")
+
+	observed := item.Observed()
+	// Should be nil because ExtractAnnotations is false and no other fields
+	if observed != nil {
+		var fields map[string]any
+		if err := json.Unmarshal(observed, &fields); err == nil {
+			if _, exists := fields["annotations"]; exists {
+				t.Error("annotations should not be extracted when ExtractAnnotations is false")
+			}
+		}
+	}
+}
+
+func TestComputeExtra_HookInvocation(t *testing.T) {
+	r := &unstructured.Unstructured{
+		Object: map[string]any{
+			"apiVersion": "v1",
+			"kind":       "Pod",
+			"metadata": map[string]any{
+				"uid":               "hook-uid",
+				"name":              "hook-pod",
+				"creationTimestamp": "2025-01-01T00:00:00Z",
+			},
+			"status": map[string]any{
+				"phase": "Running",
+			},
+		},
+	}
+
+	hookCalled := false
+	entry := SchemaEntry{
+		Kind: "Pod",
+		ComputeExtra: func(r *unstructured.Unstructured, fields map[string]any) {
+			hookCalled = true
+			// Add a computed field
+			fields["computedStatus"] = "computed-value"
+		},
+	}
+
+	item, _ := ExtractObservedResource(r, entry, "target-1")
+
+	if !hookCalled {
+		t.Error("ComputeExtra hook was not called")
+	}
+
+	observed := item.Observed()
+	if observed == nil {
+		t.Fatal("Observed is nil")
+	}
+
+	var fields map[string]any
+	if err := json.Unmarshal(observed, &fields); err != nil {
+		t.Fatalf("failed to unmarshal Observed: %v", err)
+	}
+
+	computed, ok := fields["computedStatus"]
+	if !ok {
+		t.Fatal("Observed missing 'computedStatus' field added by hook")
+	}
+	if computed.(string) != "computed-value" {
+		t.Errorf("computedStatus = %q, want %q", computed, "computed-value")
+	}
+}
+
+func TestInventoryNode_Fields(t *testing.T) {
+	r := &unstructured.Unstructured{
+		Object: map[string]any{
+			"apiVersion": "apps/v1",
+			"kind":       "Deployment",
+			"metadata": map[string]any{
+				"uid":               "node-uid",
+				"name":              "node-deploy",
+				"namespace":         "kube-system",
+				"creationTimestamp": "2025-01-01T00:00:00Z",
+				"generation":        int64(3),
+				"ownerReferences": []any{
+					map[string]any{
+						"apiVersion": "apps/v1",
+						"kind":       "DaemonSet",
+						"name":       "my-ds",
+						"uid":        "ds-uid",
+						"controller": true,
+					},
+				},
+			},
+			"spec": map[string]any{
+				"replicas": int64(5),
+			},
+		},
+	}
+
+	entry := SchemaEntry{
+		Kind: "Deployment",
+		Fields: []FieldExtraction{
+			{Name: "replicas", JSONPath: ".spec.replicas", DataType: DataTypeNumber},
+		},
+	}
+
+	_, node := ExtractObservedResource(r, entry, "target-1")
+
+	if node.UID != "node-uid" {
+		t.Errorf("node.UID = %q, want %q", node.UID, "node-uid")
+	}
+	if node.Kind != "Deployment" {
+		t.Errorf("node.Kind = %q, want %q", node.Kind, "Deployment")
+	}
+	if node.Name != "node-deploy" {
+		t.Errorf("node.Name = %q, want %q", node.Name, "node-deploy")
+	}
+	if node.Namespace != "kube-system" {
+		t.Errorf("node.Namespace = %q, want %q", node.Namespace, "kube-system")
+	}
+	if node.OwnerUID != "ds-uid" {
+		t.Errorf("node.OwnerUID = %q, want %q", node.OwnerUID, "ds-uid")
+	}
+
+	// Check properties map contains both extracted fields and metadata
+	if node.Properties["replicas"].(float64) != 5 {
+		t.Errorf("node.Properties[replicas] = %v, want 5", node.Properties["replicas"])
+	}
+	if node.Properties["generation"].(int64) != 3 {
+		t.Errorf("node.Properties[generation] = %v, want 3", node.Properties["generation"])
 	}
 }

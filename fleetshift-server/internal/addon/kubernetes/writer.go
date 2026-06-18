@@ -147,7 +147,8 @@ func (w *Writer) flush(
 
 		gvr := upsertGVR[uid]
 		entry := w.schema[gvr]
-		items = append(items, ExtractObservedResource(r, entry, w.targetID))
+		item, _ := ExtractObservedResource(r, entry, w.targetID)
+		items = append(items, item)
 		sentVersions[uid] = rv
 	}
 
@@ -172,7 +173,8 @@ func (w *Writer) sendResync(ctx context.Context, rs ResyncEvent) {
 
 	var items []domain.InventoryItem
 	for _, r := range rs.Resources {
-		items = append(items, ExtractObservedResource(r, entry, w.targetID))
+		item, _ := ExtractObservedResource(r, entry, w.targetID)
+		items = append(items, item)
 	}
 
 	// Compute inventoryType from the schema entry's GVR and Kind.

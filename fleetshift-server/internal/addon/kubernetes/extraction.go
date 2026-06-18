@@ -22,8 +22,8 @@ var strippedAnnotationKeys = map[string]bool{
 }
 
 // ExtractObservedResource converts an unstructured k8s resource and its schema
-// entry into a domain InventoryItem.
-func ExtractObservedResource(r *unstructured.Unstructured, entry SchemaEntry, targetID string) domain.InventoryItem {
+// entry into a domain InventoryItem and an inventoryNode.
+func ExtractObservedResource(r *unstructured.Unstructured, entry SchemaEntry, targetID string) (domain.InventoryItem, inventoryNode) {
 	uid := string(r.GetUID())
 
 	// Build inventory type from apiVersion and kind.
@@ -47,21 +47,115 @@ func ExtractObservedResource(r *unstructured.Unstructured, entry SchemaEntry, ta
 		conditions = extractConditions(r)
 	}
 
-	// Schema-defined observed fields.
-	var observed json.RawMessage
+	// Schema-defined observed fields plus base metadata fields.
+	fields := make(map[string]any)
+
+	// Extract schema-defined fields first
 	if len(entry.Fields) > 0 {
-		observed = extractFields(r, entry)
+		for _, f := range entry.Fields {
+			v := extractSingleField(r, f)
+			if v != nil {
+				fields[f.Name] = v
+			}
+		}
+	}
+
+	// ownerReferences — extract controlling owner's UID
+	ownerUID := ""
+	if ownerRefs, found, _ := unstructured.NestedSlice(r.Object, "metadata", "ownerReferences"); found {
+		for _, ref := range ownerRefs {
+			if m, ok := ref.(map[string]any); ok {
+				if ctrl, _ := m["controller"].(bool); ctrl {
+					if uid, ok := m["uid"].(string); ok {
+						ownerUID = uid
+					}
+				}
+			}
+		}
+	}
+
+	// generation
+	if gen, found, _ := unstructured.NestedInt64(r.Object, "metadata", "generation"); found {
+		fields["generation"] = gen
+	}
+
+	// deletionTimestamp
+	if dt, found, _ := unstructured.NestedString(r.Object, "metadata", "deletionTimestamp"); found && dt != "" {
+		fields["deletionTimestamp"] = dt
+	}
+
+	// annotations
+	if entry.ExtractAnnotations {
+		if annotations := extractAnnotations(r, entry.AnnotationSizeCap); annotations != nil {
+			fields["annotations"] = annotations
+		}
+	}
+
+	// ComputeExtra hook invocation
+	if entry.ComputeExtra != nil {
+		entry.ComputeExtra(r, fields)
+	}
+
+	// Marshal observed fields to JSON
+	var observed json.RawMessage
+	if len(fields) > 0 {
+		data, err := json.Marshal(fields)
+		if err == nil {
+			observed = data
+		}
 	}
 
 	id := domain.InventoryItemID(targetID + "/" + uid)
 
-	return domain.NewObservedInventoryItem(
+	item := domain.NewObservedInventoryItem(
 		id, invType, r.GetName(),
 		nil, // properties — not used by k8s extraction
 		labels,
 		domain.TargetID(targetID), observed,
 		conditions, time.Now(),
 	)
+
+	node := inventoryNode{
+		UID:        uid,
+		Kind:       r.GetKind(),
+		Name:       r.GetName(),
+		Namespace:  r.GetNamespace(),
+		OwnerUID:   ownerUID,
+		Properties: fields,
+	}
+
+	return item, node
+}
+
+// extractAnnotations copies annotations from the resource, excluding
+// kubectl.kubernetes.io/last-applied-configuration and any values
+// longer than sizeCap characters. Returns nil if no annotations remain.
+func extractAnnotations(r *unstructured.Unstructured, sizeCap int) map[string]string {
+	annotations := r.GetAnnotations()
+	if len(annotations) == 0 {
+		return nil
+	}
+
+	// Default size cap
+	if sizeCap <= 0 {
+		sizeCap = 64
+	}
+
+	// Remove large kubectl annotation
+	delete(annotations, "kubectl.kubernetes.io/last-applied-configuration")
+
+	// Remove annotations exceeding size cap
+	for key, val := range annotations {
+		if len(val) > sizeCap {
+			delete(annotations, key)
+		}
+	}
+
+	if len(annotations) == 0 {
+		return nil
+	}
+
+	return annotations
 }
 
 // extractConditions reads .status.conditions from the unstructured object and
@@ -94,28 +188,6 @@ func extractConditions(r *unstructured.Unstructured) []domain.InventoryCondition
 	return out
 }
 
-// extractFields evaluates JSONPath expressions from the schema entry against
-// the resource and builds a JSON object as json.RawMessage.
-func extractFields(r *unstructured.Unstructured, entry SchemaEntry) json.RawMessage {
-	fields := make(map[string]any)
-
-	for _, f := range entry.Fields {
-		v := extractSingleField(r, f)
-		if v != nil {
-			fields[f.Name] = v
-		}
-	}
-
-	if len(fields) == 0 {
-		return nil
-	}
-
-	data, err := json.Marshal(fields)
-	if err != nil {
-		return nil
-	}
-	return data
-}
 
 // extractSingleField evaluates one field extraction against the resource.
 func extractSingleField(r *unstructured.Unstructured, f FieldExtraction) any {
