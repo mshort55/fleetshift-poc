@@ -750,3 +750,279 @@ func TestE2E_PVCPVEdge(t *testing.T) {
 		t.Error("missing attachedTo edge: PVC→PV")
 	}
 }
+
+// TestE2E_UpdateReindex verifies that resource updates trigger re-indexing.
+func TestE2E_UpdateReindex(t *testing.T) {
+	f := setupE2E(t)
+	awaitBootstrap(t, f)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+
+	manifest := json.RawMessage(fmt.Sprintf(`{
+		"apiVersion": "apps/v1", "kind": "Deployment",
+		"metadata": {"name": "e2e-scale", "namespace": "%s"},
+		"spec": {
+			"replicas": 1,
+			"selector": {"matchLabels": {"app": "e2e-scale"}},
+			"template": {
+				"metadata": {"labels": {"app": "e2e-scale"}},
+				"spec": {"containers": [{"name": "nginx", "image": "nginx:alpine"}]}
+			}
+		}
+	}`, f.namespace))
+
+	_, err := f.harness.Deployments.Create(ctx, domain.CreateDeploymentInput{
+		ID: "scale-deploy",
+		ManifestStrategy: domain.ManifestStrategySpec{
+			Type:      domain.ManifestStrategyInline,
+			Manifests: []domain.Manifest{{ResourceType: kubeaddon.ManifestResourceType, Raw: manifest}},
+		},
+		PlacementStrategy: domain.PlacementStrategySpec{
+			Type:    domain.PlacementStrategyStatic,
+			Targets: []domain.TargetID{f.targetID},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create deployment: %v", err)
+	}
+
+	// Wait for 1 pod.
+	awaitInventoryMatch(t, f.harness.Store, func(items []domain.InventoryItem) bool {
+		count := 0
+		for _, item := range items {
+			if item.Type() == "v1/Pod" && strings.HasPrefix(item.Name(), "e2e-scale-") {
+				count++
+			}
+		}
+		return count >= 1
+	}, 90*time.Second)
+
+	// Scale to 2 via dynamic client.
+	deployGVR := schema.GroupVersionResource{Group: "apps", Version: "v1", Resource: "deployments"}
+	dep, err := f.dynClient.Resource(deployGVR).Namespace(f.namespace).Get(ctx, "e2e-scale", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("get deployment: %v", err)
+	}
+	_ = unstructured.SetNestedField(dep.Object, int64(2), "spec", "replicas")
+	_, err = f.dynClient.Resource(deployGVR).Namespace(f.namespace).Update(ctx, dep, metav1.UpdateOptions{})
+	if err != nil {
+		t.Fatalf("update deployment: %v", err)
+	}
+
+	// Wait for 2 pods.
+	items := awaitInventoryMatch(t, f.harness.Store, func(items []domain.InventoryItem) bool {
+		count := 0
+		for _, item := range items {
+			if item.Type() == "v1/Pod" && strings.HasPrefix(item.Name(), "e2e-scale-") {
+				count++
+			}
+		}
+		return count >= 2
+	}, 90*time.Second)
+
+	// Verify both pods have ownedBy edges.
+	for _, item := range items {
+		if item.Type() == "v1/Pod" && strings.HasPrefix(item.Name(), "e2e-scale-") {
+			uid := uidFromItemID(item.ID())
+			edges := queryEdgesFrom(t, f.harness.Store, f.targetID, uid)
+			hasOwner := false
+			for _, e := range edges {
+				if e.EdgeType == "ownedBy" {
+					hasOwner = true
+				}
+			}
+			if !hasOwner {
+				t.Errorf("pod %s missing ownedBy edge", item.Name())
+			}
+		}
+	}
+}
+
+// TestE2E_RemoveCleanup verifies that resource deletions are detected and cleaned up.
+func TestE2E_RemoveCleanup(t *testing.T) {
+	f := setupE2E(t)
+	awaitBootstrap(t, f)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+
+	manifest := json.RawMessage(fmt.Sprintf(`{
+		"apiVersion": "apps/v1", "kind": "Deployment",
+		"metadata": {"name": "e2e-remove", "namespace": "%s"},
+		"spec": {
+			"replicas": 1,
+			"selector": {"matchLabels": {"app": "e2e-remove"}},
+			"template": {
+				"metadata": {"labels": {"app": "e2e-remove"}},
+				"spec": {"containers": [{"name": "nginx", "image": "nginx:alpine"}]}
+			}
+		}
+	}`, f.namespace))
+
+	_, err := f.harness.Deployments.Create(ctx, domain.CreateDeploymentInput{
+		ID: "remove-deploy",
+		ManifestStrategy: domain.ManifestStrategySpec{
+			Type:      domain.ManifestStrategyInline,
+			Manifests: []domain.Manifest{{ResourceType: kubeaddon.ManifestResourceType, Raw: manifest}},
+		},
+		PlacementStrategy: domain.PlacementStrategySpec{
+			Type:    domain.PlacementStrategyStatic,
+			Targets: []domain.TargetID{f.targetID},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create deployment: %v", err)
+	}
+
+	// Wait for pod to appear.
+	awaitInventoryMatch(t, f.harness.Store, func(items []domain.InventoryItem) bool {
+		for _, item := range items {
+			if item.Type() == "v1/Pod" && strings.HasPrefix(item.Name(), "e2e-remove-") {
+				return true
+			}
+		}
+		return false
+	}, 90*time.Second)
+
+	// Delete via dynamic client (the indexer should detect the deletion).
+	deployGVR := schema.GroupVersionResource{Group: "apps", Version: "v1", Resource: "deployments"}
+	err = f.dynClient.Resource(deployGVR).Namespace(f.namespace).Delete(ctx, "e2e-remove", metav1.DeleteOptions{})
+	if err != nil {
+		t.Fatalf("delete deployment: %v", err)
+	}
+
+	// Wait for deployment to disappear from inventory.
+	awaitInventoryMatch(t, f.harness.Store, func(items []domain.InventoryItem) bool {
+		for _, item := range items {
+			if item.Type() == "apps/v1/Deployment" && item.Name() == "e2e-remove" {
+				return false
+			}
+		}
+		return true
+	}, 90*time.Second)
+
+	// Verify pods are also gone.
+	awaitInventoryMatch(t, f.harness.Store, func(items []domain.InventoryItem) bool {
+		for _, item := range items {
+			if item.Type() == "v1/Pod" && strings.HasPrefix(item.Name(), "e2e-remove-") {
+				return false
+			}
+		}
+		return true
+	}, 30*time.Second)
+}
+
+// TestE2E_CRDLifecycle verifies CRD and custom resource indexing.
+func TestE2E_CRDLifecycle(t *testing.T) {
+	f := setupE2E(t)
+	awaitBootstrap(t, f)
+
+	ctx := context.Background()
+	crdGVR := schema.GroupVersionResource{
+		Group: "apiextensions.k8s.io", Version: "v1", Resource: "customresourcedefinitions",
+	}
+
+	crd := &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": "apiextensions.k8s.io/v1",
+		"kind":       "CustomResourceDefinition",
+		"metadata":   map[string]any{"name": "widgets.test.fleetshift.io"},
+		"spec": map[string]any{
+			"group": "test.fleetshift.io",
+			"names": map[string]any{
+				"kind":     "Widget",
+				"plural":   "widgets",
+				"singular": "widget",
+			},
+			"scope": "Namespaced",
+			"versions": []any{map[string]any{
+				"name":    "v1",
+				"served":  true,
+				"storage": true,
+				"schema": map[string]any{
+					"openAPIV3Schema": map[string]any{
+						"type": "object",
+						"properties": map[string]any{
+							"spec": map[string]any{
+								"type": "object",
+								"properties": map[string]any{
+									"color": map[string]any{"type": "string"},
+								},
+							},
+						},
+					},
+				},
+			}},
+		},
+	}}
+
+	_, err := f.dynClient.Resource(crdGVR).Create(ctx, crd, metav1.CreateOptions{})
+	if err != nil {
+		t.Fatalf("create CRD: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = f.dynClient.Resource(crdGVR).Delete(context.Background(), "widgets.test.fleetshift.io", metav1.DeleteOptions{})
+	})
+
+	// Wait for CRD to be established.
+	time.Sleep(5 * time.Second)
+
+	// Create a Widget CR.
+	widgetGVR := schema.GroupVersionResource{
+		Group: "test.fleetshift.io", Version: "v1", Resource: "widgets",
+	}
+	widget := &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": "test.fleetshift.io/v1",
+		"kind":       "Widget",
+		"metadata":   map[string]any{"name": "test-widget", "namespace": f.namespace},
+		"spec":       map[string]any{"color": "blue"},
+	}}
+	_, err = f.dynClient.Resource(widgetGVR).Namespace(f.namespace).Create(ctx, widget, metav1.CreateOptions{})
+	if err != nil {
+		t.Fatalf("create Widget: %v", err)
+	}
+
+	// Wait for Widget to appear in inventory.
+	awaitInventoryMatch(t, f.harness.Store, func(items []domain.InventoryItem) bool {
+		for _, item := range items {
+			if item.Type() == "test.fleetshift.io/v1/Widget" && item.Name() == "test-widget" {
+				return true
+			}
+		}
+		return false
+	}, 60*time.Second)
+}
+
+// TestE2E_DefaultDenyList verifies default deny list filters out unwanted resources.
+func TestE2E_DefaultDenyList(t *testing.T) {
+	f := setupE2E(t)
+	awaitBootstrap(t, f)
+
+	// Give the indexer time to process all resources.
+	time.Sleep(5 * time.Second)
+
+	tx, err := f.harness.Store.BeginReadOnly(context.Background())
+	if err != nil {
+		t.Fatalf("BeginReadOnly: %v", err)
+	}
+	defer tx.Rollback()
+
+	items, err := tx.Inventory().List(context.Background())
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+
+	deniedTypes := map[domain.InventoryType]bool{
+		"v1/Event":                          true,
+		"events.k8s.io/v1/Event":            true,
+		"coordination.k8s.io/v1/Lease":      true,
+		"v1/Endpoints":                      true,
+		"discovery.k8s.io/v1/EndpointSlice": true,
+	}
+
+	for _, item := range items {
+		if deniedTypes[item.Type()] {
+			t.Errorf("denied resource type found in inventory: %s (name: %s)", item.Type(), item.Name())
+		}
+	}
+}
