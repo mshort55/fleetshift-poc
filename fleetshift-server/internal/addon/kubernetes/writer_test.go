@@ -507,3 +507,80 @@ func TestEdgeComputation_DiffAcrossFlushes(t *testing.T) {
 		t.Errorf("expected no edge adds in second delta (edge unchanged), got %d", len(second.edgeAdds))
 	}
 }
+
+func TestEdgeComputation_BuildEdges(t *testing.T) {
+	// Define test GVR and schema with BuildEdges factory.
+	testGVRWithEdges := schema.GroupVersionResource{Group: "", Version: "v1", Resource: "pods"}
+
+	testSchemaWithEdges := map[schema.GroupVersionResource]SchemaEntry{
+		testGVRWithEdges: {
+			GVR:  testGVRWithEdges,
+			Kind: "Pod",
+			BuildEdges: func(r *unstructured.Unstructured, uid string) func(ns NodeStore) []Edge {
+				return func(ns NodeStore) []Edge {
+					return []Edge{{
+						EdgeType:   EdgeRunsOn,
+						SourceUID:  uid,
+						DestUID:    "node-1",
+						SourceKind: "Pod",
+						DestKind:   "Node",
+					}}
+				}
+			},
+		},
+	}
+
+	mock := &mockInventoryWriter{}
+	w := NewWriter("target-1", mock, testSchemaWithEdges, 100*time.Millisecond)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	go w.Run(ctx)
+
+	// Create a Pod resource.
+	pod := &unstructured.Unstructured{
+		Object: map[string]any{
+			"apiVersion": "v1",
+			"kind":       "Pod",
+			"metadata": map[string]any{
+				"uid":               "uid-pod-1",
+				"name":              "test-pod",
+				"namespace":         "default",
+				"resourceVersion":   "100",
+				"creationTimestamp": "2025-06-01T12:00:00Z",
+			},
+		},
+	}
+
+	w.EventCh() <- ResourceEvent{Op: EventAdd, Resource: pod, GVR: testGVRWithEdges}
+
+	time.Sleep(250 * time.Millisecond)
+
+	deltas := mock.getDeltas()
+	if len(deltas) == 0 {
+		t.Fatal("expected at least one delta, got none")
+	}
+
+	first := deltas[0]
+	if len(first.edgeAdds) == 0 {
+		t.Fatal("expected at least one edge add, got none")
+	}
+
+	// Verify the runsOn edge from pod to node.
+	var found bool
+	for _, e := range first.edgeAdds {
+		if e.EdgeType == "runsOn" && e.SourceUID == "uid-pod-1" && e.DestUID == "node-1" {
+			found = true
+			if e.SourceKind != "Pod" {
+				t.Errorf("expected SourceKind=Pod, got %s", e.SourceKind)
+			}
+			if e.DestKind != "Node" {
+				t.Errorf("expected DestKind=Node, got %s", e.DestKind)
+			}
+		}
+	}
+	if !found {
+		t.Fatal("expected runsOn edge from uid-pod-1 to node-1, not found")
+	}
+}
