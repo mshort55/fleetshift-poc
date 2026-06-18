@@ -22,18 +22,6 @@ const (
 	PropServiceAccountTokenRef = "service_account_token_ref"
 )
 
-// ManagerOption configures a Manager.
-type ManagerOption func(*managerConfig)
-
-type managerConfig struct {
-	indexCfg *IndexConfig
-}
-
-// WithIndexConfig overrides the default IndexConfig for new Agents.
-func WithIndexConfig(cfg IndexConfig) ManagerOption {
-	return func(c *managerConfig) { c.indexCfg = &cfg }
-}
-
 // Manager manages the lifecycle of Agents — one per ready target.
 // It builds K8s clients from target properties + vault, creates
 // Agents with delivery and indexer delegates, and implements
@@ -46,7 +34,6 @@ type Manager struct {
 	keyResolver      *domain.KeyResolver
 	httpClient       *http.Client
 	logger           *slog.Logger
-	indexCfg         *IndexConfig
 
 	mu     sync.Mutex
 	agents map[domain.TargetID]*Agent
@@ -61,13 +48,8 @@ func NewManager(
 	keyResolver *domain.KeyResolver,
 	httpClient *http.Client,
 	logger *slog.Logger,
-	opts ...ManagerOption,
 ) *Manager {
-	cfg := &managerConfig{}
-	for _, o := range opts {
-		o(cfg)
-	}
-	m := &Manager{
+	return &Manager{
 		store:            store,
 		vault:            vault,
 		inventoryWriter:  inventoryWriter,
@@ -77,10 +59,6 @@ func NewManager(
 		logger:           logger,
 		agents:           make(map[domain.TargetID]*Agent),
 	}
-	if cfg.indexCfg != nil {
-		m.indexCfg = cfg.indexCfg
-	}
-	return m
 }
 
 // HandleTargetReady builds K8s clients, creates an Agent with both
@@ -115,11 +93,9 @@ func (m *Manager) HandleTargetReady(ctx context.Context, target domain.TargetInf
 	logger := m.logger.With("target", string(id))
 
 	dc := newDeliveryDelegate(m.deliveryReporter, m.keyResolver, m.httpClient)
-	indexCfg := IndexConfig{Schema: DefaultKubernetesSchema()}
-	if m.indexCfg != nil {
-		indexCfg = *m.indexCfg
-	}
-	ic := newIndexerDelegate(string(id), dynClient, discClient, m.inventoryWriter, indexCfg, logger)
+	ic := newIndexerDelegate(string(id), dynClient, discClient, m.inventoryWriter, IndexConfig{
+		Schema: DefaultKubernetesSchema(),
+	}, logger)
 
 	ta := NewAgent(ctx, id, cfg, dynClient, discClient, dc, ic, logger)
 
