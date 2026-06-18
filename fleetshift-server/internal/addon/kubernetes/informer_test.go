@@ -65,7 +65,7 @@ func TestSupportedResources_WatchableOnly(t *testing.T) {
 		},
 	})
 
-	result, err := SupportedResources(disc)
+	result, err := SupportedResources(disc, slog.Default())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -88,7 +88,7 @@ func TestSupportedResources_WatchableOnly(t *testing.T) {
 func TestSupportedResources_EmptyList(t *testing.T) {
 	disc := newFakeDiscovery([]*metav1.APIResourceList{})
 
-	result, err := SupportedResources(disc)
+	result, err := SupportedResources(disc, slog.Default())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -108,7 +108,7 @@ func TestSupportedResources_NoWatchVerb(t *testing.T) {
 		},
 	})
 
-	result, err := SupportedResources(disc)
+	result, err := SupportedResources(disc, slog.Default())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -121,7 +121,7 @@ func TestSupportedResources_NoWatchVerb(t *testing.T) {
 
 func TestIsResourceAllowed_EmptyLists(t *testing.T) {
 	// Empty allow list means allow-all, empty deny list means deny-nothing.
-	if !IsResourceAllowed("apps", "deployments", nil, nil) {
+	if !IsResourceAllowed("apps", "deployments", nil, nil, slog.Default()) {
 		t.Error("expected allowed with empty lists")
 	}
 }
@@ -130,7 +130,7 @@ func TestIsResourceAllowed_DenyWinsOverAllow(t *testing.T) {
 	allow := []Resource{{ApiGroups: []string{"*"}, Resources: []string{"*"}}}
 	deny := []Resource{{ApiGroups: []string{"apps"}, Resources: []string{"deployments"}}}
 
-	if IsResourceAllowed("apps", "deployments", allow, deny) {
+	if IsResourceAllowed("apps", "deployments", allow, deny, slog.Default()) {
 		t.Error("expected denied: resource in both allow and deny list")
 	}
 }
@@ -138,10 +138,10 @@ func TestIsResourceAllowed_DenyWinsOverAllow(t *testing.T) {
 func TestIsResourceAllowed_DenyOnly(t *testing.T) {
 	deny := []Resource{{ApiGroups: []string{""}, Resources: []string{"secrets"}}}
 
-	if IsResourceAllowed("", "secrets", nil, deny) {
+	if IsResourceAllowed("", "secrets", nil, deny, slog.Default()) {
 		t.Error("expected denied: secrets in deny list")
 	}
-	if !IsResourceAllowed("", "pods", nil, deny) {
+	if !IsResourceAllowed("", "pods", nil, deny, slog.Default()) {
 		t.Error("expected allowed: pods not in deny list")
 	}
 }
@@ -149,10 +149,10 @@ func TestIsResourceAllowed_DenyOnly(t *testing.T) {
 func TestIsResourceAllowed_AllowOnly(t *testing.T) {
 	allow := []Resource{{ApiGroups: []string{"apps"}, Resources: []string{"deployments"}}}
 
-	if !IsResourceAllowed("apps", "deployments", allow, nil) {
+	if !IsResourceAllowed("apps", "deployments", allow, nil, slog.Default()) {
 		t.Error("expected allowed: deployments in allow list")
 	}
-	if IsResourceAllowed("apps", "statefulsets", allow, nil) {
+	if IsResourceAllowed("apps", "statefulsets", allow, nil, slog.Default()) {
 		t.Error("expected denied: statefulsets not in allow list")
 	}
 }
@@ -160,7 +160,7 @@ func TestIsResourceAllowed_AllowOnly(t *testing.T) {
 func TestIsResourceAllowed_WildcardAllow(t *testing.T) {
 	allow := []Resource{{ApiGroups: []string{"*"}, Resources: []string{"*"}}}
 
-	if !IsResourceAllowed("anything", "anything", allow, nil) {
+	if !IsResourceAllowed("anything", "anything", allow, nil, slog.Default()) {
 		t.Error("expected allowed: wildcard allow")
 	}
 }
@@ -335,7 +335,7 @@ func TestFilterSupportedResources_DefaultDenyApplied(t *testing.T) {
 		{Group: "discovery.k8s.io", Version: "v1", Resource: "endpointslices"}: {},
 	}
 
-	result := FilterSupportedResources(supported, nil, nil)
+	result := FilterSupportedResources(supported, nil, nil, slog.Default())
 
 	// Should only contain pods and deployments. Events, leases, endpointslices
 	// are in DefaultDenyList.
@@ -371,7 +371,7 @@ func TestFilterSupportedResources_UserDenyMergedWithDefault(t *testing.T) {
 	// User denies secrets in addition to default deny list.
 	userDeny := []Resource{{ApiGroups: []string{""}, Resources: []string{"secrets"}}}
 
-	result := FilterSupportedResources(supported, userDeny, nil)
+	result := FilterSupportedResources(supported, userDeny, nil, slog.Default())
 
 	resultMap := make(map[schema.GroupVersionResource]struct{})
 	for _, gvr := range result {
@@ -396,7 +396,7 @@ func TestFilterSupportedResources_AllowListRestricts(t *testing.T) {
 	// Only allow pods.
 	allow := []Resource{{ApiGroups: []string{""}, Resources: []string{"pods"}}}
 
-	result := FilterSupportedResources(supported, nil, allow)
+	result := FilterSupportedResources(supported, nil, allow, slog.Default())
 
 	if len(result) != 1 {
 		t.Fatalf("expected 1 result, got %d", len(result))

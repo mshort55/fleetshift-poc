@@ -330,7 +330,7 @@ func NewInformerManager(
 func (m *InformerManager) Reconcile(ctx context.Context, desired []schema.GroupVersionResource) {
 	m.logger.Info("reconciling informers", "running", len(m.stoppers), "desired", len(desired))
 
-	supported, err := SupportedResources(m.discovery)
+	supported, err := SupportedResources(m.discovery, m.logger)
 	if err != nil {
 		m.logger.Error("failed to get supported resources", "error", err)
 	}
@@ -462,7 +462,7 @@ func (m *InformerManager) RunContinuous(ctx context.Context, denyList, allowList
 // discoverAndReconcile discovers all supported GVRs, filters them, and
 // reconciles the running informers.
 func (m *InformerManager) discoverAndReconcile(ctx context.Context, denyList, allowList []Resource) {
-	supported, err := SupportedResources(m.discovery)
+	supported, err := SupportedResources(m.discovery, m.logger)
 	if err != nil {
 		if ctx.Err() == nil {
 			m.logger.Error("failed to discover supported resources", "error", err)
@@ -472,7 +472,7 @@ func (m *InformerManager) discoverAndReconcile(ctx context.Context, denyList, al
 		}
 	}
 
-	desiredGVRs := FilterSupportedResources(supported, denyList, allowList)
+	desiredGVRs := FilterSupportedResources(supported, denyList, allowList, m.logger)
 	m.Reconcile(ctx, desiredGVRs)
 }
 
