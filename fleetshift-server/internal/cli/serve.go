@@ -220,17 +220,12 @@ func runServe(ctx context.Context, f *serveFlags) error {
 		return err
 	}
 
-	var targetHandlers []domain.ProvisionedTargetHandler
-	if addons.k8sMgr != nil {
-		targetHandlers = append(targetHandlers, addons.k8sMgr)
-	}
-
 	orchOpts := []domain.OrchestrationWorkflowOption{
 		domain.WithFulfillmentObserver(observability.NewFulfillmentObserver(logger)),
 		domain.WithVault(vault),
 	}
-	for _, h := range targetHandlers {
-		orchOpts = append(orchOpts, domain.WithProvisionedTargetHandler(h))
+	if addons.k8sMgr != nil {
+		orchOpts = append(orchOpts, domain.WithProvisionedTargetHandler(addons.k8sMgr))
 	}
 
 	orchSpec := domain.NewOrchestrationWorkflowSpec(
@@ -238,8 +233,8 @@ func runServe(ctx context.Context, f *serveFlags) error {
 		orchOpts...,
 	)
 
-	if len(targetHandlers) > 0 {
-		recoverProvisionedTargets(ctx, store, logger, targetHandlers...)
+	if err := orchSpec.RecoverProvisionedTargets(ctx); err != nil {
+		logger.Error("target recovery errors", "error", err)
 	}
 	orchWf, err := reg.RegisterOrchestration(orchSpec)
 	if err != nil {

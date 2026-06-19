@@ -246,6 +246,40 @@ func (m multiTargetHandler) HandleTargetTerminated(ctx context.Context, targetID
 	return nil
 }
 
+// RecoverProvisionedTargets scans existing targets and calls
+// [ProvisionedTargetHandler.HandleTargetReady] for each target in ready
+// state. Call this at startup to recover agents for targets that were
+// provisioned before the server restarted. No-ops when no handler is set.
+// Individual handler errors are collected and returned joined; recovery
+// continues for remaining targets.
+func (s *OrchestrationWorkflowSpec) RecoverProvisionedTargets(ctx context.Context) error {
+	if s.ProvisionedTargets == nil {
+		return nil
+	}
+
+	tx, err := s.Store.BeginReadOnly(ctx)
+	if err != nil {
+		return fmt.Errorf("begin read tx for target recovery: %w", err)
+	}
+	defer tx.Rollback()
+
+	targets, err := tx.Targets().List(ctx)
+	if err != nil {
+		return fmt.Errorf("list targets for recovery: %w", err)
+	}
+
+	var errs []error
+	for _, t := range targets {
+		if t.State() != TargetStateReady && t.State() != "" {
+			continue
+		}
+		if err := s.ProvisionedTargets.HandleTargetReady(ctx, t); err != nil {
+			errs = append(errs, fmt.Errorf("target %s: %w", t.ID(), err))
+		}
+	}
+	return errors.Join(errs...)
+}
+
 // NewOrchestrationWorkflowSpec creates an [OrchestrationWorkflowSpec]
 // with the given required dependencies and applies any options.
 // Observer defaults to [NoOpFulfillmentObserver].
