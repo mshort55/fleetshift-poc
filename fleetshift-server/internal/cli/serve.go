@@ -220,11 +220,27 @@ func runServe(ctx context.Context, f *serveFlags) error {
 		return err
 	}
 
-	orchSpec := domain.NewOrchestrationWorkflowSpec(
-		store, router, domain.StrategyFactory{Store: store}, reg,
+	var targetHandlers []domain.ProvisionedTargetHandler
+	if addons.k8sMgr != nil {
+		targetHandlers = append(targetHandlers, addons.k8sMgr)
+	}
+
+	orchOpts := []domain.OrchestrationWorkflowOption{
 		domain.WithFulfillmentObserver(observability.NewFulfillmentObserver(logger)),
 		domain.WithVault(vault),
+	}
+	for _, h := range targetHandlers {
+		orchOpts = append(orchOpts, domain.WithProvisionedTargetHandler(h))
+	}
+
+	orchSpec := domain.NewOrchestrationWorkflowSpec(
+		store, router, domain.StrategyFactory{Store: store}, reg,
+		orchOpts...,
 	)
+
+	if len(targetHandlers) > 0 {
+		recoverProvisionedTargets(ctx, store, logger, targetHandlers...)
+	}
 	orchWf, err := reg.RegisterOrchestration(orchSpec)
 	if err != nil {
 		return fmt.Errorf("register orchestration: %w", err)

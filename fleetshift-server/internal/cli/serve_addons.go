@@ -226,3 +226,32 @@ func buildTrustBundlePlacement(enabledAddons map[string]bool, gcphcpTargetID str
 		Targets: targets,
 	}
 }
+
+// recoverProvisionedTargets scans existing targets and calls
+// HandleTargetReady on each handler for targets in ready state.
+// Each handler filters internally for its own target type.
+func recoverProvisionedTargets(ctx context.Context, store domain.Store, logger *slog.Logger, handlers ...domain.ProvisionedTargetHandler) {
+	tx, err := store.BeginReadOnly(ctx)
+	if err != nil {
+		logger.Error("failed to begin tx for target recovery", "error", err)
+		return
+	}
+	defer tx.Rollback()
+
+	targets, err := tx.Targets().List(ctx)
+	if err != nil {
+		logger.Error("failed to list targets for recovery", "error", err)
+		return
+	}
+
+	for _, t := range targets {
+		if t.State() != domain.TargetStateReady && t.State() != "" {
+			continue
+		}
+		for _, h := range handlers {
+			if err := h.HandleTargetReady(ctx, t); err != nil {
+				logger.Error("failed to recover target", "target", string(t.ID()), "error", err)
+			}
+		}
+	}
+}
