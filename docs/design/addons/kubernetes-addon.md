@@ -206,7 +206,7 @@ Watch-all is the default behavior — index everything the cluster supports minu
 
 Namespace filtering is applied at the informer level during LIST and WATCH. Resources in excluded namespaces are dropped before reaching the event channel. Two dimensions:
 
-**Namespace include/exclude** — glob patterns controlling which namespaces are watched. Include patterns whitelist matching namespaces. Exclude patterns remove matching namespaces from the included set. The resolved namespace set is cached with a configurable TTL to avoid frequent re-resolution.
+**Namespace include/exclude** — glob patterns controlling which namespaces are watched. Include patterns whitelist matching namespaces. Exclude patterns remove matching namespaces from the included set. Glob patterns are evaluated directly on each event via `filepath.Match` — no caching or pre-resolution is needed because pattern matching is a pure string operation with negligible cost.
 
 **Cluster-scoped inclusion** — `includeClusterScoped` (default true). When false, all cluster-scoped resources are excluded unless explicitly present in the user allow list. This follows the same override pattern as the default deny list — user allow overrides the exclusion.
 
@@ -222,16 +222,18 @@ Core edge types shipped with the kubernetes addon:
 
 | Edge Type | Source | Destination | Discovery |
 | --- | --- | --- | --- |
-| `ownedBy` | any resource | its owner | `metadata.ownerReferences`, walked recursively up the ownership chain |
+| `ownedBy` | any resource | its controlling owner | controlling `ownerReference`, walked recursively up the controller chain |
 | `runsOn` | Pod | Node | `spec.nodeName` |
 | `attachedTo` | Pod | Secret, ConfigMap, PVC | scanning `spec.volumes`, `spec.containers[].env`, `spec.containers[].envFrom` |
 | `selects` | Service | Pod | label selector matching against known Pods |
 
 ### Recursive owner traversal
 
-The `ownedBy` edge type follows the full ownership chain, not just direct owners. A Pod owned by a ReplicaSet owned by a Deployment produces two edges: Pod→ReplicaSet and ReplicaSet→Deployment. This enables queries like "everything owned by this Deployment" without the caller needing to know intermediate types. The traversal includes cycle detection to handle malformed owner references.
+The `ownedBy` edge type follows the controller ownership chain, not just the direct owner. A Pod owned by a ReplicaSet owned by a Deployment produces two edges: Pod→ReplicaSet and ReplicaSet→Deployment. This enables queries like "everything owned by this Deployment" without the caller needing to know intermediate types. The traversal includes cycle detection to handle malformed owner references.
 
-Recursive owner traversal is computed automatically for all resources via `metadata.ownerReferences` — no schema entry or hook is needed.
+Only the controlling ownerReference (`controller: true`) is followed — non-controlling owners are ignored. This matches the Kubernetes lifecycle model where exactly one controller manages each resource's garbage collection and scaling. Non-controlling owners (e.g., sidecar injectors) would produce misleading topology edges.
+
+Recursive owner traversal is computed automatically for all resources via the controlling `ownerReference` — no schema entry or hook is needed.
 
 ### Edge type extensibility
 
@@ -365,7 +367,7 @@ Every watched resource gets the following fields extracted, with no schema entry
 | `creationTimestamp` | `metadata.creationTimestamp` |
 | `deletionTimestamp` | `metadata.deletionTimestamp` (present only during graceful deletion) |
 | `labels` | `metadata.labels` |
-| `ownerReferences` | `metadata.ownerReferences` (used for recursive edge building) |
+| `controllingOwnerUID` | controlling `metadata.ownerReferences` entry (used for recursive edge building) |
 | `generation` | `metadata.generation` |
 | GVR + Kind | From the discovery context (group, version, resource, kind) |
 | `status.conditions` | `status.conditions` (tolerant of missing — no-op if absent) |
@@ -408,7 +410,7 @@ Two-tier extraction converts an unstructured Kubernetes resource into a domain `
 **Base extraction** (all resources):
 
 1. Build the inventory type from `apiVersion` and `kind` (e.g. `apps/v1/Deployment`, `v1/Pod`)
-2. Copy curated metadata: name, namespace, uid, creationTimestamp, deletionTimestamp, labels, ownerReferences, generation
+2. Copy curated metadata: name, namespace, uid, creationTimestamp, deletionTimestamp, labels, controlling ownerReference UID, generation
 3. Extract `status.conditions` if present
 4. Build the item with ID `targetID/UID`, the computed inventory type, and the extracted fields
 

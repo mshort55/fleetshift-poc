@@ -73,7 +73,7 @@ func NewObservedInventoryItem(
 	id InventoryItemID, invType InventoryType, name string,
 	properties json.RawMessage, labels map[string]string,
 	targetID TargetID, observed json.RawMessage,
-	conditions []InventoryCondition, now time.Time,
+	conditions []InventoryCondition, createdAt, observedAt time.Time,
 ) InventoryItem {
 	return InventoryItem{
 		id:            id,
@@ -84,9 +84,9 @@ func NewObservedInventoryItem(
 		targetID:      targetID,
 		observed:      observed,
 		conditions:    conditions,
-		observedAt:    &now,
-		createdAt:     now,
-		updatedAt:     now,
+		observedAt:    &observedAt,
+		createdAt:     createdAt,
+		updatedAt:     observedAt,
 	}
 }
 

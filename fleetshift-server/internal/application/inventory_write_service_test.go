@@ -18,8 +18,8 @@ func TestInventoryWriteService_ApplyDelta_UpsertAndDelete(t *testing.T) {
 
 	now := time.Now()
 	items := []domain.InventoryItem{
-		domain.NewObservedInventoryItem("target-a/uid-1", "apps/v1/Deployment", "nginx", nil, map[string]string{"app": "nginx"}, "target-a", nil, nil, now),
-		domain.NewObservedInventoryItem("target-a/uid-2", "v1/Service", "nginx-svc", nil, nil, "target-a", nil, nil, now),
+		domain.NewObservedInventoryItem("target-a/uid-1", "apps/v1/Deployment", "nginx", nil, map[string]string{"app": "nginx"}, "target-a", nil, nil, now, now),
+		domain.NewObservedInventoryItem("target-a/uid-2", "v1/Service", "nginx-svc", nil, nil, "target-a", nil, nil, now, now),
 	}
 
 	if err := svc.ApplyDelta(ctx, "target-a", items, nil, nil, nil); err != nil {
@@ -72,7 +72,7 @@ func TestInventoryWriteService_Resync_ReplacesExisting(t *testing.T) {
 	now := time.Now()
 
 	// Pre-insert an item that should be replaced by resync.
-	preItem := domain.NewObservedInventoryItem("target-b/old-uid", "apps/v1/Deployment", "old-deploy", nil, nil, "target-b", nil, nil, now)
+	preItem := domain.NewObservedInventoryItem("target-b/old-uid", "apps/v1/Deployment", "old-deploy", nil, nil, "target-b", nil, nil, now, now)
 	preTx, err := store.Begin(ctx)
 	if err != nil {
 		t.Fatalf("begin pre-tx: %v", err)
@@ -86,8 +86,8 @@ func TestInventoryWriteService_Resync_ReplacesExisting(t *testing.T) {
 
 	// Resync with 2 new items.
 	newItems := []domain.InventoryItem{
-		domain.NewObservedInventoryItem("target-b/uid-a", "apps/v1/Deployment", "deploy-a", nil, nil, "target-b", nil, nil, now),
-		domain.NewObservedInventoryItem("target-b/uid-b", "apps/v1/Deployment", "deploy-b", nil, nil, "target-b", nil, nil, now),
+		domain.NewObservedInventoryItem("target-b/uid-a", "apps/v1/Deployment", "deploy-a", nil, nil, "target-b", nil, nil, now, now),
+		domain.NewObservedInventoryItem("target-b/uid-b", "apps/v1/Deployment", "deploy-b", nil, nil, "target-b", nil, nil, now, now),
 	}
 
 	if err := svc.Resync(ctx, "target-b", "apps/v1/Deployment", newItems); err != nil {

@@ -104,12 +104,17 @@ func ExtractObservedResource(r *unstructured.Unstructured, entry SchemaEntry, ta
 
 	id := domain.InventoryItemID(targetID + "/" + uid)
 
+	createdAt := r.GetCreationTimestamp().Time
+	if createdAt.IsZero() {
+		createdAt = time.Now()
+	}
+
 	item := domain.NewObservedInventoryItem(
 		id, invType, r.GetName(),
 		nil, // properties — not used by k8s extraction
 		labels,
 		domain.TargetID(targetID), observed,
-		conditions, time.Now(),
+		conditions, createdAt, time.Now(),
 	)
 
 	node := inventoryNode{

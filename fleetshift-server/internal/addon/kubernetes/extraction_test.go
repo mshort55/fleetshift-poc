@@ -67,6 +67,29 @@ func TestExtractIdentityFields(t *testing.T) {
 	}
 }
 
+func TestExtractCreatedAt_UsesKubernetesTimestamp(t *testing.T) {
+	k8sCreationTime := time.Date(2024, 3, 15, 8, 30, 0, 0, time.UTC)
+	r := &unstructured.Unstructured{
+		Object: map[string]any{
+			"apiVersion": "apps/v1",
+			"kind":       "Deployment",
+			"metadata": map[string]any{
+				"uid":               "uid-ts",
+				"name":              "ts-deploy",
+				"namespace":         "default",
+				"creationTimestamp": k8sCreationTime.Format(time.RFC3339),
+			},
+		},
+	}
+
+	entry := SchemaEntry{Kind: "Deployment"}
+	item, _ := ExtractObservedResource(r, entry, "target-1")
+
+	if !item.CreatedAt().Equal(k8sCreationTime) {
+		t.Errorf("CreatedAt = %v, want K8s creationTimestamp %v", item.CreatedAt(), k8sCreationTime)
+	}
+}
+
 func TestExtractIdentityFields_CoreAPIGroup(t *testing.T) {
 	r := &unstructured.Unstructured{
 		Object: map[string]any{
