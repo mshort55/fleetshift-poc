@@ -15,38 +15,33 @@ type Resource struct {
 	Resources []string `yaml:"resources"`
 }
 
-// IsResourceAllowed returns true if the resource identified by group and kind
-// passes the allow/deny filter rules. Deny takes precedence: a resource present
-// in both lists is denied. An empty allow list means allow-all.
-func IsResourceAllowed(group, kind string, allowedList, deniedList []Resource, logger *slog.Logger) bool {
-	// Deny resources that match the deny list.
-	g, k, denied := IsResourceMatchingList(deniedList, group, kind)
-	if denied {
-		// Check if resource is also in the allow list -- still denied.
-		_, _, allowed := IsResourceMatchingList(allowedList, group, kind)
-		if allowed {
-			logger.Debug("deny resource: present in both allow and deny",
-				"group", group, "kind", kind)
-		} else {
-			logger.Debug("deny resource: matched deny rule",
-				"group", group, "kind", kind, "ruleGroup", g, "ruleKind", k)
-		}
+// IsResourceAllowed checks whether a resource passes the allow/deny filter.
+//
+// Watch-all mode (allowList empty): user deny → default deny → ALLOW.
+// Watch-selected mode (allowList non-empty): user deny → user allow (overrides default deny) → DENY.
+func IsResourceAllowed(group, kind string, allowList, userDenyList, defaultDenyList []Resource, logger *slog.Logger) bool {
+	if g, k, denied := IsResourceMatchingList(userDenyList, group, kind); denied {
+		logger.Debug("deny resource: matched user deny rule",
+			"group", group, "kind", kind, "ruleGroup", g, "ruleKind", k)
 		return false
 	}
 
-	// If allowList not provided, interpret it as allow all resources.
-	if len(allowedList) == 0 {
+	if len(allowList) == 0 {
+		if g, k, denied := IsResourceMatchingList(defaultDenyList, group, kind); denied {
+			logger.Debug("deny resource: matched default deny rule",
+				"group", group, "kind", kind, "ruleGroup", g, "ruleKind", k)
+			return false
+		}
 		return true
 	}
 
-	g, k, allowed := IsResourceMatchingList(allowedList, group, kind)
-	if allowed {
+	if g, k, allowed := IsResourceMatchingList(allowList, group, kind); allowed {
 		logger.Debug("allow resource: matched allow rule",
 			"group", group, "kind", kind, "ruleGroup", g, "ruleKind", k)
 		return true
 	}
 
-	logger.Debug("deny resource: no matching allow or deny rule",
+	logger.Debug("deny resource: not in allow list",
 		"group", group, "kind", kind)
 	return false
 }
@@ -81,14 +76,12 @@ var DefaultDenyList = []Resource{
 	{ApiGroups: []string{"packages.operators.coreos.com"}, Resources: []string{"packagemanifests"}},
 }
 
-// FilterSupportedResources filters discovered GVRs through the combined deny list
-// (default + user-specified) and the allow list. It returns only GVRs that pass
-// the IsResourceAllowed check.
+// FilterSupportedResources filters discovered GVRs through user deny, user allow,
+// and the default deny list. User allow overrides default deny; user deny always wins.
 func FilterSupportedResources(supported map[schema.GroupVersionResource]struct{}, denyList, allowList []Resource, logger *slog.Logger) []schema.GroupVersionResource {
-	combinedDeny := append(DefaultDenyList, denyList...)
 	var result []schema.GroupVersionResource
 	for gvr := range supported {
-		if IsResourceAllowed(gvr.Group, gvr.Resource, allowList, combinedDeny, logger) {
+		if IsResourceAllowed(gvr.Group, gvr.Resource, allowList, denyList, DefaultDenyList, logger) {
 			result = append(result, gvr)
 		}
 	}

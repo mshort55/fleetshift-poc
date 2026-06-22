@@ -120,28 +120,27 @@ func TestSupportedResources_NoWatchVerb(t *testing.T) {
 // --- IsResourceAllowed tests ---
 
 func TestIsResourceAllowed_EmptyLists(t *testing.T) {
-	// Empty allow list means allow-all, empty deny list means deny-nothing.
-	if !IsResourceAllowed("apps", "deployments", nil, nil, slog.Default()) {
+	if !IsResourceAllowed("apps", "deployments", nil, nil, nil, slog.Default()) {
 		t.Error("expected allowed with empty lists")
 	}
 }
 
-func TestIsResourceAllowed_DenyWinsOverAllow(t *testing.T) {
+func TestIsResourceAllowed_UserDenyWinsOverAllow(t *testing.T) {
 	allow := []Resource{{ApiGroups: []string{"*"}, Resources: []string{"*"}}}
 	deny := []Resource{{ApiGroups: []string{"apps"}, Resources: []string{"deployments"}}}
 
-	if IsResourceAllowed("apps", "deployments", allow, deny, slog.Default()) {
-		t.Error("expected denied: resource in both allow and deny list")
+	if IsResourceAllowed("apps", "deployments", allow, deny, nil, slog.Default()) {
+		t.Error("expected denied: resource in both allow and user deny")
 	}
 }
 
 func TestIsResourceAllowed_DenyOnly(t *testing.T) {
 	deny := []Resource{{ApiGroups: []string{""}, Resources: []string{"secrets"}}}
 
-	if IsResourceAllowed("", "secrets", nil, deny, slog.Default()) {
-		t.Error("expected denied: secrets in deny list")
+	if IsResourceAllowed("", "secrets", nil, deny, nil, slog.Default()) {
+		t.Error("expected denied: secrets in user deny list")
 	}
-	if !IsResourceAllowed("", "pods", nil, deny, slog.Default()) {
+	if !IsResourceAllowed("", "pods", nil, deny, nil, slog.Default()) {
 		t.Error("expected allowed: pods not in deny list")
 	}
 }
@@ -149,10 +148,10 @@ func TestIsResourceAllowed_DenyOnly(t *testing.T) {
 func TestIsResourceAllowed_AllowOnly(t *testing.T) {
 	allow := []Resource{{ApiGroups: []string{"apps"}, Resources: []string{"deployments"}}}
 
-	if !IsResourceAllowed("apps", "deployments", allow, nil, slog.Default()) {
+	if !IsResourceAllowed("apps", "deployments", allow, nil, nil, slog.Default()) {
 		t.Error("expected allowed: deployments in allow list")
 	}
-	if IsResourceAllowed("apps", "statefulsets", allow, nil, slog.Default()) {
+	if IsResourceAllowed("apps", "statefulsets", allow, nil, nil, slog.Default()) {
 		t.Error("expected denied: statefulsets not in allow list")
 	}
 }
@@ -160,7 +159,7 @@ func TestIsResourceAllowed_AllowOnly(t *testing.T) {
 func TestIsResourceAllowed_WildcardAllow(t *testing.T) {
 	allow := []Resource{{ApiGroups: []string{"*"}, Resources: []string{"*"}}}
 
-	if !IsResourceAllowed("anything", "anything", allow, nil, slog.Default()) {
+	if !IsResourceAllowed("anything", "anything", allow, nil, nil, slog.Default()) {
 		t.Error("expected allowed: wildcard allow")
 	}
 }
