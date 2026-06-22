@@ -1,6 +1,7 @@
 package kubernetes
 
 import (
+	"maps"
 	"encoding/json"
 	"fmt"
 	"reflect"
@@ -14,12 +15,6 @@ import (
 	"k8s.io/client-go/util/jsonpath"
 )
 
-// strippedAnnotationKeys are annotation keys inherited from search-collector
-// that should not be forwarded to the index.
-var strippedAnnotationKeys = map[string]bool{
-	"apps.open-cluster-management.io/hosting-subscription": true,
-	"apps.open-cluster-management.io/hosting-deployable":   true,
-}
 
 // ExtractObservedResource converts an unstructured k8s resource and its schema
 // entry into a domain InventoryItem and an inventoryNode.
@@ -125,6 +120,7 @@ func ExtractObservedResource(r *unstructured.Unstructured, entry SchemaEntry, ta
 		OwnerUID:   ownerUID,
 		Labels:     labels,
 		Properties: fields,
+		GVR:        entry.GVR,
 	}
 
 	return item, node
@@ -134,8 +130,8 @@ func ExtractObservedResource(r *unstructured.Unstructured, entry SchemaEntry, ta
 // kubectl.kubernetes.io/last-applied-configuration and any values
 // longer than sizeCap characters. Returns nil if no annotations remain.
 func extractAnnotations(r *unstructured.Unstructured, sizeCap int) map[string]string {
-	annotations := r.GetAnnotations()
-	if len(annotations) == 0 {
+	raw := r.GetAnnotations()
+	if len(raw) == 0 {
 		return nil
 	}
 
@@ -145,6 +141,9 @@ func extractAnnotations(r *unstructured.Unstructured, sizeCap int) map[string]st
 	}
 
 	// Remove large kubectl annotation
+	annotations := make(map[string]string, len(raw))
+	maps.Copy(annotations, raw)
+
 	delete(annotations, "kubectl.kubernetes.io/last-applied-configuration")
 
 	// Remove annotations exceeding size cap

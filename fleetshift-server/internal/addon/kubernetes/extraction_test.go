@@ -1030,3 +1030,61 @@ func TestInventoryNode_Fields(t *testing.T) {
 		t.Errorf("node.Properties[generation] = %v, want 3", node.Properties["generation"])
 	}
 }
+
+func TestExtractAnnotations_DoesNotMutateSource(t *testing.T) {
+	r := &unstructured.Unstructured{
+		Object: map[string]any{
+			"apiVersion": "v1",
+			"kind":       "ConfigMap",
+			"metadata": map[string]any{
+				"uid":               "uid-1",
+				"name":              "test",
+				"namespace":         "default",
+				"resourceVersion":   "100",
+				"creationTimestamp": "2025-06-01T12:00:00Z",
+				"annotations": map[string]any{
+					"keep":   "short",
+					"kubectl.kubernetes.io/last-applied-configuration": `{"large":"config"}`,
+				},
+			},
+		},
+	}
+
+	entry := SchemaEntry{ExtractAnnotations: true}
+	ExtractObservedResource(r, entry, "target-1")
+
+	annotations := r.GetAnnotations()
+	if _, ok := annotations["kubectl.kubernetes.io/last-applied-configuration"]; !ok {
+		t.Fatal("source annotations mutated: kubectl annotation was deleted")
+	}
+	if _, ok := annotations["keep"]; !ok {
+		t.Fatal("source annotations mutated: keep annotation was deleted")
+	}
+}
+
+func TestExtractObservedResource_PreservesGVR(t *testing.T) {
+	r := &unstructured.Unstructured{
+		Object: map[string]any{
+			"apiVersion": "apps/v1",
+			"kind":       "Deployment",
+			"metadata": map[string]any{
+				"uid":               "deploy-uid",
+				"name":              "my-deploy",
+				"namespace":         "default",
+				"creationTimestamp": "2025-06-01T12:00:00Z",
+			},
+		},
+	}
+
+	gvr := schema.GroupVersionResource{Group: "apps", Version: "v1", Resource: "deployments"}
+	entry := SchemaEntry{
+		GVR:  gvr,
+		Kind: "Deployment",
+	}
+
+	_, node := ExtractObservedResource(r, entry, "target-1")
+
+	if node.GVR != gvr {
+		t.Errorf("node.GVR = %v, want %v", node.GVR, gvr)
+	}
+}

@@ -1,6 +1,10 @@
 package kubernetes
 
-import "slices"
+import (
+	"slices"
+
+	"k8s.io/apimachinery/pkg/runtime/schema"
+)
 
 // EdgeType identifies the kind of relationship between two resources.
 type EdgeType string
@@ -28,6 +32,7 @@ type inventoryNode struct {
 	OwnerUID   string
 	Labels     map[string]string
 	Properties map[string]any
+	GVR        schema.GroupVersionResource
 }
 
 // NodeStore provides dual-indexed lookup of resources by UID and by kind/namespace/name.

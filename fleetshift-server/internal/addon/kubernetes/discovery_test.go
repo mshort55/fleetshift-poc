@@ -1,11 +1,12 @@
 package kubernetes
 
 import (
+	"io"
 	"log/slog"
 	"testing"
 )
 
-var discardLogger = slog.New(slog.NewTextHandler(nil, nil))
+var discardLogger = slog.New(slog.NewTextHandler(io.Discard, nil))
 
 func res(group, resource string) Resource {
 	return Resource{ApiGroups: []string{group}, Resources: []string{resource}}

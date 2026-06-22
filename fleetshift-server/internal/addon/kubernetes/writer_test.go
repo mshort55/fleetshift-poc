@@ -30,6 +30,7 @@ type mockInventoryWriter struct {
 	deltas         []deltaCall
 	resyncs        []resyncCall
 	applyDeltaFunc func(context.Context, domain.TargetID, []domain.InventoryItem, []domain.InventoryItemID, []domain.InventoryEdge, []domain.InventoryEdge) error
+	resyncFunc     func(context.Context, domain.TargetID, domain.InventoryType, []domain.InventoryItem) error
 }
 
 func (m *mockInventoryWriter) ApplyDelta(ctx context.Context, targetID domain.TargetID, upserts []domain.InventoryItem, deletedIDs []domain.InventoryItemID, edgeAdds []domain.InventoryEdge, edgeDels []domain.InventoryEdge) error {
@@ -45,7 +46,12 @@ func (m *mockInventoryWriter) ApplyDelta(ctx context.Context, targetID domain.Ta
 	return nil
 }
 
-func (m *mockInventoryWriter) Resync(_ context.Context, targetID domain.TargetID, inventoryType domain.InventoryType, items []domain.InventoryItem) error {
+func (m *mockInventoryWriter) Resync(ctx context.Context, targetID domain.TargetID, inventoryType domain.InventoryType, items []domain.InventoryItem) error {
+	if m.resyncFunc != nil {
+		if err := m.resyncFunc(ctx, targetID, inventoryType, items); err != nil {
+			return err
+		}
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.resyncs = append(m.resyncs, resyncCall{targetID: targetID, inventoryType: inventoryType, items: items})
@@ -95,7 +101,7 @@ func makeResource(uid, name, rv string) *unstructured.Unstructured {
 
 func TestBatching(t *testing.T) {
 	mock := &mockInventoryWriter{}
-	w := NewWriter("target-1", mock, testSchema, 100*time.Millisecond, nil)
+	w := NewWriter("target-1", mock, testSchema, 100*time.Millisecond, discardLogger)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -140,7 +146,7 @@ func TestBatching(t *testing.T) {
 
 func TestDelete(t *testing.T) {
 	mock := &mockInventoryWriter{}
-	w := NewWriter("target-1", mock, testSchema, 100*time.Millisecond, nil)
+	w := NewWriter("target-1", mock, testSchema, 100*time.Millisecond, discardLogger)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -167,7 +173,7 @@ func TestDelete(t *testing.T) {
 
 func TestResync(t *testing.T) {
 	mock := &mockInventoryWriter{}
-	w := NewWriter("target-1", mock, testSchema, 10*time.Second, nil)
+	w := NewWriter("target-1", mock, testSchema, 10*time.Second, discardLogger)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -203,7 +209,7 @@ func TestResync(t *testing.T) {
 
 func TestDedup(t *testing.T) {
 	mock := &mockInventoryWriter{}
-	w := NewWriter("target-1", mock, testSchema, 100*time.Millisecond, nil)
+	w := NewWriter("target-1", mock, testSchema, 100*time.Millisecond, discardLogger)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -233,7 +239,7 @@ func TestDedup(t *testing.T) {
 func TestResync_MissingSchemaEntry(t *testing.T) {
 	mock := &mockInventoryWriter{}
 	// Schema has no entry for configmaps — tests base-only extraction.
-	w := NewWriter("target-1", mock, testSchema, 10*time.Second, nil)
+	w := NewWriter("target-1", mock, testSchema, 10*time.Second, discardLogger)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -279,7 +285,7 @@ func TestResync_MissingSchemaEntry(t *testing.T) {
 
 func TestLateDeleteProtection(t *testing.T) {
 	mock := &mockInventoryWriter{}
-	w := NewWriter("target-1", mock, testSchema, 100*time.Millisecond, nil)
+	w := NewWriter("target-1", mock, testSchema, 100*time.Millisecond, discardLogger)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -304,7 +310,7 @@ func TestLateDeleteProtection(t *testing.T) {
 
 func TestEdgeComputation_OwnedBy(t *testing.T) {
 	mock := &mockInventoryWriter{}
-	w := NewWriter("target-1", mock, testSchema, 100*time.Millisecond, nil)
+	w := NewWriter("target-1", mock, testSchema, 100*time.Millisecond, discardLogger)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -373,7 +379,7 @@ func TestEdgeComputation_OwnedBy(t *testing.T) {
 
 func TestEdgeComputation_DeleteRemovesEdges(t *testing.T) {
 	mock := &mockInventoryWriter{}
-	w := NewWriter("target-1", mock, testSchema, 100*time.Millisecond, nil)
+	w := NewWriter("target-1", mock, testSchema, 100*time.Millisecond, discardLogger)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -440,7 +446,7 @@ func TestEdgeComputation_DeleteRemovesEdges(t *testing.T) {
 
 func TestEdgeComputation_DiffAcrossFlushes(t *testing.T) {
 	mock := &mockInventoryWriter{}
-	w := NewWriter("target-1", mock, testSchema, 100*time.Millisecond, nil)
+	w := NewWriter("target-1", mock, testSchema, 100*time.Millisecond, discardLogger)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -516,7 +522,7 @@ func TestEdgeComputation_DiffAcrossFlushes(t *testing.T) {
 
 func TestHeartbeat(t *testing.T) {
 	mock := &mockInventoryWriter{}
-	w := NewWriter("target-1", mock, testSchema, 10*time.Second, nil)
+	w := NewWriter("target-1", mock, testSchema, 10*time.Second, discardLogger)
 	// Override heartbeat interval for faster test.
 	w.heartbeatInterval = 100 * time.Millisecond
 
@@ -562,7 +568,7 @@ func TestErrorRecovery(t *testing.T) {
 		},
 	}
 
-	w := NewWriter("target-1", mock, testSchema, 100*time.Millisecond, nil)
+	w := NewWriter("target-1", mock, testSchema, 100*time.Millisecond, discardLogger)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -581,10 +587,6 @@ func TestErrorRecovery(t *testing.T) {
 
 	if finalAttemptCount < 3 {
 		t.Fatalf("expected at least 3 attempts (initial + 2 retries), got %d", finalAttemptCount)
-	}
-
-	if w.consecutiveFailures != 0 {
-		t.Errorf("expected consecutiveFailures=0 after success, got %d", w.consecutiveFailures)
 	}
 }
 
@@ -611,7 +613,7 @@ func TestEdgeComputation_BuildEdges(t *testing.T) {
 	}
 
 	mock := &mockInventoryWriter{}
-	w := NewWriter("target-1", mock, testSchemaWithEdges, 100*time.Millisecond, nil)
+	w := NewWriter("target-1", mock, testSchemaWithEdges, 100*time.Millisecond, discardLogger)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -702,7 +704,7 @@ func TestResync_DoesNotClobberFlushEdges(t *testing.T) {
 	}
 
 	mock := &mockInventoryWriter{}
-	w := NewWriter("target-1", mock, crossSchema, 100*time.Millisecond, nil)
+	w := NewWriter("target-1", mock, crossSchema, 100*time.Millisecond, discardLogger)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -798,7 +800,7 @@ func TestResync_UpdatesWriterState(t *testing.T) {
 	}
 
 	mock := &mockInventoryWriter{}
-	w := NewWriter("target-1", mock, testSchemaCrossGVR, 100*time.Millisecond, nil)
+	w := NewWriter("target-1", mock, testSchemaCrossGVR, 100*time.Millisecond, discardLogger)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -857,7 +859,7 @@ func TestResync_OwnedByEdgesAfterCrossGVRResync(t *testing.T) {
 	}
 
 	mock := &mockInventoryWriter{}
-	w := NewWriter("target-1", mock, testSchemaOwnedBy, 100*time.Millisecond, nil)
+	w := NewWriter("target-1", mock, testSchemaOwnedBy, 100*time.Millisecond, discardLogger)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -919,7 +921,7 @@ func TestResync_DoesNotClobberOwnedByEdges(t *testing.T) {
 	}
 
 	mock := &mockInventoryWriter{}
-	w := NewWriter("target-1", mock, testSchemaOwnedBy, 100*time.Millisecond, nil)
+	w := NewWriter("target-1", mock, testSchemaOwnedBy, 100*time.Millisecond, discardLogger)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -1002,7 +1004,7 @@ func TestEdgeComputation_MultipleEdgeTypesToSameDest(t *testing.T) {
 	}
 
 	mock := &mockInventoryWriter{}
-	w := NewWriter("target-1", mock, schemaMultiEdge, 100*time.Millisecond, nil)
+	w := NewWriter("target-1", mock, schemaMultiEdge, 100*time.Millisecond, discardLogger)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -1064,7 +1066,7 @@ func TestEdgeComputation_MultipleEdgeTypes_DeleteRemovesBoth(t *testing.T) {
 	}
 
 	mock := &mockInventoryWriter{}
-	w := NewWriter("target-1", mock, schemaMultiEdge, 100*time.Millisecond, nil)
+	w := NewWriter("target-1", mock, schemaMultiEdge, 100*time.Millisecond, discardLogger)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -1114,7 +1116,7 @@ func TestShutdownFlush_PersistsPendingEvents(t *testing.T) {
 	// persisted. A long batch interval ensures the timer doesn't fire
 	// before shutdown — only the shutdown flush path runs.
 	mock := &mockInventoryWriter{}
-	w := NewWriter("target-1", mock, testSchema, 10*time.Second, nil)
+	w := NewWriter("target-1", mock, testSchema, 10*time.Second, discardLogger)
 
 	ctx, cancel := context.WithCancel(context.Background())
 
@@ -1146,5 +1148,442 @@ func TestShutdownFlush_PersistsPendingEvents(t *testing.T) {
 	}
 	if !names["deploy-1"] || !names["deploy-2"] {
 		t.Fatalf("shutdown flush missing events: got %v", names)
+	}
+}
+
+func TestMockInventoryWriter_ResyncFunc(t *testing.T) {
+	// Verify that the mock's resyncFunc is called when set.
+	var called bool
+	var capturedTargetID domain.TargetID
+	var capturedType domain.InventoryType
+
+	mock := &mockInventoryWriter{
+		resyncFunc: func(_ context.Context, targetID domain.TargetID, inventoryType domain.InventoryType, items []domain.InventoryItem) error {
+			called = true
+			capturedTargetID = targetID
+			capturedType = inventoryType
+			return nil
+		},
+	}
+
+	ctx := context.Background()
+	err := mock.Resync(ctx, "test-target", "test/type", []domain.InventoryItem{})
+	if err != nil {
+		t.Fatalf("Resync failed: %v", err)
+	}
+
+	if !called {
+		t.Fatal("resyncFunc was not called")
+	}
+	if capturedTargetID != "test-target" {
+		t.Errorf("resyncFunc targetID = %q, want %q", capturedTargetID, "test-target")
+	}
+	if capturedType != "test/type" {
+		t.Errorf("resyncFunc inventoryType = %q, want %q", capturedType, "test/type")
+	}
+
+	// Verify that resync was also recorded in the resyncs slice.
+	resyncs := mock.getResyncs()
+	if len(resyncs) != 1 {
+		t.Fatalf("expected 1 resync recorded, got %d", len(resyncs))
+	}
+}
+
+func TestFlushFailure_ItemsRetriedOnNextTick(t *testing.T) {
+	var mu sync.Mutex
+	var callCount int
+	mock := &mockInventoryWriter{
+		applyDeltaFunc: func(_ context.Context, _ domain.TargetID, _ []domain.InventoryItem, _ []domain.InventoryItemID, _ []domain.InventoryEdge, _ []domain.InventoryEdge) error {
+			mu.Lock()
+			defer mu.Unlock()
+			callCount++
+			if callCount <= 3 {
+				return context.DeadlineExceeded
+			}
+			return nil
+		},
+	}
+
+	w := NewWriter("target-1", mock, testSchema, 100*time.Millisecond, discardLogger)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	go w.Run(ctx)
+
+	w.EventCh() <- ResourceEvent{Op: EventAdd, Resource: makeResource("uid-1", "deploy-1", "100"), GVR: testGVR}
+
+	// First flush: 3 retries with 1s+2s+4s backoff = ~7s, then fails.
+	// Second flush: next tick retries the same items and succeeds.
+	time.Sleep(9 * time.Second)
+
+	deltas := mock.getDeltas()
+	var found bool
+	for _, d := range deltas {
+		for _, item := range d.upserts {
+			if item.Name() == "deploy-1" {
+				found = true
+			}
+		}
+	}
+	if !found {
+		t.Fatal("expected deploy-1 to be retried and persisted after failed flush")
+	}
+}
+
+func TestFlushFailure_EdgesRetriedOnNextTick(t *testing.T) {
+	var mu sync.Mutex
+	var callCount int
+	mock := &mockInventoryWriter{
+		applyDeltaFunc: func(_ context.Context, _ domain.TargetID, _ []domain.InventoryItem, _ []domain.InventoryItemID, _ []domain.InventoryEdge, _ []domain.InventoryEdge) error {
+			mu.Lock()
+			defer mu.Unlock()
+			callCount++
+			if callCount <= 3 {
+				return context.DeadlineExceeded
+			}
+			return nil
+		},
+	}
+
+	w := NewWriter("target-1", mock, testSchema, 100*time.Millisecond, discardLogger)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	go w.Run(ctx)
+
+	child := makeResource("uid-child", "child-deploy", "100")
+	child.Object["metadata"].(map[string]any)["ownerReferences"] = []any{
+		map[string]any{
+			"apiVersion": "apps/v1",
+			"kind":       "ReplicaSet",
+			"name":       "parent-rs",
+			"uid":        "uid-parent",
+			"controller": true,
+		},
+	}
+	parent := &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": "apps/v1", "kind": "ReplicaSet",
+		"metadata": map[string]any{
+			"uid": "uid-parent", "name": "parent-rs", "namespace": "default",
+			"resourceVersion": "200", "creationTimestamp": "2025-06-01T12:00:00Z",
+		},
+	}}
+
+	w.EventCh() <- ResourceEvent{Op: EventAdd, Resource: child, GVR: testGVR}
+	w.EventCh() <- ResourceEvent{Op: EventAdd, Resource: parent, GVR: testGVR}
+
+	time.Sleep(9 * time.Second)
+
+	deltas := mock.getDeltas()
+	var found bool
+	for _, d := range deltas {
+		for _, e := range d.edgeAdds {
+			if e.EdgeType == "ownedBy" && e.SourceUID == "uid-child" && e.DestUID == "uid-parent" {
+				found = true
+			}
+		}
+	}
+	if !found {
+		t.Fatal("expected ownedBy edge to be retried after failed flush")
+	}
+}
+
+func TestFlushFailure_DeletesRetriedOnNextTick(t *testing.T) {
+	var mu sync.Mutex
+	var callCount int
+	mock := &mockInventoryWriter{
+		applyDeltaFunc: func(_ context.Context, _ domain.TargetID, _ []domain.InventoryItem, _ []domain.InventoryItemID, _ []domain.InventoryEdge, _ []domain.InventoryEdge) error {
+			mu.Lock()
+			defer mu.Unlock()
+			callCount++
+			if callCount <= 3 {
+				return context.DeadlineExceeded
+			}
+			return nil
+		},
+	}
+
+	w := NewWriter("target-1", mock, testSchema, 100*time.Millisecond, discardLogger)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	go w.Run(ctx)
+
+	w.EventCh() <- ResourceEvent{Op: EventDelete, Resource: makeResource("uid-del", "deploy-del", "100"), GVR: testGVR}
+
+	// First flush: 3 retries with 1s+2s+4s backoff = ~7s, then fails.
+	// Second flush: next tick retries the same delete and succeeds.
+	time.Sleep(9 * time.Second)
+
+	deltas := mock.getDeltas()
+	var found bool
+	for _, d := range deltas {
+		for _, id := range d.deletedIDs {
+			if id == "target-1/uid-del" {
+				found = true
+			}
+		}
+	}
+	if !found {
+		t.Fatal("expected uid-del to be retried and persisted after failed flush")
+	}
+}
+
+func TestFlushFailure_NewEventsMergedBetweenRetries(t *testing.T) {
+	var mu sync.Mutex
+	var callCount int
+	var firstFlushComplete bool
+	mock := &mockInventoryWriter{
+		applyDeltaFunc: func(_ context.Context, _ domain.TargetID, _ []domain.InventoryItem, _ []domain.InventoryItemID, _ []domain.InventoryEdge, _ []domain.InventoryEdge) error {
+			mu.Lock()
+			defer mu.Unlock()
+			callCount++
+			if callCount <= 3 {
+				if callCount == 3 {
+					firstFlushComplete = true
+				}
+				return context.DeadlineExceeded
+			}
+			return nil
+		},
+	}
+
+	w := NewWriter("target-1", mock, testSchema, 100*time.Millisecond, discardLogger)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	go w.Run(ctx)
+
+	// Send first event.
+	w.EventCh() <- ResourceEvent{Op: EventAdd, Resource: makeResource("uid-1", "deploy-1", "100"), GVR: testGVR}
+
+	// Wait for the first flush to complete its retries (~7s).
+	time.Sleep(7500 * time.Millisecond)
+
+	// Send a second event AFTER the first flush has failed but before the next tick.
+	mu.Lock()
+	waitingForRetry := firstFlushComplete
+	mu.Unlock()
+	if !waitingForRetry {
+		t.Fatal("test timing issue: first flush did not complete retries")
+	}
+	w.EventCh() <- ResourceEvent{Op: EventAdd, Resource: makeResource("uid-2", "deploy-2", "101"), GVR: testGVR}
+
+	// Wait for the next tick to retry (~1.5s more).
+	time.Sleep(2 * time.Second)
+
+	deltas := mock.getDeltas()
+	names := make(map[string]bool)
+	for _, d := range deltas {
+		for _, item := range d.upserts {
+			names[item.Name()] = true
+		}
+	}
+	if !names["deploy-1"] {
+		t.Fatal("expected deploy-1 to be persisted after failed flush")
+	}
+	if !names["deploy-2"] {
+		t.Fatal("expected deploy-2 to be merged into the retry batch")
+	}
+}
+
+func TestResync_RetriesOnFailure(t *testing.T) {
+	var mu sync.Mutex
+	var resyncAttempts int
+	mock := &mockInventoryWriter{
+		resyncFunc: func(_ context.Context, _ domain.TargetID, _ domain.InventoryType, _ []domain.InventoryItem) error {
+			mu.Lock()
+			defer mu.Unlock()
+			resyncAttempts++
+			if resyncAttempts <= 2 {
+				return context.DeadlineExceeded
+			}
+			return nil
+		},
+	}
+
+	w := NewWriter("target-1", mock, testSchema, 10*time.Second, discardLogger)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	go w.Run(ctx)
+
+	w.ResyncCh() <- ResyncEvent{
+		GVR:       testGVR,
+		Resources: []*unstructured.Unstructured{makeResource("uid-1", "deploy-1", "100")},
+	}
+
+	time.Sleep(4 * time.Second)
+
+	mu.Lock()
+	attempts := resyncAttempts
+	mu.Unlock()
+
+	if attempts < 3 {
+		t.Fatalf("expected at least 3 resync attempts, got %d", attempts)
+	}
+
+	resyncs := mock.getResyncs()
+	if len(resyncs) == 0 {
+		t.Fatal("expected resync to succeed after retries")
+	}
+}
+
+func TestResync_PurgesStaleNodes(t *testing.T) {
+	mock := &mockInventoryWriter{}
+	w := NewWriter("target-1", mock, testSchema, 100*time.Millisecond, discardLogger)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	go w.Run(ctx)
+
+	// Step 1: Add child (ownerRef → parent) and parent via events.
+	child := makeResource("uid-child", "child-deploy", "100")
+	child.Object["metadata"].(map[string]any)["ownerReferences"] = []any{
+		map[string]any{
+			"apiVersion": "apps/v1", "kind": "Deployment",
+			"name": "parent-deploy", "uid": "uid-parent", "controller": true,
+		},
+	}
+	parent := makeResource("uid-parent", "parent-deploy", "200")
+
+	w.EventCh() <- ResourceEvent{Op: EventAdd, Resource: child, GVR: testGVR}
+	w.EventCh() <- ResourceEvent{Op: EventAdd, Resource: parent, GVR: testGVR}
+	time.Sleep(250 * time.Millisecond)
+
+	// Verify the ownedBy edge was created.
+	deltas := mock.getDeltas()
+	var edgeCreated bool
+	for _, d := range deltas {
+		for _, e := range d.edgeAdds {
+			if e.EdgeType == "ownedBy" && e.SourceUID == "uid-child" && e.DestUID == "uid-parent" {
+				edgeCreated = true
+			}
+		}
+	}
+	if !edgeCreated {
+		t.Fatal("precondition: expected ownedBy edge from child to parent")
+	}
+
+	// Step 2: Resync with only child — parent is stale and should be purged.
+	w.ResyncCh() <- ResyncEvent{GVR: testGVR, Resources: []*unstructured.Unstructured{child}}
+	time.Sleep(100 * time.Millisecond)
+
+	// Step 3: Send an update to trigger a flush with edge recomputation.
+	childUpdated := makeResource("uid-child", "child-deploy", "101")
+	childUpdated.Object["metadata"].(map[string]any)["ownerReferences"] = []any{
+		map[string]any{
+			"apiVersion": "apps/v1", "kind": "Deployment",
+			"name": "parent-deploy", "uid": "uid-parent", "controller": true,
+		},
+	}
+	w.EventCh() <- ResourceEvent{Op: EventUpdate, Resource: childUpdated, GVR: testGVR}
+	time.Sleep(250 * time.Millisecond)
+
+	// Step 4: The flush should detect the parent is gone and emit an edge deletion.
+	allDeltas := mock.getDeltas()
+	var edgeDeleted bool
+	for _, d := range allDeltas {
+		for _, e := range d.edgeDels {
+			if e.EdgeType == "ownedBy" && e.SourceUID == "uid-child" && e.DestUID == "uid-parent" {
+				edgeDeleted = true
+			}
+		}
+	}
+	if !edgeDeleted {
+		t.Fatal("expected ownedBy edge deletion after parent was purged by resync")
+	}
+}
+
+func TestResync_PurgeOnlyAffectsResyncdGVR(t *testing.T) {
+	// Define a second GVR for ReplicaSets
+	rsGVR := schema.GroupVersionResource{Group: "apps", Version: "v1", Resource: "replicasets"}
+	extendedSchema := map[schema.GroupVersionResource]SchemaEntry{
+		testGVR: {
+			GVR:  testGVR,
+			Kind: "Deployment",
+		},
+		rsGVR: {
+			GVR:  rsGVR,
+			Kind: "ReplicaSet",
+		},
+	}
+
+	mock := &mockInventoryWriter{}
+	w := NewWriter("target-1", mock, extendedSchema, 100*time.Millisecond, nil)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	go w.Run(ctx)
+
+	// Step 1: Add two deployments (deploy-1, deploy-2) and one ReplicaSet via events
+	deploy1 := makeResource("uid-deploy-1", "deploy-1", "100")
+	deploy2 := makeResource("uid-deploy-2", "deploy-2", "101")
+	rs := &unstructured.Unstructured{
+		Object: map[string]any{
+			"apiVersion": "apps/v1",
+			"kind":       "ReplicaSet",
+			"metadata": map[string]any{
+				"uid":               "uid-rs",
+				"name":              "rs-1",
+				"namespace":         "default",
+				"resourceVersion":   "200",
+				"creationTimestamp": "2025-06-01T12:00:00Z",
+			},
+		},
+	}
+
+	w.EventCh() <- ResourceEvent{Op: EventAdd, Resource: deploy1, GVR: testGVR}
+	w.EventCh() <- ResourceEvent{Op: EventAdd, Resource: deploy2, GVR: testGVR}
+	w.EventCh() <- ResourceEvent{Op: EventAdd, Resource: rs, GVR: rsGVR}
+	time.Sleep(250 * time.Millisecond)
+
+	// Step 2: Resync deployments with only deploy-1 — should purge deploy-2 but not the ReplicaSet
+	w.ResyncCh() <- ResyncEvent{GVR: testGVR, Resources: []*unstructured.Unstructured{deploy1}}
+	time.Sleep(100 * time.Millisecond)
+
+	// Step 3: Send a ReplicaSet update to trigger flush
+	rsUpdated := &unstructured.Unstructured{
+		Object: map[string]any{
+			"apiVersion": "apps/v1",
+			"kind":       "ReplicaSet",
+			"metadata": map[string]any{
+				"uid":               "uid-rs",
+				"name":              "rs-1",
+				"namespace":         "default",
+				"resourceVersion":   "201",
+				"creationTimestamp": "2025-06-01T12:00:00Z",
+			},
+		},
+	}
+	w.EventCh() <- ResourceEvent{Op: EventUpdate, Resource: rsUpdated, GVR: rsGVR}
+	time.Sleep(250 * time.Millisecond)
+
+	// Step 4: Verify that the ReplicaSet persisted (resync of deployments shouldn't affect it)
+	deltas := mock.getDeltas()
+	var rsPersisted bool
+	var deploy1Persisted bool
+	for _, d := range deltas {
+		for _, item := range d.upserts {
+			if item.ID() == "target-1/uid-rs" {
+				rsPersisted = true
+			}
+			if item.ID() == "target-1/uid-deploy-1" {
+				deploy1Persisted = true
+			}
+		}
+	}
+	if !rsPersisted {
+		t.Fatal("expected ReplicaSet to persist — resync of deployments should not purge ReplicaSets")
+	}
+	if !deploy1Persisted {
+		t.Fatal("expected deploy-1 to persist — it was included in the resync")
 	}
 }

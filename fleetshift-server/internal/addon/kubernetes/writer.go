@@ -3,6 +3,7 @@ package kubernetes
 import (
 	"context"
 	"log/slog"
+	"maps"
 	"time"
 
 	"github.com/fleetshift/fleetshift-poc/fleetshift-server/internal/domain"
@@ -46,18 +47,17 @@ type ResyncEvent struct {
 // Writer batches informer events and writes them as domain inventory
 // items via an InventoryWriter.
 type Writer struct {
-	targetID            string
-	writer              domain.InventoryWriter
-	schema              map[schema.GroupVersionResource]SchemaEntry
-	eventCh             chan ResourceEvent
-	resyncCh            chan ResyncEvent
-	batchInterval       time.Duration
-	heartbeatInterval   time.Duration
-	currentNodes        map[string]inventoryNode
-	edgeFuncs     map[string]func(NodeStore) []Edge
-	previousEdges map[edgeKey]Edge
-	logger              *slog.Logger
-	consecutiveFailures int
+	targetID          string
+	writer            domain.InventoryWriter
+	schema            map[schema.GroupVersionResource]SchemaEntry
+	eventCh           chan ResourceEvent
+	resyncCh          chan ResyncEvent
+	batchInterval     time.Duration
+	heartbeatInterval time.Duration
+	currentNodes      map[string]inventoryNode
+	edgeFuncs         map[string]func(NodeStore) []Edge
+	previousEdges     map[edgeKey]Edge
+	logger            *slog.Logger
 }
 
 // NewWriter creates a Writer that batches events over batchInterval and
@@ -80,8 +80,8 @@ func NewWriter(
 		batchInterval:     batchInterval,
 		heartbeatInterval: heartbeatInterval,
 		currentNodes:      make(map[string]inventoryNode),
-		edgeFuncs:     make(map[string]func(NodeStore) []Edge),
-		previousEdges: make(map[edgeKey]Edge),
+		edgeFuncs:         make(map[string]func(NodeStore) []Edge),
+		previousEdges:     make(map[edgeKey]Edge),
 		logger:            logger,
 	}
 }
@@ -154,11 +154,11 @@ func (w *Writer) Run(ctx context.Context) {
 			if len(pendingUpserts) > 0 || len(pendingDeletes) > 0 {
 				lastActivity = time.Now()
 			}
-			w.flush(ctx, pendingUpserts, pendingUpsertGVR, pendingDeletes, sentVersions)
-			// Reset batch state.
-			pendingUpserts = make(map[string]*unstructured.Unstructured)
-			pendingUpsertGVR = make(map[string]schema.GroupVersionResource)
-			pendingDeletes = make(map[string]struct{})
+			if err := w.flush(ctx, pendingUpserts, pendingUpsertGVR, pendingDeletes, sentVersions); err == nil {
+				pendingUpserts = make(map[string]*unstructured.Unstructured)
+				pendingUpsertGVR = make(map[string]schema.GroupVersionResource)
+				pendingDeletes = make(map[string]struct{})
+			}
 
 		case <-heartbeatTicker.C:
 			if time.Since(lastActivity) >= w.heartbeatInterval {
@@ -171,18 +171,20 @@ func (w *Writer) Run(ctx context.Context) {
 
 // flush sends the accumulated batch as a single ApplyDelta call. It applies
 // dedup by skipping upserts whose resourceVersion has not changed.
+// Returns error if the write fails; state is only advanced on success.
 func (w *Writer) flush(
 	ctx context.Context,
 	upserts map[string]*unstructured.Unstructured,
 	upsertGVR map[string]schema.GroupVersionResource,
 	deletes map[string]struct{},
 	sentVersions map[string]string,
-) {
+) error {
 	if len(upserts) == 0 && len(deletes) == 0 {
-		return
+		return nil
 	}
 
 	var items []domain.InventoryItem
+	newSentVersions := make(map[string]string)
 
 	for uid, r := range upserts {
 		rv := r.GetResourceVersion()
@@ -194,13 +196,13 @@ func (w *Writer) flush(
 		gvr := upsertGVR[uid]
 		entry := w.schema[gvr]
 		item, node := ExtractObservedResource(r, entry, w.targetID)
+		node.GVR = gvr
 		items = append(items, item)
-		sentVersions[uid] = rv
+		newSentVersions[uid] = rv
 
 		// Track inventory node for edge computation.
 		w.currentNodes[uid] = node
 
-		// Store edge computation closure if the schema entry has BuildEdges.
 		if entry.BuildEdges != nil {
 			w.edgeFuncs[uid] = entry.BuildEdges(r, uid)
 		}
@@ -212,7 +214,7 @@ func (w *Writer) flush(
 	}
 
 	if len(items) == 0 && len(deletedIDs) == 0 {
-		return
+		return nil
 	}
 
 	// Compute edges for all current nodes.
@@ -260,36 +262,40 @@ func (w *Writer) flush(
 		}
 	}
 
-	w.previousEdges = newEdges
-
 	if w.writer == nil {
-		return
+		return nil
 	}
-	w.applyWithRetry(ctx, items, deletedIDs, edgeAdds, edgeDels)
+
+	if err := w.applyWithRetry(ctx, items, deletedIDs, edgeAdds, edgeDels); err != nil {
+		return err
+	}
+
+	maps.Copy(sentVersions, newSentVersions)
+	w.previousEdges = newEdges
+	return nil
 }
 
 // applyWithRetry applies a delta with exponential backoff retry.
 // It retries up to 3 times with 1s, 2s, 4s backoff (capped at 30s).
-// After 3 failures, it logs the error and increments consecutiveFailures.
+// Returns the error if all retries fail.
 func (w *Writer) applyWithRetry(
 	ctx context.Context,
 	items []domain.InventoryItem,
 	deletedIDs []domain.InventoryItemID,
 	edgeAdds, edgeDels []domain.InventoryEdge,
-) {
+) error {
 	if w.writer == nil {
-		return
+		return nil
 	}
 
 	var err error
-	for attempt := 0; attempt < 3; attempt++ {
+	for attempt := range 3 {
 		err = w.writer.ApplyDelta(ctx, domain.TargetID(w.targetID), items, deletedIDs, edgeAdds, edgeDels)
 		if err == nil {
-			w.consecutiveFailures = 0
-			return
+			return nil
 		}
 		if ctx.Err() != nil {
-			return
+			return err
 		}
 
 		backoff := time.Duration(1<<attempt) * time.Second
@@ -297,26 +303,20 @@ func (w *Writer) applyWithRetry(
 			backoff = 30 * time.Second
 		}
 
-		if w.logger != nil {
-			w.logger.Warn("ApplyDelta failed, retrying",
-				"attempt", attempt+1,
-				"backoff", backoff,
-				"error", err)
-		}
+		w.logger.Warn("ApplyDelta failed, retrying",
+			"attempt", attempt+1,
+			"backoff", backoff,
+			"error", err)
 
 		select {
 		case <-ctx.Done():
-			return
+			return err
 		case <-time.After(backoff):
 		}
 	}
 
-	w.consecutiveFailures++
-	if w.logger != nil {
-		w.logger.Error("ApplyDelta failed after retries",
-			"error", err,
-			"consecutiveFailures", w.consecutiveFailures)
-	}
+	w.logger.Error("ApplyDelta failed after retries", "error", err)
+	return err
 }
 
 // sendResync sends a Resync call for the given GVR.
@@ -331,16 +331,28 @@ func (w *Writer) applyWithRetry(
 func (w *Writer) sendResync(ctx context.Context, rs ResyncEvent) {
 	entry := w.schema[rs.GVR]
 
+	resyncUIDs := make(map[string]struct{})
 	var items []domain.InventoryItem
 
 	for _, r := range rs.Resources {
 		item, node := ExtractObservedResource(r, entry, w.targetID)
+		node.GVR = rs.GVR
 		items = append(items, item)
 		uid := string(r.GetUID())
+		resyncUIDs[uid] = struct{}{}
 
 		w.currentNodes[uid] = node
 		if entry.BuildEdges != nil {
 			w.edgeFuncs[uid] = entry.BuildEdges(r, uid)
+		}
+	}
+
+	for uid, node := range w.currentNodes {
+		if node.GVR == rs.GVR {
+			if _, exists := resyncUIDs[uid]; !exists {
+				delete(w.currentNodes, uid)
+				delete(w.edgeFuncs, uid)
+			}
 		}
 	}
 
@@ -359,5 +371,32 @@ func (w *Writer) sendResync(ctx context.Context, rs ResyncEvent) {
 	if w.writer == nil {
 		return
 	}
-	_ = w.writer.Resync(ctx, domain.TargetID(w.targetID), invType, items)
+	w.resyncWithRetry(ctx, invType, items)
+}
+
+func (w *Writer) resyncWithRetry(ctx context.Context, invType domain.InventoryType, items []domain.InventoryItem) {
+	var err error
+	for attempt := range 3 {
+		err = w.writer.Resync(ctx, domain.TargetID(w.targetID), invType, items)
+		if err == nil {
+			return
+		}
+		if ctx.Err() != nil {
+			return
+		}
+
+		backoff := time.Duration(1<<attempt) * time.Second
+		w.logger.Warn("Resync failed, retrying",
+			"attempt", attempt+1,
+			"backoff", backoff,
+			"error", err)
+
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(backoff):
+		}
+	}
+
+	w.logger.Error("Resync failed after retries", "error", err)
 }

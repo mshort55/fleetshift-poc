@@ -334,9 +334,9 @@ The Writer batches informer events, performs two-tier extraction, computes edges
 5. Diff edges against the previous edge set to produce add/delete edge deltas
 6. Call `InventoryWriter.ApplyDelta` with item upserts, deleted IDs, edge adds, and edge deletes
 
-**Resync** (on `ResyncEvent`): extract all resources for the GVR, merge the extracted nodes and edge closures into the Writer's state, and call `InventoryWriter.Resync` to atomically replace all items for the target+type. The resync handles items only — it passes nil edges so existing edges are left untouched. Edge closures registered during resync are picked up by the next flush cycle, which recomputes all edges with a complete cross-GVR view. The resync path bypasses the batch timer and writes immediately.
+**Resync** (on `ResyncEvent`): extract all resources for the GVR, merge into the Writer's internal state, purge any tracked nodes for that GVR absent from the resync set, and atomically replace all items for the target+type via `InventoryWriter.Resync`. Retries with exponential backoff on failure. Resync is items-only — edges are left untouched and recomputed on the next flush cycle. Purging stale nodes ensures edge computation does not reference items removed by the resync, even if the corresponding Delete events have not yet been consumed from the event channel.
 
-**Error recovery**: on `ApplyDelta` failure, the Writer retries with exponential backoff capped at a configurable maximum. After repeated failures, the Writer falls back to a full `Resync` for all affected GVRs, rebuilding state from scratch.
+**Error recovery**: on write failure, the Writer retries with exponential backoff. If all retries are exhausted, the failed batch remains pending and is retried on the next batch tick. Internal deduplication and edge-diff state is only advanced after a successful write, so failed items and edges are never silently lost. Memory during extended outages is bounded by unique UIDs on the cluster.
 
 **Heartbeat**: if no changes occur within a configurable interval, the Writer sends an empty heartbeat to signal liveness. In-process, the receiver can use this to distinguish "no changes" from "agent is dead." In the external model, it keeps the fleetlet channel alive.
 
@@ -427,7 +427,7 @@ The default schema provides enriched extraction for core Kubernetes resource typ
 
 All other resources discovered on the cluster receive base extraction only — metadata, GVR, labels, conditions — without any schema entry.
 
-## Open questions
+## Open questions & todo
 
 ### Drift detection
 
@@ -450,3 +450,11 @@ For a single target with SQLite the item-only Resync is negligible. At scale wit
 ### Informer startup serialization at scale
 
 The current serialized startup (one informer at a time, with initialization timeout) works for a bounded set of GVRs. With watch-all mode on a large cluster (200-400+ GVRs), serialized startup could take significant time. A bounded-parallelism approach (e.g., start N informers concurrently) may be needed, balanced against memory spike risk during initial LIST phases.
+
+### Resync fallback as defense-in-depth
+
+The Writer's error recovery relies on retaining failed batches for retry on the next tick. This handles all known failure modes — transient DB errors, extended outages, and partial state divergence. A full resync fallback (triggering a re-LIST of all GVRs after N consecutive failures) could be layered on as defense-in-depth against unknown state corruption or bugs in the retry logic. This is not currently needed — the retry mechanism is correct by construction and self-healing — but could be added if operational experience reveals failure modes that per-batch retry does not cover. Such a fallback would require a back-channel from the Writer to the InformerManager, inverting the current one-directional dependency.
+
+### Observation and condition history
+
+The implementation stores only the latest observation and current conditions per inventory item — a single `observed` JSON blob, a single `conditions` array, and a single `observed_at` timestamp. There are no history tables or condition transition event tracking. Adding historical observations (e.g., a time-series of observed state) or condition transition logs (e.g., "Available went from True to False at T") would require new persistence tables and a retention policy. The current single-snapshot model is sufficient for point-in-time inventory queries but cannot answer "when did this resource last change state" or "how long has this condition been degraded."
