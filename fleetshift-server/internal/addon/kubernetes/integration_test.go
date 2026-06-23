@@ -842,7 +842,7 @@ func setupE2E(t *testing.T, opts ...setupOption) *e2eFixture {
 		t.Fatalf("Enable kubernetes addon: %v", err)
 	}
 	if err := h.AddonMgr.Connect(ctx, "kubernetes", application.ConnectInput{
-		Agent: k8sMgr,
+		DeliveryAgent: k8sMgr,
 	}); err != nil {
 		t.Fatalf("Connect kubernetes addon: %v", err)
 	}

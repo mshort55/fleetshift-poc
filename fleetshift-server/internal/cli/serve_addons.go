@@ -135,7 +135,7 @@ func enableAddons(ctx context.Context, addonMgr *application.AddonManager, enabl
 func connectAddons(ctx context.Context, addonMgr *application.AddonManager, enabledAddons map[string]bool, agents *addonState, logger *slog.Logger) error {
 	if enabledAddons["kind"] {
 		if err := addonMgr.Connect(ctx, "kind", application.ConnectInput{
-			Agent: agents.kindAgent,
+			DeliveryAgent: agents.kindAgent,
 			Targets: []domain.TargetInfo{domain.NewTargetInfo(
 				"kind-local",
 				kindaddon.TargetType,
@@ -153,7 +153,7 @@ func connectAddons(ctx context.Context, addonMgr *application.AddonManager, enab
 
 	if enabledAddons["kubernetes"] {
 		if err := addonMgr.Connect(ctx, "kubernetes", application.ConnectInput{
-			Agent: agents.k8sMgr,
+			DeliveryAgent: agents.k8sMgr,
 		}); err != nil {
 			return fmt.Errorf("connect kubernetes addon: %w", err)
 		}
@@ -163,7 +163,7 @@ func connectAddons(ctx context.Context, addonMgr *application.AddonManager, enab
 		activeTarget := agents.gcphcpCfg.Targets[0]
 		targetID := domain.TargetID(activeTarget.ID)
 		if err := addonMgr.Connect(ctx, "gcphcp", application.ConnectInput{
-			Agent: agents.gcphcpAgent,
+			DeliveryAgent: agents.gcphcpAgent,
 			Targets: []domain.TargetInfo{domain.NewTargetInfo(
 				targetID,
 				gcphcpaddon.TargetType,
