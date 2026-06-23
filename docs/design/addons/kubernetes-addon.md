@@ -343,7 +343,7 @@ The Writer batches informer events, performs two-tier extraction, computes edges
 
 **Error recovery**: on write failure, the Writer retries with exponential backoff. If all retries are exhausted, the failed batch remains pending and is retried on the next batch tick. Internal deduplication and edge-diff state is only advanced after a successful write, so failed items and edges are never silently lost. Memory during extended outages is bounded by unique UIDs on the cluster.
 
-**Heartbeat**: if no changes occur within a configurable interval, the Writer sends an empty heartbeat to signal liveness. In-process, the receiver can use this to distinguish "no changes" from "agent is dead." In the external model, it keeps the fleetlet channel alive.
+**Heartbeat**: if no changes occur within a fixed interval (60 seconds), the Writer sends an empty heartbeat to signal liveness. In-process, the receiver can use this to distinguish "no changes" from "agent is dead." In the external model, it keeps the fleetlet channel alive.
 
 All event processing is serialized on a single goroutine for ordering safety. Late-delete protection and resourceVersion deduplication ensure correct behavior under interleaved events.
 
@@ -410,21 +410,16 @@ The indexing schema defines how to enrich extraction beyond the base tier. It do
 
 ### Extraction
 
-Two-tier extraction converts an unstructured Kubernetes resource into a domain `InventoryItem`:
-
-**Base extraction** (all resources):
+Two-tier extraction converts an unstructured Kubernetes resource into a domain `InventoryItem`. Base and enriched steps are interleaved in a single pass — enriched steps are no-ops when no schema entry exists:
 
 1. Build the inventory type from `apiVersion` and `kind` (e.g. `apps/v1/Deployment`, `v1/Pod`)
-2. Copy curated metadata: name, namespace, uid, creationTimestamp, deletionTimestamp, labels, controlling ownerReference UID, generation
-3. Extract `status.conditions` if present
-4. Build the item with ID `targetID/UID`, the computed inventory type, and the extracted fields
-
-**Enriched extraction** (resources with a schema entry):
-
-5. Evaluate JSONPath expressions for each schema field, coercing by data type
-6. Run `ComputeExtra` hook if present (e.g., pod status computation, container lists)
-7. Extract annotations if `ExtractAnnotations` is true, with size cap and noise stripping
-8. Store `ComputeEdges` closure for edge computation at flush time
+2. Extract `status.conditions` if present
+3. *(enriched)* Evaluate JSONPath expressions for each schema field, coercing by data type
+4. Copy curated metadata: namespace, controlling ownerReference UID, generation, deletionTimestamp
+5. *(enriched)* Extract annotations if `ExtractAnnotations` is true, with size cap and noise stripping
+6. *(enriched)* Run `ComputeExtra` hook if present (e.g., pod status computation, container lists)
+7. Build the item with ID `targetID/UID`, name, labels, the computed inventory type, and the extracted fields
+8. *(enriched)* Store `ComputeEdges` closure for edge computation at flush time
 
 ### Default schema
 
