@@ -289,8 +289,8 @@ func TestKindAddon_OIDCIntegration(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 
-		if err := kubeMgr.HandleTargetReady(ctx, k8sTarget); err != nil {
-			t.Fatalf("HandleTargetReady: %v", err)
+		if err := kubeMgr.StartIndexing(ctx, k8sTarget); err != nil {
+			t.Fatalf("StartIndexing: %v", err)
 		}
 
 		aliceToken := res.IDP.IssueToken(t, oidctest.TokenClaims{Subject: "alice"})

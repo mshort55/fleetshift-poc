@@ -192,7 +192,7 @@ func TestKubernetesAgent_RealCluster(t *testing.T) {
 	saToken := string(saTokenBytes)
 
 	// Build a target variant with the SA token inlined (no vault ref).
-	// Tests that verify nil-vault behavior use this so HandleTargetReady
+	// Tests that verify nil-vault behavior use this so StartIndexing
 	// can build a REST config without vault.
 	directProps := copyProps(pt.Properties)
 	directProps["service_account_token"] = saToken
@@ -217,8 +217,8 @@ func TestKubernetesAgent_RealCluster(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 
-		if err := mgr.HandleTargetReady(ctx, k8sTargetWithToken); err != nil {
-			t.Fatalf("HandleTargetReady: %v", err)
+		if err := mgr.StartIndexing(ctx, k8sTargetWithToken); err != nil {
+			t.Fatalf("StartIndexing: %v", err)
 		}
 
 		err := mgr.Deliver(ctx, k8sTargetWithToken, "tp-1", manifests, auth, nil, 1)
@@ -255,8 +255,8 @@ func TestKubernetesAgent_RealCluster(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 
-		if err := mgr.HandleTargetReady(ctx, k8sTargetWithToken); err != nil {
-			t.Fatalf("HandleTargetReady: %v", err)
+		if err := mgr.StartIndexing(ctx, k8sTargetWithToken); err != nil {
+			t.Fatalf("StartIndexing: %v", err)
 		}
 
 		for i := range 2 {
@@ -289,8 +289,8 @@ func TestKubernetesAgent_RealCluster(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 
-		if err := mgr.HandleTargetReady(ctx, k8sTargetWithToken); err != nil {
-			t.Fatalf("HandleTargetReady: %v", err)
+		if err := mgr.StartIndexing(ctx, k8sTargetWithToken); err != nil {
+			t.Fatalf("StartIndexing: %v", err)
 		}
 
 		err := mgr.Deliver(ctx, k8sTargetWithToken, "multi-1", manifests, auth, nil, 1)
@@ -350,8 +350,8 @@ func TestKubernetesAgent_RealCluster(t *testing.T) {
 		targetWithTrustSnap.Properties["trust_bundle"] = att.trustBundleJSON
 		targetWithTrust := domain.TargetInfoFromSnapshot(targetWithTrustSnap)
 
-		if err := mgr.HandleTargetReady(ctx, targetWithTrust); err != nil {
-			t.Fatalf("HandleTargetReady: %v", err)
+		if err := mgr.StartIndexing(ctx, targetWithTrust); err != nil {
+			t.Fatalf("StartIndexing: %v", err)
 		}
 
 		err := mgr.Deliver(ctx, targetWithTrust, "att-vault-1", manifests, domain.DeliveryAuth{}, att.attestation, 1)
@@ -389,8 +389,8 @@ func TestKubernetesAgent_RealCluster(t *testing.T) {
 
 		ctx := context.Background()
 
-		if err := mgr.HandleTargetReady(ctx, targetWithTrust); err != nil {
-			t.Fatalf("HandleTargetReady: %v", err)
+		if err := mgr.StartIndexing(ctx, targetWithTrust); err != nil {
+			t.Fatalf("StartIndexing: %v", err)
 		}
 
 		bogusAtt := &domain.Attestation{
