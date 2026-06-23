@@ -323,36 +323,24 @@ func NewInformerManager(
 }
 
 // Reconcile adjusts running informers to match the desired set of GVRs.
-// It intersects desired with the cluster's supported (watchable) resources,
-// stops informers for removed GVRs, and starts informers for new ones.
-// New informers are started serially and each waits up to 10s for
-// initialization to avoid memory spikes.
+// The caller is responsible for filtering desired to supported/allowed GVRs
+// (see discoverAndReconcile). Reconcile stops informers for removed GVRs
+// and starts informers for new ones. New informers are started serially
+// and each waits up to 10s for initialization to avoid memory spikes.
 func (m *InformerManager) Reconcile(ctx context.Context, desired []schema.GroupVersionResource) {
 	m.logger.Info("reconciling informers", "running", len(m.stoppers), "desired", len(desired))
 
-	supported, err := SupportedResources(m.discovery, m.logger)
-	if err != nil {
-		m.logger.Error("failed to get supported resources", "error", err)
-	}
-
-	if supported == nil {
-		return
-	}
-
-	// Intersect desired with supported to get the effective set.
-	effective := make(map[schema.GroupVersionResource]struct{})
+	desiredSet := make(map[schema.GroupVersionResource]struct{}, len(desired))
 	for _, gvr := range desired {
-		if _, ok := supported[gvr]; ok {
-			effective[gvr] = struct{}{}
-		}
+		desiredSet[gvr] = struct{}{}
 	}
 
-	// Stop informers that are no longer in the effective set; keep the rest.
-	// Also remove already-running GVRs from effective so we only start new ones.
+	// Stop informers that are no longer desired; keep the rest.
+	// Also remove already-running GVRs from desiredSet so we only start new ones.
 	for gvr, stopper := range m.stoppers {
-		if _, ok := effective[gvr]; ok {
+		if _, ok := desiredSet[gvr]; ok {
 			// Already running, don't restart.
-			delete(effective, gvr)
+			delete(desiredSet, gvr)
 		} else {
 			// No longer desired, stop.
 			m.logger.Info("stopping informer", "gvr", gvr.String())
@@ -361,8 +349,8 @@ func (m *InformerManager) Reconcile(ctx context.Context, desired []schema.GroupV
 		}
 	}
 
-	// Start new informers for the remaining effective GVRs.
-	for gvr := range effective {
+	// Start new informers for the remaining desired GVRs.
+	for gvr := range desiredSet {
 		m.logger.Info("informer started", "gvr", gvr.String())
 		informer := NewInformer(m.client, gvr, m.eventCh, m.resyncCh, m.nsFilter, m.logger)
 		informerCtx, cancel := context.WithCancel(ctx)

@@ -458,3 +458,9 @@ The Writer's error recovery relies on retaining failed batches for retry on the 
 ### Observation and condition history
 
 The implementation stores only the latest observation and current conditions per inventory item — a single `observed` JSON blob, a single `conditions` array, and a single `observed_at` timestamp. There are no history tables or condition transition event tracking. Adding historical observations (e.g., a time-series of observed state) or condition transition logs (e.g., "Available went from True to False at T") would require new persistence tables and a retention policy. The current single-snapshot model is sufficient for point-in-time inventory queries but cannot answer "when did this resource last change state" or "how long has this condition been degraded."
+
+### Static metadata in the observed JSON
+
+The `observed` blob carries both volatile runtime state (replica counts, pod phase) and static identity-like metadata (`namespace`, `controllingOwnerUID`) that never changes after resource creation. These static fields don't fit cleanly into any inventory bucket — `namespace` is closer to identity (like `name`, which has a dedicated column), and `controllingOwnerUID` is closer to a relationship (already captured as `ownedBy` edges) — but adding dedicated columns would embed Kubernetes-specific concepts into the platform's addon-agnostic model.
+
+Storing them in `observed` is correct by elimination (`properties` is for addon-produced delivery outputs like `api_url`, not observed metadata), but has a query performance tradeoff: namespace filtering requires JSON extraction rather than an indexed column lookup. Postgres can add a functional index on `observed->>'namespace'`; SQLite cannot. If the search API requires high-performance namespace filtering at fleet scale, the platform may need a generic indexed-dimensions mechanism available to any addon that needs to promote specific observed fields for efficient querying.

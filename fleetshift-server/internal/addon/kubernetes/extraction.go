@@ -66,6 +66,16 @@ func ExtractObservedResource(r *unstructured.Unstructured, entry SchemaEntry, ta
 		}
 	}
 
+	// namespace
+	if ns := r.GetNamespace(); ns != "" {
+		fields["namespace"] = ns
+	}
+
+	// controllingOwnerUID
+	if ownerUID != "" {
+		fields["controllingOwnerUID"] = ownerUID
+	}
+
 	// generation
 	if gen, found, _ := unstructured.NestedInt64(r.Object, "metadata", "generation"); found {
 		fields["generation"] = gen

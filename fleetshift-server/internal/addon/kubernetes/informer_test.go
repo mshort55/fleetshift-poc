@@ -265,41 +265,6 @@ func TestInformerManager_Reconcile_StopRemoved(t *testing.T) {
 	}
 }
 
-func TestInformerManager_Reconcile_UnsupportedFilteredOut(t *testing.T) {
-	eventCh := make(chan ResourceEvent, 100)
-	resyncCh := make(chan ResyncEvent, 100)
-	logger := slog.Default()
-
-	podsGVR := schema.GroupVersionResource{Group: "", Version: "v1", Resource: "pods"}
-	widgetsGVR := schema.GroupVersionResource{Group: "custom.example.com", Version: "v1", Resource: "widgets"}
-
-	// Only pods are supported on the cluster.
-	disc := newFakeDiscovery([]*metav1.APIResourceList{
-		{
-			GroupVersion: "v1",
-			APIResources: []metav1.APIResource{
-				{Name: "pods", Verbs: metav1.Verbs{"get", "list", "watch"}},
-			},
-		},
-	})
-
-	dynClient := newFakeDynamicClient(podsGVR)
-	mgr := NewInformerManager(dynClient, disc, eventCh, resyncCh, nil, logger)
-
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	mgr.Reconcile(ctx, []schema.GroupVersionResource{podsGVR, widgetsGVR})
-
-	// Only pods should have a stopper; widgets is not supported.
-	if len(mgr.stoppers) != 1 {
-		t.Errorf("expected 1 stopper, got %d", len(mgr.stoppers))
-	}
-	if _, ok := mgr.stoppers[podsGVR]; !ok {
-		t.Error("expected stopper for pods")
-	}
-	_ = widgetsGVR
-}
-
 func TestInformerManager_StopAll(t *testing.T) {
 	eventCh := make(chan ResourceEvent, 100)
 	resyncCh := make(chan ResyncEvent, 100)
