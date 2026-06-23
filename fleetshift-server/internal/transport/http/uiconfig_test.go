@@ -18,7 +18,6 @@ func TestGeneratePluginPages_GroupedModulePath(t *testing.T) {
 							Properties: map[string]interface{}{
 								"id":    "settings",
 								"label": "Settings",
-								"icon":  map[string]interface{}{"$codeRef": "SettingsIcon.default"},
 							},
 						},
 						{
@@ -126,7 +125,6 @@ func TestGenerateNavLayout_NestedGroups(t *testing.T) {
 							Properties: map[string]interface{}{
 								"id":    "settings",
 								"label": "Settings",
-								"icon":  map[string]interface{}{"$codeRef": "SettingsIcon.default"},
 							},
 						},
 						{
@@ -191,9 +189,6 @@ func TestGenerateNavLayout_NestedGroups(t *testing.T) {
 	}
 	if groupEntry.Label != "Settings" {
 		t.Errorf("group label: got %q, want %q", groupEntry.Label, "Settings")
-	}
-	if groupEntry.Icon != "SettingsIcon" {
-		t.Errorf("group icon: got %q, want %q", groupEntry.Icon, "SettingsIcon")
 	}
 	if len(groupEntry.Children) != 2 {
 		t.Fatalf("group children count: got %d, want 2", len(groupEntry.Children))

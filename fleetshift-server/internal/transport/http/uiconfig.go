@@ -61,14 +61,12 @@ type navLayoutEntry struct {
 	GroupID   string           `json:"groupId,omitempty"`
 	PluginKey string           `json:"pluginKey,omitempty"`
 	Label     string           `json:"label,omitempty"`
-	Icon      string           `json:"icon,omitempty"`
 	Children  []navLayoutEntry `json:"children,omitempty"`
 }
 
 type moduleGroupMeta struct {
 	id        string
 	label     string
-	icon      string
 	pluginKey string
 }
 
@@ -265,17 +263,9 @@ func collectModuleGroups(registry pluginRegistry) map[string]moduleGroupMeta {
 				continue
 			}
 			label, _ := ext.Properties["label"].(string)
-			var icon string
-			if iconObj, ok := ext.Properties["icon"].(map[string]interface{}); ok {
-				if codeRef, ok := iconObj["$codeRef"].(string); ok {
-					parts := strings.SplitN(codeRef, ".", 2)
-					icon = parts[0]
-				}
-			}
 			groups[id] = moduleGroupMeta{
 				id:        id,
 				label:     label,
-				icon:      icon,
 				pluginKey: entry.Key,
 			}
 		}
@@ -299,7 +289,7 @@ func generateNavLayout(registry pluginRegistry, pages []pluginPage) []navLayoutE
 				continue
 			}
 			id, _ := ext.Properties["id"].(string)
-			if id == "" {
+			if id == "" || !safeIDRe.MatchString(id) {
 				continue
 			}
 			pageID := fmt.Sprintf("%s.%s", entry.Key, id)
@@ -318,22 +308,20 @@ func generateNavLayout(registry pluginRegistry, pages []pluginPage) []navLayoutE
 		if groupedPageIDs[p.ID] {
 			parts := strings.SplitN(p.Path, "/", 2)
 			groupID := parts[0]
-			if emittedGroups[groupID] {
-				continue
-			}
-			emittedGroups[groupID] = true
-
 			meta, ok := groups[groupID]
 			if !ok {
 				layout = append(layout, navLayoutEntry{Type: "page", PageID: p.ID})
 				continue
 			}
+			if emittedGroups[groupID] {
+				continue
+			}
+			emittedGroups[groupID] = true
 			layout = append(layout, navLayoutEntry{
 				Type:      "group",
 				GroupID:   meta.id,
 				PluginKey: meta.pluginKey,
 				Label:     meta.label,
-				Icon:      meta.icon,
 				Children:  groupChildren[groupID],
 			})
 			continue
