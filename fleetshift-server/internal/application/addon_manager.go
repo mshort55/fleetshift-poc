@@ -85,6 +85,14 @@ func NewAddonManager(deps AddonManagerDeps) *AddonManager {
 	}
 }
 
+// SetActivator updates the schema activator. This is used during startup
+// to wire the activator after creating the AddonManager but before calling Connect.
+func (m *AddonManager) SetActivator(activator SchemaActivator) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.activator = activator
+}
+
 // Enable authorizes and records an addon's declared capabilities.
 // The addon transitions to [domain.AddonStateEnabled]. No schemas are
 // compiled and no gRPC surface is created — that happens at Connect.

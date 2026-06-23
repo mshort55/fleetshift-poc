@@ -220,22 +220,26 @@ func runServe(ctx context.Context, f *serveFlags) error {
 		return err
 	}
 
+	// --- create AddonManager (before orchSpec so it can be the TargetObserver) ---
+	typeSvc := &application.ManagedResourceTypeService{Store: store}
+	addonMgr := application.NewAddonManager(application.AddonManagerDeps{
+		Router:           router,
+		TypeSvc:          typeSvc,
+		Activator:        nil, // set later after dynamic service infrastructure
+		InventoryCleanup: &application.InventoryCleanupService{Store: store},
+	})
+
 	orchOpts := []domain.OrchestrationWorkflowOption{
 		domain.WithFulfillmentObserver(observability.NewFulfillmentObserver(logger)),
 		domain.WithVault(vault),
-	}
-	if addons.k8sMgr != nil {
-		orchOpts = append(orchOpts, domain.WithTargetObserver(addons.k8sMgr))
+		domain.WithTargetObserver(addonMgr),
 	}
 
 	orchSpec := domain.NewOrchestrationWorkflowSpec(
 		store, router, domain.StrategyFactory{Store: store}, reg,
 		orchOpts...,
 	)
-
-	if err := orchSpec.RecoverTargets(ctx); err != nil {
-		logger.Error("target recovery errors", "error", err)
-	}
+	// NOTE: RecoverTargets moved to AFTER connectAddons (below)
 	orchWf, err := reg.RegisterOrchestration(orchSpec)
 	if err != nil {
 		return fmt.Errorf("register orchestration: %w", err)
@@ -488,7 +492,7 @@ func runServe(ctx context.Context, f *serveFlags) error {
 
 	// --- addon lifecycle ---
 
-	typeSvc := &application.ManagedResourceTypeService{Store: store}
+	// Wire the schema activator into the AddonManager created earlier
 	activator := &managedresource.DynamicSchemaActivator{
 		GRPCMux:      dynamicMux,
 		HTTPMux:      dynamicHTTPMux,
@@ -498,11 +502,7 @@ func runServe(ctx context.Context, f *serveFlags) error {
 			Validator: specValidator,
 		},
 	}
-	addonMgr := application.NewAddonManager(application.AddonManagerDeps{
-		Router:    router,
-		TypeSvc:   typeSvc,
-		Activator: activator,
-	})
+	addonMgr.SetActivator(activator)
 
 	// Phase 2 (Defined → Enabled): authorize addons and record capability
 	// expectations. For backend capabilities (delivery agents, managed
@@ -535,6 +535,11 @@ func runServe(ctx context.Context, f *serveFlags) error {
 	// DynamicServiceMux can dispatch immediately.
 	if err := connectAddons(ctx, addonMgr, enabledAddons, addons, logger); err != nil {
 		return err
+	}
+
+	// Recover targets AFTER addons are connected (IndexAgents must be registered first)
+	if err := orchSpec.RecoverTargets(ctx); err != nil {
+		logger.Error("target recovery errors", "error", err)
 	}
 
 	// --- shutdown ---

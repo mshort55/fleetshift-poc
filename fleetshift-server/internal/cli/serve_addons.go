@@ -154,6 +154,7 @@ func connectAddons(ctx context.Context, addonMgr *application.AddonManager, enab
 	if enabledAddons["kubernetes"] {
 		if err := addonMgr.Connect(ctx, "kubernetes", application.ConnectInput{
 			DeliveryAgent: agents.k8sMgr,
+			IndexAgent:    agents.k8sMgr,
 		}); err != nil {
 			return fmt.Errorf("connect kubernetes addon: %w", err)
 		}
