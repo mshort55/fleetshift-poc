@@ -40,6 +40,8 @@ type Manager struct {
 	agents map[domain.TargetID]*Agent
 }
 
+var _ domain.IndexAgent = (*Manager)(nil)
+
 // NewManager creates a Manager. The provided context governs the
 // lifetime of all agents created by the Manager — it must outlive
 // individual request or activity contexts.
@@ -66,11 +68,11 @@ func NewManager(
 	}
 }
 
-// HandleTargetReady builds K8s clients, creates an Agent with both
+// StartIndexing builds K8s clients, creates an Agent with both
 // delivery and indexer delegates, and starts it in a goroutine. It is
 // idempotent: if an agent for the given target is already running, it
 // returns nil without starting a duplicate.
-func (m *Manager) HandleTargetReady(ctx context.Context, target domain.TargetInfo) error {
+func (m *Manager) StartIndexing(ctx context.Context, target domain.TargetInfo) error {
 	id := target.ID()
 
 	m.mu.Lock()
@@ -121,9 +123,10 @@ func (m *Manager) HandleTargetReady(ctx context.Context, target domain.TargetInf
 	return nil
 }
 
-// HandleTargetTerminated stops the agent for the given target, removes it
-// from tracking, and deletes inventory for the target.
-func (m *Manager) HandleTargetTerminated(ctx context.Context, target domain.TargetInfo) error {
+// StopIndexing stops the agent for the given target and removes it
+// from tracking. It does NOT delete inventory — the caller is
+// responsible for cleanup.
+func (m *Manager) StopIndexing(ctx context.Context, target domain.TargetInfo) error {
 	m.mu.Lock()
 	ta, ok := m.agents[target.ID()]
 	delete(m.agents, target.ID())
@@ -133,20 +136,7 @@ func (m *Manager) HandleTargetTerminated(ctx context.Context, target domain.Targ
 		return nil
 	}
 	ta.Stop()
-
-	tx, err := m.store.Begin(ctx)
-	if err != nil {
-		return fmt.Errorf("begin tx for inventory cleanup: %w", err)
-	}
-	defer tx.Rollback()
-
-	if err := tx.Edges().DeleteByTarget(ctx, target.ID()); err != nil {
-		return fmt.Errorf("delete edges for target %s: %w", target.ID(), err)
-	}
-	if err := tx.Inventory().DeleteByTarget(ctx, target.ID()); err != nil {
-		return fmt.Errorf("delete inventory for target %s: %w", target.ID(), err)
-	}
-	return tx.Commit()
+	return nil
 }
 
 // GetAgent returns the running Agent for the given ID, or nil if

@@ -8,7 +8,7 @@ import (
 )
 
 // TestAgent_Properties verifies that the Agent created by
-// HandleTargetReady exposes the correct API server and K8s clients.
+// StartIndexing exposes the correct API server and K8s clients.
 func TestAgent_Properties(t *testing.T) {
 	mgr := newTestManager(t)
 	t.Cleanup(mgr.StopAll)
@@ -27,8 +27,8 @@ func TestAgent_Properties(t *testing.T) {
 	)
 
 	ctx := context.Background()
-	if err := mgr.HandleTargetReady(ctx, target); err != nil {
-		t.Fatalf("HandleTargetReady: %v", err)
+	if err := mgr.StartIndexing(ctx, target); err != nil {
+		t.Fatalf("StartIndexing: %v", err)
 	}
 
 	ta := mgr.GetAgent("prop-test")

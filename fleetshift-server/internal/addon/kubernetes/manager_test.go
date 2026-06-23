@@ -58,15 +58,15 @@ func testTarget(id string) domain.TargetInfo {
 	)
 }
 
-func TestHandleTargetReady_StartsAgent(t *testing.T) {
+func TestStartIndexing_StartsAgent(t *testing.T) {
 	mgr := newTestManager(t)
 	t.Cleanup(mgr.StopAll)
 
 	ctx := context.Background()
 	target := testTarget("test-target")
 
-	if err := mgr.HandleTargetReady(ctx, target); err != nil {
-		t.Fatalf("HandleTargetReady: %v", err)
+	if err := mgr.StartIndexing(ctx, target); err != nil {
+		t.Fatalf("StartIndexing: %v", err)
 	}
 
 	ta := mgr.GetAgent("test-target")
@@ -78,20 +78,20 @@ func TestHandleTargetReady_StartsAgent(t *testing.T) {
 	}
 }
 
-func TestHandleTargetReady_Idempotent(t *testing.T) {
+func TestStartIndexing_Idempotent(t *testing.T) {
 	mgr := newTestManager(t)
 	t.Cleanup(mgr.StopAll)
 
 	ctx := context.Background()
 	target := testTarget("test-target")
 
-	if err := mgr.HandleTargetReady(ctx, target); err != nil {
-		t.Fatalf("first HandleTargetReady: %v", err)
+	if err := mgr.StartIndexing(ctx, target); err != nil {
+		t.Fatalf("first StartIndexing: %v", err)
 	}
 
 	// Second call should be a no-op.
-	if err := mgr.HandleTargetReady(ctx, target); err != nil {
-		t.Fatalf("second HandleTargetReady: %v", err)
+	if err := mgr.StartIndexing(ctx, target); err != nil {
+		t.Fatalf("second StartIndexing: %v", err)
 	}
 
 	ta := mgr.GetAgent("test-target")
@@ -100,14 +100,14 @@ func TestHandleTargetReady_Idempotent(t *testing.T) {
 	}
 }
 
-func TestHandleTargetTerminated_StopsAgent(t *testing.T) {
+func TestStopIndexing_StopsAgent(t *testing.T) {
 	mgr := newTestManager(t)
 
 	ctx := context.Background()
 	target := testTarget("test-target")
 
-	if err := mgr.HandleTargetReady(ctx, target); err != nil {
-		t.Fatalf("HandleTargetReady: %v", err)
+	if err := mgr.StartIndexing(ctx, target); err != nil {
+		t.Fatalf("StartIndexing: %v", err)
 	}
 
 	ta := mgr.GetAgent("test-target")
@@ -115,13 +115,13 @@ func TestHandleTargetTerminated_StopsAgent(t *testing.T) {
 		t.Fatal("expected agent to be running")
 	}
 
-	if err := mgr.HandleTargetTerminated(ctx, target); err != nil {
-		t.Fatalf("HandleTargetTerminated: %v", err)
+	if err := mgr.StopIndexing(ctx, target); err != nil {
+		t.Fatalf("StopIndexing: %v", err)
 	}
 
 	// Agent should be stopped and removed.
 	if mgr.GetAgent("test-target") != nil {
-		t.Error("expected GetAgent to return nil after termination")
+		t.Error("expected GetAgent to return nil after stop")
 	}
 
 	// Done channel should be closed.
@@ -133,14 +133,14 @@ func TestHandleTargetTerminated_StopsAgent(t *testing.T) {
 	}
 }
 
-func TestHandleTargetReady_AgentSurvivesCallerCancel(t *testing.T) {
+func TestStartIndexing_AgentSurvivesCallerCancel(t *testing.T) {
 	mgr := newTestManager(t)
 	t.Cleanup(mgr.StopAll)
 
 	callerCtx, callerCancel := context.WithCancel(context.Background())
 
-	if err := mgr.HandleTargetReady(callerCtx, testTarget("test-target")); err != nil {
-		t.Fatalf("HandleTargetReady: %v", err)
+	if err := mgr.StartIndexing(callerCtx, testTarget("test-target")); err != nil {
+		t.Fatalf("StartIndexing: %v", err)
 	}
 
 	ta := mgr.GetAgent("test-target")
@@ -174,8 +174,8 @@ func TestStopAll_StopsAllAgents(t *testing.T) {
 	ctx := context.Background()
 
 	for _, id := range []string{"target-a", "target-b", "target-c"} {
-		if err := mgr.HandleTargetReady(ctx, testTarget(id)); err != nil {
-			t.Fatalf("HandleTargetReady(%s): %v", id, err)
+		if err := mgr.StartIndexing(ctx, testTarget(id)); err != nil {
+			t.Fatalf("StartIndexing(%s): %v", id, err)
 		}
 	}
 

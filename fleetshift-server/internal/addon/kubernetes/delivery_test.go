@@ -119,10 +119,10 @@ func TestDeliver_MissingAPIServer(t *testing.T) {
 	ctx := context.Background()
 	target := deliveryTarget("k8s-test", map[string]string{})
 
-	// HandleTargetReady should fail because api_server is missing.
-	err := mgr.HandleTargetReady(ctx, target)
+	// StartIndexing should fail because api_server is missing.
+	err := mgr.StartIndexing(ctx, target)
 	if err == nil {
-		t.Fatal("expected error from HandleTargetReady for missing api_server")
+		t.Fatal("expected error from StartIndexing for missing api_server")
 	}
 	if !strings.Contains(err.Error(), "api_server") {
 		t.Errorf("expected error to mention api_server, got: %v", err)
@@ -142,10 +142,10 @@ func TestDeliver_EmptyAPIServer(t *testing.T) {
 	ctx := context.Background()
 	target := deliveryTarget("k8s-test", map[string]string{"api_server": ""})
 
-	// HandleTargetReady should fail because api_server is empty.
-	err := mgr.HandleTargetReady(ctx, target)
+	// StartIndexing should fail because api_server is empty.
+	err := mgr.StartIndexing(ctx, target)
 	if err == nil {
-		t.Fatal("expected error from HandleTargetReady for empty api_server")
+		t.Fatal("expected error from StartIndexing for empty api_server")
 	}
 }
 
@@ -156,9 +156,9 @@ func TestRemove_EmptyAPIServer(t *testing.T) {
 	ctx := context.Background()
 	target := deliveryTarget("k8s-test", map[string]string{"api_server": ""})
 
-	err := mgr.HandleTargetReady(ctx, target)
+	err := mgr.StartIndexing(ctx, target)
 	if err == nil {
-		t.Fatal("expected error from HandleTargetReady for empty api_server")
+		t.Fatal("expected error from StartIndexing for empty api_server")
 	}
 
 	// Remove should fail: no agent.
@@ -177,8 +177,8 @@ func TestDeliver_MissingToken(t *testing.T) {
 		"api_server": "https://127.0.0.1:6443",
 	})
 
-	if err := mgr.HandleTargetReady(ctx, target); err != nil {
-		t.Fatalf("HandleTargetReady: %v", err)
+	if err := mgr.StartIndexing(ctx, target); err != nil {
+		t.Fatalf("StartIndexing: %v", err)
 	}
 
 	// Deliver without a token should fail with ErrInvalidArgument.
@@ -201,8 +201,8 @@ func TestDeliver_BadAPIServer(t *testing.T) {
 		"api_server": "https://127.0.0.1:1",
 	})
 
-	if err := mgr.HandleTargetReady(ctx, target); err != nil {
-		t.Fatalf("HandleTargetReady: %v", err)
+	if err := mgr.StartIndexing(ctx, target); err != nil {
+		t.Fatalf("StartIndexing: %v", err)
 	}
 
 	manifests := []domain.Manifest{{
@@ -229,9 +229,9 @@ func TestRemove_MissingAPIServer(t *testing.T) {
 	ctx := context.Background()
 	target := deliveryTarget("k8s-test", map[string]string{})
 
-	// HandleTargetReady should fail.
-	if err := mgr.HandleTargetReady(ctx, target); err == nil {
-		t.Fatal("expected error from HandleTargetReady for missing api_server")
+	// StartIndexing should fail.
+	if err := mgr.StartIndexing(ctx, target); err == nil {
+		t.Fatal("expected error from StartIndexing for missing api_server")
 	}
 
 	// Remove should fail: no agent.
@@ -250,8 +250,8 @@ func TestRemove_EmptyManifests(t *testing.T) {
 		"api_server": "https://127.0.0.1:6443",
 	})
 
-	if err := mgr.HandleTargetReady(ctx, target); err != nil {
-		t.Fatalf("HandleTargetReady: %v", err)
+	if err := mgr.StartIndexing(ctx, target); err != nil {
+		t.Fatalf("StartIndexing: %v", err)
 	}
 
 	if err := mgr.Remove(ctx, target, "d1", nil, domain.DeliveryAuth{Token: "some-token"}, nil, 1); err != nil {
@@ -277,8 +277,8 @@ func TestDeliver_Unauthorized_ReportsAuthFailed(t *testing.T) {
 		"ca_cert":    tlsServerCAPEM(ts),
 	})
 
-	if err := mgr.HandleTargetReady(ctx, target); err != nil {
-		t.Fatalf("HandleTargetReady: %v", err)
+	if err := mgr.StartIndexing(ctx, target); err != nil {
+		t.Fatalf("StartIndexing: %v", err)
 	}
 
 	manifests := []domain.Manifest{{
@@ -316,8 +316,8 @@ func TestDeliver_Forbidden_ReportsAuthFailed(t *testing.T) {
 		"ca_cert":    tlsServerCAPEM(ts),
 	})
 
-	if err := mgr.HandleTargetReady(ctx, target); err != nil {
-		t.Fatalf("HandleTargetReady: %v", err)
+	if err := mgr.StartIndexing(ctx, target); err != nil {
+		t.Fatalf("StartIndexing: %v", err)
 	}
 
 	manifests := []domain.Manifest{{
@@ -349,8 +349,8 @@ func TestDeliver_AttestationFailure_ReturnsAuthFailed(t *testing.T) {
 		"trust_bundle": trustBundle,
 	})
 
-	if err := mgr.HandleTargetReady(ctx, target); err != nil {
-		t.Fatalf("HandleTargetReady: %v", err)
+	if err := mgr.StartIndexing(ctx, target); err != nil {
+		t.Fatalf("StartIndexing: %v", err)
 	}
 
 	att := &domain.Attestation{
@@ -385,8 +385,8 @@ func TestDeliver_WithAttestation_NoTrustBundle_ReturnsAuthFailed(t *testing.T) {
 		"api_server": "https://127.0.0.1:6443",
 	})
 
-	if err := mgr.HandleTargetReady(ctx, target); err != nil {
-		t.Fatalf("HandleTargetReady: %v", err)
+	if err := mgr.StartIndexing(ctx, target); err != nil {
+		t.Fatalf("StartIndexing: %v", err)
 	}
 
 	att := &domain.Attestation{
@@ -423,8 +423,8 @@ func TestDeliver_VerifierCacheReuse(t *testing.T) {
 		"trust_bundle": trustBundle,
 	})
 
-	if err := mgr.HandleTargetReady(ctx, target); err != nil {
-		t.Fatalf("HandleTargetReady: %v", err)
+	if err := mgr.StartIndexing(ctx, target); err != nil {
+		t.Fatalf("StartIndexing: %v", err)
 	}
 
 	att := &domain.Attestation{
@@ -464,8 +464,8 @@ func TestDeliver_WithAttestation_NoTokenRequired(t *testing.T) {
 		"trust_bundle": trustBundle,
 	})
 
-	if err := mgr.HandleTargetReady(ctx, target); err != nil {
-		t.Fatalf("HandleTargetReady: %v", err)
+	if err := mgr.StartIndexing(ctx, target); err != nil {
+		t.Fatalf("StartIndexing: %v", err)
 	}
 
 	att := &domain.Attestation{
@@ -502,8 +502,8 @@ func TestRemove_AttestationFailure_ReportsAuthFailed(t *testing.T) {
 		"trust_bundle": trustBundle,
 	})
 
-	if err := mgr.HandleTargetReady(ctx, target); err != nil {
-		t.Fatalf("HandleTargetReady: %v", err)
+	if err := mgr.StartIndexing(ctx, target); err != nil {
+		t.Fatalf("StartIndexing: %v", err)
 	}
 
 	att := &domain.Attestation{
@@ -541,8 +541,8 @@ func TestRemove_WithAttestation_NoTrustBundle_ReportsAuthFailed(t *testing.T) {
 		"api_server": "https://127.0.0.1:6443",
 	})
 
-	if err := mgr.HandleTargetReady(ctx, target); err != nil {
-		t.Fatalf("HandleTargetReady: %v", err)
+	if err := mgr.StartIndexing(ctx, target); err != nil {
+		t.Fatalf("StartIndexing: %v", err)
 	}
 
 	att := &domain.Attestation{

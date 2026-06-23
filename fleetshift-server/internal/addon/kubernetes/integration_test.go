@@ -861,8 +861,8 @@ func setupE2E(t *testing.T, opts ...setupOption) *e2eFixture {
 	if err := h.Targets.Register(ctx, target); err != nil {
 		t.Fatalf("Register target: %v", err)
 	}
-	if err := k8sMgr.HandleTargetReady(ctx, target); err != nil {
-		t.Fatalf("HandleTargetReady: %v", err)
+	if err := k8sMgr.StartIndexing(ctx, target); err != nil {
+		t.Fatalf("StartIndexing: %v", err)
 	}
 
 	// Create a test-specific namespace.

@@ -659,6 +659,12 @@ func (s *OrchestrationWorkflowSpec) CleanupDeliveryData() Activity[FulfillmentID
 		defer tx.Rollback()
 
 		for _, targetID := range plan.targetIDs {
+			if err := tx.Edges().DeleteByTarget(ctx, targetID); err != nil {
+				return struct{}{}, fmt.Errorf("delete edges for target %s: %w", targetID, err)
+			}
+			if err := tx.Inventory().DeleteByTarget(ctx, targetID); err != nil {
+				return struct{}{}, fmt.Errorf("delete observed inventory for target %s: %w", targetID, err)
+			}
 			if err := tx.Targets().Delete(ctx, targetID); err != nil && !errors.Is(err, ErrNotFound) {
 				return struct{}{}, fmt.Errorf("delete provisioned target %s: %w", targetID, err)
 			}
