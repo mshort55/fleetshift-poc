@@ -1,15 +1,22 @@
 package domain
 
+import "fmt"
+
 // TargetID uniquely identifies a target within the platform.
 type TargetID string
+
+// NewTargetID validates and returns a [TargetID]. It rejects empty values.
+func NewTargetID(s string) (TargetID, error) {
+	if s == "" {
+		return "", fmt.Errorf("target id: %w: must not be empty", ErrInvalidArgument)
+	}
+	return TargetID(s), nil
+}
 
 // TargetType identifies the kind of target and determines which
 // [DeliveryAgent] handles delivery. Built-in types include "kubernetes",
 // "platform", and "local"; addons register additional types.
 type TargetType string
-
-// DeploymentID uniquely identifies a deployment.
-type DeploymentID string
 
 // Generation is a monotonically increasing counter on a [Fulfillment].
 // It is bumped on every mutation (create, invalidation, resume, delete)

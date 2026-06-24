@@ -10,24 +10,20 @@ import (
 	"github.com/fleetshift/fleetshift-poc/fleetshift-server/internal/domain"
 )
 
+// SchemaRegistrationID is an opaque token returned by
+// [SchemaActivator.Activate] that identifies a schema registration.
+// The application layer stores it and passes it back to Deactivate;
+// it must not interpret or parse the value.
+type SchemaRegistrationID string
+
 // SchemaActivator compiles and registers the transport-layer API
 // surface for a managed resource schema. The application layer calls
 // this without knowing about proto compilation, gRPC service
 // descriptors, or HTTP muxes — the implementation lives in the
 // transport layer.
 type SchemaActivator interface {
-	Activate(ctx context.Context, schema domain.ManagedResourceSchema) (SchemaHandle, error)
-	Deactivate(handle SchemaHandle)
-}
-
-// SchemaHandle is an opaque token returned by [SchemaActivator.Activate]
-// that identifies the transport registrations so they can be torn down.
-// It carries enough information for [SchemaActivator.Deactivate] to
-// remove every handler installed by activation without re-deriving paths.
-type SchemaHandle struct {
-	GRPCServiceName string
-	HTTPPrefix      string
-	DescriptorPath  string
+	Activate(ctx context.Context, schema domain.ManagedResourceSchema) (SchemaRegistrationID, error)
+	Deactivate(id SchemaRegistrationID)
 }
 
 // DeliveryAgentRegistry manages the mapping from [domain.TargetType] to
@@ -53,10 +49,21 @@ type AddonManagerDeps struct {
 type AddonManager struct {
 	mu     sync.RWMutex
 	addons map[domain.AddonID]*addonRecord
+	now    func() time.Time
 
 	router    DeliveryAgentRegistry
 	typeSvc   *ManagedResourceTypeService
 	activator SchemaActivator
+}
+
+// AddonManagerOption configures an [AddonManager].
+type AddonManagerOption func(*AddonManager)
+
+// WithAddonManagerClock overrides the wall-clock used for addon
+// lifecycle timestamps (e.g. EnabledAt, ConnectedAt). Defaults to
+// [time.Now].
+func WithAddonManagerClock(fn func() time.Time) AddonManagerOption {
+	return func(m *AddonManager) { m.now = fn }
 }
 
 // addonRecord is the in-memory state for an addon within the manager.
@@ -66,18 +73,24 @@ type addonRecord struct {
 	// Keyed by resource type so connectSchemas can reconcile the new
 	// input against existing state and deactivate stale schemas.
 	// Content-change detection is handled by the SchemaActivator itself.
-	schemaHandles      map[domain.ResourceType]SchemaHandle
-	registeredTypeDefs map[domain.ResourceType]struct{}
+	schemaRegistrations map[domain.ResourceType]SchemaRegistrationID
+	registeredTypeDefs  map[domain.ResourceType]struct{}
 }
 
-// NewAddonManager creates a new manager with the given dependencies.
-func NewAddonManager(deps AddonManagerDeps) *AddonManager {
-	return &AddonManager{
+// NewAddonManager creates a new manager with the given dependencies
+// and options.
+func NewAddonManager(deps AddonManagerDeps, opts ...AddonManagerOption) *AddonManager {
+	m := &AddonManager{
 		addons:    make(map[domain.AddonID]*addonRecord),
+		now:       time.Now,
 		router:    deps.Router,
 		typeSvc:   deps.TypeSvc,
 		activator: deps.Activator,
 	}
+	for _, o := range opts {
+		o(m)
+	}
+	return m
 }
 
 // Enable authorizes and records an addon's declared capabilities.
@@ -97,11 +110,11 @@ func (m *AddonManager) Enable(_ context.Context, desc domain.AddonDescriptor) er
 		rec.addon.Name = desc.Name
 		rec.addon.State = domain.AddonStateEnabled
 		rec.addon.Capabilities = desc.Capabilities
-		rec.addon.EnabledAt = time.Now().UTC()
+		rec.addon.EnabledAt = m.now()
 		return nil
 	}
 
-	now := time.Now().UTC()
+	now := m.now()
 	m.addons[desc.ID] = &addonRecord{
 		addon: domain.Addon{
 			ID:           desc.ID,
@@ -171,7 +184,7 @@ func (m *AddonManager) Connect(ctx context.Context, addonID domain.AddonID, in C
 		return err
 	}
 
-	now := time.Now().UTC()
+	now := m.now()
 	rec.addon.State = domain.AddonStateConnected
 	rec.addon.ConnectedAt = &now
 	return nil
@@ -189,7 +202,7 @@ func (m *AddonManager) connectSchemas(ctx context.Context, rec *addonRecord, sch
 		newTypes[s.ResourceType] = struct{}{}
 	}
 
-	for rt := range rec.schemaHandles {
+	for rt := range rec.schemaRegistrations {
 		if _, stillPresent := newTypes[rt]; !stillPresent {
 			m.deactivateSchema(ctx, rec, rt)
 		}
@@ -207,9 +220,9 @@ func (m *AddonManager) connectSchemas(ctx context.Context, rec *addonRecord, sch
 }
 
 func (m *AddonManager) deactivateSchema(ctx context.Context, rec *addonRecord, rt domain.ResourceType) {
-	if handle, ok := rec.schemaHandles[rt]; ok {
-		m.activator.Deactivate(handle)
-		delete(rec.schemaHandles, rt)
+	if id, ok := rec.schemaRegistrations[rt]; ok {
+		m.activator.Deactivate(id)
+		delete(rec.schemaRegistrations, rt)
 	}
 	if _, ok := rec.registeredTypeDefs[rt]; ok {
 		_ = m.typeSvc.Delete(ctx, rt)
@@ -231,7 +244,7 @@ func (m *AddonManager) connectDeliveryAgent(rec *addonRecord, agent domain.Deliv
 }
 
 func (m *AddonManager) connectTargets(ctx context.Context, rec *addonRecord, targets []domain.TargetInfo) error {
-	targetSvc := &TargetService{Store: m.typeSvc.Store}
+	targetSvc := &TargetService{Store: m.typeSvc.Store()}
 	for _, t := range targets {
 		if err := targetSvc.Register(ctx, t); err != nil {
 			if errors.Is(err, domain.ErrAlreadyExists) {
@@ -292,7 +305,7 @@ func (m *AddonManager) Disable(ctx context.Context, addonID domain.AddonID) erro
 		rec.agent = nil
 	}
 
-	for rt := range rec.schemaHandles {
+	for rt := range rec.schemaRegistrations {
 		m.deactivateSchema(ctx, rec, rt)
 	}
 
@@ -328,24 +341,35 @@ func validateSchemaCapability(rec *addonRecord, schema domain.ManagedResourceSch
 }
 
 // activateSchema delegates to the SchemaActivator and records the
-// resulting handle and type def.
+// resulting registration ID and type def.
+//
+// Type metadata is validated before activation so that a CreateType or
+// drift-detection failure never leaves routes live with no matching
+// type definition (and never tears down the previous registration).
 func (m *AddonManager) activateSchema(ctx context.Context, rec *addonRecord, schema domain.ManagedResourceSchema) error {
-	handle, err := m.activator.Activate(ctx, schema)
-	if err != nil {
-		return err
-	}
-	if rec.schemaHandles == nil {
-		rec.schemaHandles = make(map[domain.ResourceType]SchemaHandle)
-	}
-	rec.schemaHandles[schema.ResourceType] = handle
-
+	// Validate / register the type definition first — this is
+	// side-effect-free with respect to the transport layer, so
+	// a failure here keeps the previous registration intact.
 	if _, ok := rec.registeredTypeDefs[schema.ResourceType]; !ok {
-		if _, err := m.typeSvc.Create(ctx, CreateTypeInput{
-			ResourceType: schema.ResourceType,
-			Relation:     schema.Relation,
-			Signature:    domain.Signature{},
-		}); err != nil && !errors.Is(err, domain.ErrAlreadyExists) {
-			return fmt.Errorf("create type def: %w", err)
+		newSvc := domain.ServiceName(schema.APIServiceName)
+		newVer := domain.APIVersion(schema.Version)
+		newCol := domain.CollectionID(schema.CollectionID)
+
+		_, err := m.typeSvc.Create(ctx, CreateTypeInput{
+			ResourceType:   schema.ResourceType,
+			Relation:       schema.Relation,
+			Signature:      domain.Signature{},
+			APIServiceName: newSvc,
+			APIVersion:     newVer,
+			CollectionID:   newCol,
+		})
+		if err != nil {
+			if !errors.Is(err, domain.ErrAlreadyExists) {
+				return fmt.Errorf("create type def: %w", err)
+			}
+			if err := m.detectAPIMetadataDrift(ctx, schema.ResourceType, newSvc, newVer, newCol); err != nil {
+				return err
+			}
 		}
 		if rec.registeredTypeDefs == nil {
 			rec.registeredTypeDefs = make(map[domain.ResourceType]struct{})
@@ -353,5 +377,40 @@ func (m *AddonManager) activateSchema(ctx context.Context, rec *addonRecord, sch
 		rec.registeredTypeDefs[schema.ResourceType] = struct{}{}
 	}
 
+	id, err := m.activator.Activate(ctx, schema)
+	if err != nil {
+		return err
+	}
+	if rec.schemaRegistrations == nil {
+		rec.schemaRegistrations = make(map[domain.ResourceType]SchemaRegistrationID)
+	}
+
+	// If the registration ID changed (e.g. the gRPC service name
+	// changed due to a package rename), deactivate the old one so
+	// its gRPC/HTTP routes don't leak.
+	if prev, ok := rec.schemaRegistrations[schema.ResourceType]; ok && prev != id {
+		m.activator.Deactivate(prev)
+	}
+	rec.schemaRegistrations[schema.ResourceType] = id
+
+	return nil
+}
+
+// detectAPIMetadataDrift loads the existing type def and rejects
+// reconnection attempts that change the API identity fields.
+func (m *AddonManager) detectAPIMetadataDrift(ctx context.Context, rt domain.ResourceType, newSvc domain.ServiceName, newVer domain.APIVersion, newCol domain.CollectionID) error {
+	existing, err := m.typeSvc.Get(ctx, rt)
+	if err != nil {
+		return fmt.Errorf("load existing type def for drift detection: %w", err)
+	}
+	if existing.APIServiceName != newSvc {
+		return fmt.Errorf("%w: API service name drift: existing %q, new %q", domain.ErrInvalidArgument, existing.APIServiceName, newSvc)
+	}
+	if existing.APIVersion != newVer {
+		return fmt.Errorf("%w: API version drift: existing %q, new %q", domain.ErrInvalidArgument, existing.APIVersion, newVer)
+	}
+	if existing.CollectionID != newCol {
+		return fmt.Errorf("%w: collection ID drift: existing %q, new %q", domain.ErrInvalidArgument, existing.CollectionID, newCol)
+	}
 	return nil
 }

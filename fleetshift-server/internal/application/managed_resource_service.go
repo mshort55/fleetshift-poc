@@ -151,9 +151,7 @@ func (s *ManagedResourceService) List(ctx context.Context, rt domain.ResourceTyp
 	return views, tx.Commit()
 }
 
-// Delete starts the delete workflow for a managed resource. If the
-// fulfillment is already deleting and not paused, the current view is
-// returned without starting a new workflow (idempotent).
+// Delete starts the delete workflow for a managed resource.
 func (s *ManagedResourceService) Delete(ctx context.Context, rt domain.ResourceType, name domain.ResourceName) (domain.ManagedResourceView, error) {
 	var auth domain.DeliveryAuth
 	ac := AuthFromContext(ctx)
@@ -171,22 +169,20 @@ func (s *ManagedResourceService) Delete(ctx context.Context, rt domain.ResourceT
 	}
 	defer tx.Rollback()
 
-	view, err := tx.ManagedResources().GetView(ctx, rt, name)
+	typeDef, err := tx.ManagedResources().GetType(ctx, rt)
 	if err != nil {
-		return domain.ManagedResourceView{}, err
-	}
-	if err := tx.Commit(); err != nil {
-		return domain.ManagedResourceView{}, fmt.Errorf("commit read tx: %w", err)
+		return domain.ManagedResourceView{}, fmt.Errorf("lookup type %q: %w", rt, err)
 	}
 
-	if view.Fulfillment.State() == domain.FulfillmentStateDeleting && !view.Fulfillment.Paused() {
-		return view, nil
+	if err := tx.Commit(); err != nil {
+		return domain.ManagedResourceView{}, fmt.Errorf("commit read tx: %w", err)
 	}
 
 	exec, err := s.DeleteWF.Start(ctx, domain.DeleteManagedResourceInput{
 		ResourceType: rt,
 		Name:         name,
 		Auth:         auth,
+		TypeDef:      typeDef,
 	})
 	if err != nil {
 		return domain.ManagedResourceView{}, fmt.Errorf("start delete workflow: %w", err)

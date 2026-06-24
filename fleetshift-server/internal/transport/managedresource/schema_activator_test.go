@@ -17,18 +17,26 @@ import (
 	"google.golang.org/protobuf/reflect/protoreflect"
 	"google.golang.org/protobuf/types/dynamicpb"
 
+	gcphcpaddon "github.com/fleetshift/fleetshift-poc/fleetshift-server/internal/addon/gcphcp"
 	kindaddon "github.com/fleetshift/fleetshift-poc/fleetshift-server/internal/addon/kind"
 	"github.com/fleetshift/fleetshift-poc/fleetshift-server/internal/application"
 	"github.com/fleetshift/fleetshift-poc/fleetshift-server/internal/domain"
 	"github.com/fleetshift/fleetshift-poc/fleetshift-server/internal/infrastructure/delivery"
 	"github.com/fleetshift/fleetshift-poc/fleetshift-server/internal/infrastructure/memworkflow"
 	"github.com/fleetshift/fleetshift-poc/fleetshift-server/internal/infrastructure/sqlite"
+	"github.com/fleetshift/fleetshift-poc/fleetshift-server/internal/testutil"
+	"github.com/fleetshift/fleetshift-poc/fleetshift-server/internal/transport/dynamicapi"
 	"github.com/fleetshift/fleetshift-poc/fleetshift-server/internal/transport/managedresource"
+	"github.com/fleetshift/fleetshift-poc/fleetshift-server/internal/transport/platformresource"
 )
 
-func newActivator(t *testing.T) (*managedresource.DynamicSchemaActivator, *managedresource.DynamicServiceMux) {
+func widgetRel() domain.RegisteredSelfTarget {
+	return domain.NewRegisteredSelfTarget("widget-addon", "widgets")
+}
+
+func newActivator(t *testing.T) (*managedresource.DynamicSchemaActivator, *dynamicapi.DynamicServiceMux) {
 	t.Helper()
-	mux := managedresource.NewDynamicServiceMux()
+	mux := dynamicapi.NewDynamicServiceMux()
 	validator, err := protovalidate.New()
 	if err != nil {
 		t.Fatalf("protovalidate.New: %v", err)
@@ -41,8 +49,8 @@ func newActivator(t *testing.T) (*managedresource.DynamicSchemaActivator, *manag
 
 type activatorHTTPEnv struct {
 	activator *managedresource.DynamicSchemaActivator
-	grpcMux   *managedresource.DynamicServiceMux
-	httpMux   *managedresource.DynamicHTTPMux
+	grpcMux   *dynamicapi.DynamicServiceMux
+	httpMux   *dynamicapi.DynamicHTTPMux
 	httpURL   string
 }
 
@@ -51,7 +59,7 @@ type activatorHTTPEnv struct {
 // to. The returned httpURL is the base URL for the httptest server.
 func newActivatorWithHTTP(t *testing.T) activatorHTTPEnv {
 	t.Helper()
-	grpcMux := managedresource.NewDynamicServiceMux()
+	grpcMux := dynamicapi.NewDynamicServiceMux()
 
 	validator, err := protovalidate.New()
 	if err != nil {
@@ -84,7 +92,7 @@ func newActivatorWithHTTP(t *testing.T) activatorHTTPEnv {
 	}
 	t.Cleanup(func() { conn.Close() })
 
-	httpMux := managedresource.NewDynamicHTTPMux(nil, conn)
+	httpMux := dynamicapi.NewDynamicHTTPMux(nil, conn)
 
 	ts := httptest.NewServer(httpMux.ServeMux())
 	t.Cleanup(ts.Close)
@@ -101,20 +109,30 @@ func newActivatorWithHTTP(t *testing.T) activatorHTTPEnv {
 	}
 }
 
+func newActivatorWithHTTPAndPlatform(t *testing.T) activatorHTTPEnv {
+	t.Helper()
+
+	env := newActivatorWithHTTP(t)
+	db := sqlite.OpenTestDB(t)
+	store := &sqlite.Store{DB: db}
+	env.activator.PlatformDeps = platformresource.Deps{
+		Resources: application.NewPlatformResourceService(store),
+	}
+
+	return env
+}
+
 func TestDynamicSchemaActivator_ActivateRegistersService(t *testing.T) {
 	activator, mux := newActivator(t)
 
 	schema := kindaddon.Schema()
-	handle, err := activator.Activate(context.Background(), schema)
+	id, err := activator.Activate(context.Background(), schema)
 	if err != nil {
 		t.Fatalf("Activate: %v", err)
 	}
 
-	if handle.GRPCServiceName != "kind.fleetshift.v1.ClusterService" {
-		t.Errorf("handle.GRPCServiceName = %q, want kind.fleetshift.v1.ClusterService", handle.GRPCServiceName)
-	}
-	if handle.HTTPPrefix != "/apis/kind.fleetshift.io/v1/clusters" {
-		t.Errorf("handle.HTTPPrefix = %q, want /apis/kind.fleetshift.io/v1/clusters", handle.HTTPPrefix)
+	if id != "kind.fleetshift.v1.ClusterService" {
+		t.Errorf("registration ID = %q, want kind.fleetshift.v1.ClusterService", id)
 	}
 
 	info := mux.ServiceInfo()
@@ -131,12 +149,12 @@ func TestDynamicSchemaActivator_DeactivateRemovesService(t *testing.T) {
 	activator, mux := newActivator(t)
 
 	schema := kindaddon.Schema()
-	handle, err := activator.Activate(context.Background(), schema)
+	id, err := activator.Activate(context.Background(), schema)
 	if err != nil {
 		t.Fatalf("Activate: %v", err)
 	}
 
-	activator.Deactivate(handle)
+	activator.Deactivate(id)
 
 	if _, ok := mux.ServiceInfo()["kind.fleetshift.v1.ClusterService"]; ok {
 		t.Error("expected ClusterService removed from mux after Deactivate")
@@ -170,12 +188,12 @@ func TestDynamicSchemaActivator_ChangedContentSwapsAtomically(t *testing.T) {
 	activator, mux := newActivator(t)
 
 	schema := kindaddon.Schema()
-	h1, err := activator.Activate(context.Background(), schema)
+	id1, err := activator.Activate(context.Background(), schema)
 	if err != nil {
 		t.Fatalf("first Activate: %v", err)
 	}
 
-	hash1, _ := activator.ContentHash(h1.GRPCServiceName)
+	hash1, _ := activator.ContentHash(string(id1))
 
 	schema.ProtoFiles = map[string]string{
 		"cluster_spec.proto": `syntax = "proto3"; message ClusterSpecV2 { string name = 1; }`,
@@ -183,16 +201,16 @@ func TestDynamicSchemaActivator_ChangedContentSwapsAtomically(t *testing.T) {
 	schema.EntryFile = "cluster_spec.proto"
 	schema.SpecMessage = "ClusterSpecV2"
 
-	h2, err := activator.Activate(context.Background(), schema)
+	id2, err := activator.Activate(context.Background(), schema)
 	if err != nil {
 		t.Fatalf("second Activate: %v", err)
 	}
 
-	if h2.GRPCServiceName != h1.GRPCServiceName {
-		t.Errorf("service name changed: %q vs %q", h1.GRPCServiceName, h2.GRPCServiceName)
+	if id2 != id1 {
+		t.Errorf("registration ID changed: %q vs %q", id1, id2)
 	}
 
-	hash2, _ := activator.ContentHash(h2.GRPCServiceName)
+	hash2, _ := activator.ContentHash(string(id2))
 	if hash1 == hash2 {
 		t.Error("expected content hash to change after schema update")
 	}
@@ -206,18 +224,18 @@ func TestDynamicSchemaActivator_ReactivateAfterDeactivate(t *testing.T) {
 	activator, mux := newActivator(t)
 
 	schema := kindaddon.Schema()
-	handle, err := activator.Activate(context.Background(), schema)
+	id, err := activator.Activate(context.Background(), schema)
 	if err != nil {
 		t.Fatalf("Activate: %v", err)
 	}
-	activator.Deactivate(handle)
+	activator.Deactivate(id)
 
-	h2, err := activator.Activate(context.Background(), schema)
+	id2, err := activator.Activate(context.Background(), schema)
 	if err != nil {
 		t.Fatalf("re-Activate: %v", err)
 	}
-	if h2.GRPCServiceName != handle.GRPCServiceName {
-		t.Errorf("service name changed: %q vs %q", handle.GRPCServiceName, h2.GRPCServiceName)
+	if id2 != id {
+		t.Errorf("registration ID changed: %q vs %q", id, id2)
 	}
 	if _, ok := mux.ServiceInfo()["kind.fleetshift.v1.ClusterService"]; !ok {
 		t.Error("expected ClusterService in mux after re-activation")
@@ -238,7 +256,7 @@ func TestDynamicSchemaActivator_EmptyProtoFilesReturnsError(t *testing.T) {
 
 func TestSchemaContentHash_Deterministic(t *testing.T) {
 	s := domain.ManagedResourceSchema{
-		ResourceType: "clusters",
+		ResourceType: "test.fleetshift.io/Cluster",
 		Singular:     "Cluster",
 		Plural:       "Clusters",
 		SpecMessage:  "ClusterSpec",
@@ -307,12 +325,12 @@ func TestDynamicSchemaActivator_DeactivateRemovesHTTPRoutes(t *testing.T) {
 	env := newActivatorWithHTTP(t)
 
 	schema := kindaddon.Schema()
-	handle, err := env.activator.Activate(context.Background(), schema)
+	id, err := env.activator.Activate(context.Background(), schema)
 	if err != nil {
 		t.Fatalf("Activate: %v", err)
 	}
 
-	env.activator.Deactivate(handle)
+	env.activator.Deactivate(id)
 
 	code := httpStatus(t, env.httpURL+"/apis/kind.fleetshift.io/v1/clusters/test-id")
 	if code != http.StatusNotFound {
@@ -457,7 +475,7 @@ func newActivatorWithResources(t *testing.T) activatorResourceEnv {
 		t.Fatalf("protovalidate.New: %v", err)
 	}
 
-	grpcMux := managedresource.NewDynamicServiceMux()
+	grpcMux := dynamicapi.NewDynamicServiceMux()
 
 	lis := bufconn.Listen(1 << 20)
 	srv := grpc.NewServer(grpc.UnknownServiceHandler(grpcMux.Handle))
@@ -478,7 +496,7 @@ func newActivatorWithResources(t *testing.T) activatorResourceEnv {
 	targetSvc := &application.TargetService{Store: store}
 	if err := targetSvc.Register(context.Background(), domain.TargetInfoFromSnapshot(domain.TargetInfoSnapshot{
 		ID: "widget-addon", Type: widgetTargetType, Name: "Widget Addon",
-		AcceptedResourceTypes: []domain.ResourceType{"widgets"},
+		AcceptedManifestTypes: []domain.ManifestType{"widgets"},
 	})); err != nil {
 		t.Fatalf("register target: %v", err)
 	}
@@ -492,7 +510,7 @@ func newActivatorWithResources(t *testing.T) activatorResourceEnv {
 			},
 		},
 		conn:    conn,
-		typeSvc: &application.ManagedResourceTypeService{Store: store},
+		typeSvc: application.NewManagedResourceTypeService(store),
 	}
 }
 
@@ -507,7 +525,7 @@ func widgetDescriptors(t *testing.T, schema domain.ManagedResourceSchema) *manag
 		entryFile = name
 		break
 	}
-	specDesc, err := managedresource.CompileInline(
+	specDesc, err := dynamicapi.CompileInline(
 		context.Background(),
 		schema.ProtoFiles,
 		entryFile,
@@ -517,12 +535,14 @@ func widgetDescriptors(t *testing.T, schema domain.ManagedResourceSchema) *manag
 		t.Fatalf("CompileInline: %v", err)
 	}
 	descs, err := managedresource.BuildServiceDescriptors(&managedresource.ResourceTypeConfig{
+		CollectionConfig: dynamicapi.CollectionConfig{
+			Version:      schema.Version,
+			CollectionID: schema.CollectionID,
+			Singular:     schema.Singular,
+			Plural:       schema.Plural,
+		},
 		ResourceType:   schema.ResourceType,
 		APIServiceName: schema.APIServiceName,
-		Version:        schema.Version,
-		CollectionID:   schema.CollectionID,
-		Singular:       schema.Singular,
-		Plural:         schema.Plural,
 		ProtoPackage:   schema.ProtoPackage,
 		SpecMessage:    protoreflect.FullName(schema.SpecMessage),
 		SpecDescriptor: specDesc.Message,
@@ -539,7 +559,7 @@ func TestDynamicSchemaActivator_SwapChangesRequestHandling(t *testing.T) {
 
 	// v1: name is required.
 	v1 := domain.ManagedResourceSchema{
-		ResourceType:   "widgets",
+		ResourceType:   "test.fleetshift.io/Widget",
 		APIServiceName: "fleetshift.io",
 		ProtoPackage:   "fleetshift.v1",
 		Version:        "v1",
@@ -554,12 +574,12 @@ message WidgetSpec {
   string name = 1 [(buf.validate.field).required = true];
 }`,
 		},
-		Relation: domain.RegisteredSelfTarget{AddonTarget: "widget-addon"},
+		Relation: widgetRel(),
 	}
 
 	// v2: name is optional.
 	v2 := domain.ManagedResourceSchema{
-		ResourceType:   "widgets",
+		ResourceType:   "test.fleetshift.io/Widget",
 		APIServiceName: "fleetshift.io",
 		ProtoPackage:   "fleetshift.v1",
 		Version:        "v1",
@@ -573,14 +593,17 @@ message WidgetSpec {
   string name = 1;
 }`,
 		},
-		Relation: domain.RegisteredSelfTarget{AddonTarget: "widget-addon"},
+		Relation: widgetRel(),
 	}
 
 	// Register the widget type in the store so Create can look it up.
 	if _, err := env.typeSvc.Create(ctx, application.CreateTypeInput{
-		ResourceType: "widgets",
-		Relation:     domain.RegisteredSelfTarget{AddonTarget: "widget-addon"},
-		Signature:    domain.Signature{},
+		ResourceType:   "test.fleetshift.io/Widget",
+		Relation:       widgetRel(),
+		Signature:      domain.Signature{},
+		APIServiceName: "fleetshift.io",
+		APIVersion:     "v1",
+		CollectionID:   "widgets",
 	}); err != nil {
 		t.Fatalf("register widget type: %v", err)
 	}
@@ -649,4 +672,598 @@ message WidgetSpec {
 	}
 }
 
+// ---------------------------------------------------------------------------
+// Platform refcounting tests
+// ---------------------------------------------------------------------------
+
+// newActivatorWithPlatform creates an activator wired with a real
+// PlatformResourceService backed by an in-memory SQLite store. This is
+// the minimal setup needed for the platform refcounting code path.
+func newActivatorWithPlatform(t *testing.T) (*managedresource.DynamicSchemaActivator, *dynamicapi.DynamicServiceMux) {
+	t.Helper()
+	mux := dynamicapi.NewDynamicServiceMux()
+	validator, err := protovalidate.New()
+	if err != nil {
+		t.Fatalf("protovalidate.New: %v", err)
+	}
+	db := sqlite.OpenTestDB(t)
+	store := &sqlite.Store{DB: db}
+	return &managedresource.DynamicSchemaActivator{
+		GRPCMux:      mux,
+		Deps:         managedresource.Deps{Validator: validator},
+		PlatformDeps: platformresource.Deps{Resources: application.NewPlatformResourceService(store)},
+	}, mux
+}
+
+func TestDualRegistration(t *testing.T) {
+	activator, mux := newActivatorWithPlatform(t)
+
+	schema := kindaddon.Schema()
+	id, err := activator.Activate(context.Background(), schema)
+	if err != nil {
+		t.Fatalf("Activate: %v", err)
+	}
+
+	info := mux.ServiceInfo()
+
+	// Extension gRPC service must be routable.
+	if _, ok := info["kind.fleetshift.v1.ClusterService"]; !ok {
+		t.Error("expected extension ClusterService in mux after Activate")
+	}
+
+	// Platform gRPC service must also be routable.
+	if _, ok := info["fleetshift.v1.PlatformClusterService"]; !ok {
+		t.Error("expected PlatformClusterService in mux after Activate")
+	}
+
+	if id != "kind.fleetshift.v1.ClusterService" {
+		t.Errorf("registration ID = %q, want kind.fleetshift.v1.ClusterService", id)
+	}
+}
+
+func TestPlatformRefCounting(t *testing.T) {
+	activator, mux := newActivatorWithPlatform(t)
+	ctx := context.Background()
+	const platformSvc = "fleetshift.v1.PlatformClusterService"
+
+	// Step 1: activate Kind (collection: "clusters")
+	kindID, err := activator.Activate(ctx, kindaddon.Schema())
+	if err != nil {
+		t.Fatalf("Activate Kind: %v", err)
+	}
+	if _, ok := mux.ServiceInfo()[platformSvc]; !ok {
+		t.Fatal("Kind activation should create the platform service (refcount 0→1)")
+	}
+
+	// Step 2: activate GCP HCP (same collection: "clusters"), but with
+	// a different extension API version. This should still share the same
+	// platform service.
+	gcphcpSchema := gcphcpaddon.Schema("gcphcp-test")
+	gcphcpSchema.Version = "v2"
+
+	gcpID, err := activator.Activate(ctx, gcphcpSchema)
+	if err != nil {
+		t.Fatalf("Activate GCPHCP: %v", err)
+	}
+
+	// Step 3: one platform service exists
+	if _, ok := mux.ServiceInfo()[platformSvc]; !ok {
+		t.Fatal("platform service should be routable after two extensions activated")
+	}
+
+	// Step 4: deactivate Kind → platform still alive (refcount 2→1)
+	activator.Deactivate(kindID)
+	if _, ok := mux.ServiceInfo()[platformSvc]; !ok {
+		t.Fatal("platform service should survive after deactivating one of two extensions")
+	}
+
+	// Step 5: deactivate GCP HCP → platform removed (refcount 1→0)
+	activator.Deactivate(gcpID)
+
+	// Step 6: platform no longer routable
+	if _, ok := mux.ServiceInfo()[platformSvc]; ok {
+		t.Error("platform service should be removed after all extensions deactivated")
+	}
+}
+
+func TestReplaceDoesNotDropPlatform(t *testing.T) {
+	activator, mux := newActivatorWithPlatform(t)
+	ctx := context.Background()
+	const platformSvc = "fleetshift.v1.PlatformClusterService"
+
+	// Activate Kind.
+	_, err := activator.Activate(ctx, kindaddon.Schema())
+	if err != nil {
+		t.Fatalf("Activate: %v", err)
+	}
+	if _, ok := mux.ServiceInfo()[platformSvc]; !ok {
+		t.Fatal("platform service should exist after initial activation")
+	}
+
+	// Replace: modify a proto file comment so content hash changes, but
+	// keep the same CollectionID.
+	modified := kindaddon.Schema()
+	for k, v := range modified.ProtoFiles {
+		modified.ProtoFiles[k] = "// replaced for test\n" + v
+	}
+
+	_, err = activator.Activate(ctx, modified)
+	if err != nil {
+		t.Fatalf("Activate (replace): %v", err)
+	}
+
+	if _, ok := mux.ServiceInfo()[platformSvc]; !ok {
+		t.Error("platform service should survive a content-only schema replace")
+	}
+}
+
+func TestPlatformReflection(t *testing.T) {
+	mux := dynamicapi.NewDynamicServiceMux()
+	fileReg := dynamicapi.NewDynamicFileRegistry()
+	validator, err := protovalidate.New()
+	if err != nil {
+		t.Fatalf("protovalidate.New: %v", err)
+	}
+	db := sqlite.OpenTestDB(t)
+	store := &sqlite.Store{DB: db}
+
+	activator := &managedresource.DynamicSchemaActivator{
+		GRPCMux:      mux,
+		FileRegistry: fileReg,
+		Deps:         managedresource.Deps{Validator: validator},
+		PlatformDeps: platformresource.Deps{Resources: application.NewPlatformResourceService(store)},
+	}
+
+	schema := kindaddon.Schema()
+	id, err := activator.Activate(context.Background(), schema)
+	if err != nil {
+		t.Fatalf("Activate: %v", err)
+	}
+
+	const platDescPath = "dynamic/fleetshift/v1/platform_cluster_service.proto"
+	fd, err := fileReg.FindFileByPath(platDescPath)
+	if err != nil {
+		t.Fatalf("platform file descriptor not resolvable after Activate: %v", err)
+	}
+	if string(fd.Path()) != platDescPath {
+		t.Errorf("descriptor path = %q, want %q", fd.Path(), platDescPath)
+	}
+
+	activator.Deactivate(id)
+
+	if _, err := fileReg.FindFileByPath(platDescPath); err == nil {
+		t.Error("platform file descriptor should not be resolvable after Deactivate")
+	}
+}
+
 var _ application.SchemaActivator = (*managedresource.DynamicSchemaActivator)(nil)
+
+// ---------------------------------------------------------------------------
+// Platform version selection tests
+// ---------------------------------------------------------------------------
+
+// TestPlatformHTTPVersionIsFixed verifies that the platform API route
+// comes from the activator, not from the extension schema's Version.
+func TestPlatformHTTPVersionIsFixed(t *testing.T) {
+	env := newActivatorWithHTTPAndPlatform(t)
+
+	schema := kindaddon.Schema()
+	schema.Version = "v2"
+
+	if _, err := env.activator.Activate(context.Background(), schema); err != nil {
+		t.Fatalf("Activate: %v", err)
+	}
+
+	platformV1 := env.httpURL + "/apis/fleetshift.io/" + platformresource.APIVersion + "/clusters"
+	if code := httpStatus(t, platformV1); code != http.StatusOK {
+		t.Fatalf("expected platform route %q to return 200, got %d", platformV1, code)
+	}
+
+	platformV2 := env.httpURL + "/apis/fleetshift.io/v2/clusters"
+	if code := httpStatus(t, platformV2); code != http.StatusNotFound {
+		t.Fatalf("expected platform route %q to be absent, got status %d", platformV2, code)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Cross-API contract: extension create → platform API visibility
+// ---------------------------------------------------------------------------
+
+type activatorPlatformResourceEnv struct {
+	activator *managedresource.DynamicSchemaActivator
+	conn      *grpc.ClientConn
+	typeSvc   *application.ManagedResourceTypeService
+	store     domain.Store
+}
+
+// newActivatorWithResourcesAndPlatform creates an activator wired with
+// both a ManagedResourceService and a PlatformResourceService backed
+// by the same SQLite store. This lets tests exercise the cross-API
+// contract: creating a managed resource through the extension gRPC
+// service should make it visible through the platform resource API.
+func newActivatorWithResourcesAndPlatform(t *testing.T) activatorPlatformResourceEnv {
+	t.Helper()
+
+	db := sqlite.OpenTestDB(t)
+	store := &sqlite.Store{DB: db}
+
+	recordingAgent := &sqlite.RecordingDeliveryService{
+		Store: store,
+		Now:   func() time.Time { return time.Date(2026, 5, 5, 12, 0, 0, 0, time.UTC) },
+	}
+	router := delivery.NewRoutingDeliveryService()
+	router.Register(widgetTargetType, recordingAgent)
+
+	reg := &memworkflow.Registry{}
+	recordingAgent.Reporter = application.NewDeliveryReportService(store, reg)
+	orchWf, err := reg.RegisterOrchestration(domain.NewOrchestrationWorkflowSpec(
+		store, router, domain.StrategyFactory{Store: store}, reg,
+		domain.WithAckRetryInterval(5*time.Second),
+	))
+	if err != nil {
+		t.Fatalf("RegisterOrchestration: %v", err)
+	}
+	createWf, err := reg.RegisterCreateManagedResource(&domain.CreateManagedResourceWorkflowSpec{
+		Store: store, Orchestration: orchWf,
+	})
+	if err != nil {
+		t.Fatalf("RegisterCreateManagedResource: %v", err)
+	}
+	cleanupWf, err := reg.RegisterDeleteManagedResourceCleanup(&domain.DeleteManagedResourceCleanupWorkflowSpec{Store: store})
+	if err != nil {
+		t.Fatalf("RegisterDeleteManagedResourceCleanup: %v", err)
+	}
+	deleteWf, err := reg.RegisterDeleteManagedResource(&domain.DeleteManagedResourceWorkflowSpec{
+		Store: store, Orchestration: orchWf, Cleanup: cleanupWf,
+	})
+	if err != nil {
+		t.Fatalf("RegisterDeleteManagedResource: %v", err)
+	}
+
+	resourceSvc := &application.ManagedResourceService{
+		Store: store, CreateWF: createWf, DeleteWF: deleteWf,
+	}
+	platformResourceSvc := application.NewPlatformResourceService(store)
+
+	validator, err := protovalidate.New()
+	if err != nil {
+		t.Fatalf("protovalidate.New: %v", err)
+	}
+
+	grpcMux := dynamicapi.NewDynamicServiceMux()
+
+	lis := bufconn.Listen(1 << 20)
+	srv := grpc.NewServer(grpc.UnknownServiceHandler(grpcMux.Handle))
+	go func() { _ = srv.Serve(lis) }()
+	t.Cleanup(srv.GracefulStop)
+
+	conn, err := grpc.NewClient("passthrough:///bufconn",
+		grpc.WithContextDialer(func(ctx context.Context, _ string) (net.Conn, error) {
+			return lis.DialContext(ctx)
+		}),
+		grpc.WithTransportCredentials(insecure.NewCredentials()),
+	)
+	if err != nil {
+		t.Fatalf("dial bufconn: %v", err)
+	}
+	t.Cleanup(func() { conn.Close() })
+
+	targetSvc := &application.TargetService{Store: store}
+	if err := targetSvc.Register(context.Background(), domain.TargetInfoFromSnapshot(domain.TargetInfoSnapshot{
+		ID: "widget-addon", Type: widgetTargetType, Name: "Widget Addon",
+		AcceptedManifestTypes: []domain.ManifestType{"widgets"},
+	})); err != nil {
+		t.Fatalf("register target: %v", err)
+	}
+
+	return activatorPlatformResourceEnv{
+		activator: &managedresource.DynamicSchemaActivator{
+			GRPCMux: grpcMux,
+			Deps: managedresource.Deps{
+				Resources: resourceSvc,
+				Validator: validator,
+			},
+			PlatformDeps: platformresource.Deps{
+				Resources: platformResourceSvc,
+			},
+		},
+		conn:    conn,
+		typeSvc: application.NewManagedResourceTypeService(store),
+		store:   store,
+	}
+}
+
+// --- Shared helpers for cross-API contract tests ---
+
+func platformTestWidgetSchema() domain.ManagedResourceSchema {
+	return domain.ManagedResourceSchema{
+		ResourceType:   "test.fleetshift.io/Widget",
+		APIServiceName: "fleetshift.io",
+		ProtoPackage:   "fleetshift.v1",
+		Version:        "v1",
+		CollectionID:   "widgets",
+		Singular:       "Widget",
+		Plural:         "Widgets",
+		SpecMessage:    "WidgetSpec",
+		ProtoFiles: map[string]string{
+			"widget_spec.proto": `syntax = "proto3";
+message WidgetSpec {
+  string name = 1;
+}`,
+		},
+		Relation: widgetRel(),
+	}
+}
+
+func platformWidgetDescs(t *testing.T) *platformresource.ServiceDescriptors {
+	t.Helper()
+	descs, err := platformresource.BuildServiceDescriptors(
+		&platformresource.Config{
+			CollectionConfig: dynamicapi.CollectionConfig{
+				Version:      "v1",
+				CollectionID: "widgets",
+				Singular:     "Widget",
+				Plural:       "Widgets",
+			},
+		})
+	if err != nil {
+		t.Fatalf("BuildPlatformServiceDescriptors: %v", err)
+	}
+	return descs
+}
+
+// createWidgetViaExtension sends a CreateWidget gRPC request through the
+// extension service and returns the extension descriptors for follow-up
+// requests (e.g. delete).
+func createWidgetViaExtension(t *testing.T, ctx context.Context, conn *grpc.ClientConn, schema domain.ManagedResourceSchema, id string) *managedresource.ServiceDescriptors {
+	t.Helper()
+	descs := widgetDescriptors(t, schema)
+
+	req := dynamicpb.NewMessage(descs.CreateRequest)
+	req.Set(descs.CreateRequest.Fields().ByNumber(1),
+		protoreflect.ValueOfString(id))
+	resource := dynamicpb.NewMessage(descs.Resource)
+	spec := dynamicpb.NewMessage(descs.Spec)
+	spec.Set(descs.Spec.Fields().ByName("name"),
+		protoreflect.ValueOfString("test-"+id))
+	resource.Set(descs.Resource.Fields().ByName("spec"),
+		protoreflect.ValueOfMessage(spec))
+	req.Set(descs.CreateRequest.Fields().ByNumber(2),
+		protoreflect.ValueOfMessage(resource))
+
+	resp := dynamicpb.NewMessage(descs.Resource)
+	if err := conn.Invoke(ctx,
+		"/fleetshift.v1.WidgetService/CreateWidget", req, resp); err != nil {
+		t.Fatalf("CreateWidget(%s): %v", id, err)
+	}
+	return descs
+}
+
+func awaitFulfillmentActive(ctx context.Context, t *testing.T, store domain.Store, rt domain.ResourceType, name domain.ResourceName) {
+	t.Helper()
+	for {
+		tx, err := store.BeginReadOnly(ctx)
+		if err != nil {
+			t.Fatalf("Begin: %v", err)
+		}
+		view, err := tx.ManagedResources().GetView(ctx, rt, name)
+		tx.Rollback()
+		if err == nil && view.Fulfillment.State() == domain.FulfillmentStateActive {
+			return
+		}
+		select {
+		case <-ctx.Done():
+			t.Fatalf("timed out waiting for %s/%s fulfillment to reach active", rt, name)
+		case <-time.After(5 * time.Millisecond):
+		}
+	}
+}
+
+// --- Cross-API contract tests ---
+
+// TestExtensionCreate_VisibleInPlatformAPI exercises the transport-level
+// contract that creating a managed resource through an addon's extension
+// gRPC service makes it visible in the platform resource API with the
+// correct representation metadata.
+func TestExtensionCreate_VisibleInPlatformAPI(t *testing.T) {
+	env := newActivatorWithResourcesAndPlatform(t)
+	ctx, cancel := context.WithTimeout(context.Background(), testutil.ServiceTimeout)
+	defer cancel()
+
+	schema := platformTestWidgetSchema()
+
+	// Register the widget type with API identity metadata so the
+	// create workflow claims a platform resource identity.
+	if _, err := env.typeSvc.Create(ctx, application.CreateTypeInput{
+		ResourceType:   "test.fleetshift.io/Widget",
+		Relation:       widgetRel(),
+		Signature:      domain.Signature{},
+		APIServiceName: "fleetshift.io",
+		APIVersion:     "v1",
+		CollectionID:   "widgets",
+	}); err != nil {
+		t.Fatalf("register widget type: %v", err)
+	}
+
+	if _, err := env.activator.Activate(ctx, schema); err != nil {
+		t.Fatalf("Activate: %v", err)
+	}
+
+	createWidgetViaExtension(t, ctx, env.conn, schema, "widget-1")
+
+	platDescs := platformWidgetDescs(t)
+
+	// Get via the platform API.
+	getReq := dynamicpb.NewMessage(platDescs.GetRequest)
+	getReq.Set(platDescs.GetRequest.Fields().ByName("name"),
+		protoreflect.ValueOfString("widgets/widget-1"))
+	getResp := dynamicpb.NewMessage(platDescs.Resource)
+	if err := env.conn.Invoke(ctx,
+		"/fleetshift.v1.PlatformWidgetService/GetPlatformWidget", getReq, getResp); err != nil {
+		t.Fatalf("GetPlatformWidget: %v", err)
+	}
+
+	repsField := platDescs.Resource.Fields().ByName("representations")
+	repList := getResp.Get(repsField).List()
+	if repList.Len() != 1 {
+		t.Fatalf("representations len = %d, want 1", repList.Len())
+	}
+
+	rep := repList.Get(0).Message()
+	repDesc := repsField.Message()
+	if got := rep.Get(repDesc.Fields().ByName("service_name")).String(); got != "fleetshift.io" {
+		t.Errorf("representation service_name = %q, want %q", got, "fleetshift.io")
+	}
+	if got := rep.Get(repDesc.Fields().ByName("version")).String(); got != "v1" {
+		t.Errorf("representation version = %q, want %q", got, "v1")
+	}
+	roles := rep.Get(repDesc.Fields().ByName("roles")).List()
+	if roles.Len() != 1 || roles.Get(0).String() != string(domain.RepresentationRoleManaged) {
+		var got []string
+		for i := range roles.Len() {
+			got = append(got, roles.Get(i).String())
+		}
+		t.Errorf("representation roles = %v, want [managed]", got)
+	}
+
+	// Also verify the resource appears in the platform List.
+	listReq := dynamicpb.NewMessage(platDescs.ListRequest)
+	listResp := dynamicpb.NewMessage(platDescs.ListResponse)
+	if err := env.conn.Invoke(ctx,
+		"/fleetshift.v1.PlatformWidgetService/ListPlatformWidgets", listReq, listResp); err != nil {
+		t.Fatalf("ListPlatformWidgets: %v", err)
+	}
+
+	listField := platDescs.ListResponse.Fields().ByNumber(1)
+	resourceList := listResp.Get(listField).List()
+	if resourceList.Len() != 1 {
+		t.Fatalf("ListPlatformWidgets returned %d resources, want 1", resourceList.Len())
+	}
+
+	listedName := resourceList.Get(0).Message().Get(platDescs.Resource.Fields().ByName("name")).String()
+	if listedName != "widgets/widget-1" {
+		t.Errorf("listed name = %q, want %q", listedName, "widgets/widget-1")
+	}
+}
+
+// TestExtensionDelete_RemovesPlatformRepresentation verifies that
+// deleting a managed resource through the extension gRPC service
+// removes its representation from the platform resource API. The
+// platform resource itself survives — only the active representation
+// list becomes empty.
+func TestExtensionDelete_RemovesPlatformRepresentation(t *testing.T) {
+	env := newActivatorWithResourcesAndPlatform(t)
+	ctx, cancel := context.WithTimeout(context.Background(), testutil.ServiceTimeout)
+	defer cancel()
+
+	schema := platformTestWidgetSchema()
+
+	if _, err := env.typeSvc.Create(ctx, application.CreateTypeInput{
+		ResourceType:   "test.fleetshift.io/Widget",
+		Relation:       widgetRel(),
+		Signature:      domain.Signature{},
+		APIServiceName: "fleetshift.io",
+		APIVersion:     "v1",
+		CollectionID:   "widgets",
+	}); err != nil {
+		t.Fatalf("register widget type: %v", err)
+	}
+
+	if _, err := env.activator.Activate(ctx, schema); err != nil {
+		t.Fatalf("Activate: %v", err)
+	}
+
+	extDescs := createWidgetViaExtension(t, ctx, env.conn, schema, "widget-1")
+
+	awaitFulfillmentActive(ctx, t, env.store, "test.fleetshift.io/Widget", "widgets/widget-1")
+
+	// Delete via extension gRPC.
+	deleteReq := dynamicpb.NewMessage(extDescs.DeleteRequest)
+	deleteReq.Set(extDescs.DeleteRequest.Fields().ByName("name"),
+		protoreflect.ValueOfString("widgets/widget-1"))
+	deleteResp := dynamicpb.NewMessage(extDescs.Resource)
+	if err := env.conn.Invoke(ctx,
+		"/fleetshift.v1.WidgetService/DeleteWidget", deleteReq, deleteResp); err != nil {
+		t.Fatalf("DeleteWidget: %v", err)
+	}
+
+	// Platform Get: resource exists but the representation link is gone.
+	platDescs := platformWidgetDescs(t)
+
+	getReq := dynamicpb.NewMessage(platDescs.GetRequest)
+	getReq.Set(platDescs.GetRequest.Fields().ByName("name"),
+		protoreflect.ValueOfString("widgets/widget-1"))
+	getResp := dynamicpb.NewMessage(platDescs.Resource)
+	if err := env.conn.Invoke(ctx,
+		"/fleetshift.v1.PlatformWidgetService/GetPlatformWidget", getReq, getResp); err != nil {
+		t.Fatalf("GetPlatformWidget after delete: %v", err)
+	}
+
+	repsField := platDescs.Resource.Fields().ByName("representations")
+	if getResp.Get(repsField).List().Len() != 0 {
+		t.Errorf("representations len = %d after delete, want 0",
+			getResp.Get(repsField).List().Len())
+	}
+
+	// Platform List: resource still appears (not soft-deleted at the
+	// platform level — only the representation link is removed).
+	listReq := dynamicpb.NewMessage(platDescs.ListRequest)
+	listResp := dynamicpb.NewMessage(platDescs.ListResponse)
+	if err := env.conn.Invoke(ctx,
+		"/fleetshift.v1.PlatformWidgetService/ListPlatformWidgets", listReq, listResp); err != nil {
+		t.Fatalf("ListPlatformWidgets after delete: %v", err)
+	}
+
+	listField := platDescs.ListResponse.Fields().ByNumber(1)
+	if listResp.Get(listField).List().Len() != 1 {
+		t.Errorf("ListPlatformWidgets after delete = %d resources, want 1 (resource survives representation removal)",
+			listResp.Get(listField).List().Len())
+	}
+}
+
+// TestSchemaDeactivate_PlatformAPIUnroutable verifies that after a
+// schema is deactivated (simulating addon disable), the platform gRPC
+// service is removed from the mux and calls return Unimplemented.
+func TestSchemaDeactivate_PlatformAPIUnroutable(t *testing.T) {
+	env := newActivatorWithResourcesAndPlatform(t)
+	ctx := context.Background()
+
+	schema := platformTestWidgetSchema()
+
+	id, err := env.activator.Activate(ctx, schema)
+	if err != nil {
+		t.Fatalf("Activate: %v", err)
+	}
+
+	platDescs := platformWidgetDescs(t)
+
+	// Before deactivation: the platform service is routable. A Get for a
+	// nonexistent resource returns NotFound (not Unimplemented).
+	getReq := dynamicpb.NewMessage(platDescs.GetRequest)
+	getReq.Set(platDescs.GetRequest.Fields().ByName("name"),
+		protoreflect.ValueOfString("widgets/nonexistent"))
+	getResp := dynamicpb.NewMessage(platDescs.Resource)
+	err = env.conn.Invoke(ctx,
+		"/fleetshift.v1.PlatformWidgetService/GetPlatformWidget", getReq, getResp)
+	if err == nil {
+		t.Fatal("expected error for nonexistent resource, got nil")
+	}
+	st, ok := status.FromError(err)
+	if !ok || st.Code() != codes.NotFound {
+		t.Fatalf("before deactivation: platform Get = code %v, want NotFound (proves service is routable)", st.Code())
+	}
+
+	env.activator.Deactivate(id)
+
+	// After deactivation: the platform service is gone.
+	getResp2 := dynamicpb.NewMessage(platDescs.Resource)
+	err = env.conn.Invoke(ctx,
+		"/fleetshift.v1.PlatformWidgetService/GetPlatformWidget", getReq, getResp2)
+	if err == nil {
+		t.Fatal("expected Unimplemented after deactivation, got nil")
+	}
+	st2, ok := status.FromError(err)
+	if !ok || st2.Code() != codes.Unimplemented {
+		t.Fatalf("after deactivation: platform Get = code %v, want Unimplemented", st2.Code())
+	}
+}

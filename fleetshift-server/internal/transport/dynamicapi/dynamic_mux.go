@@ -1,4 +1,4 @@
-package managedresource
+package dynamicapi
 
 import (
 	"fmt"
@@ -42,31 +42,28 @@ func NewDynamicServiceMux() *DynamicServiceMux {
 	}
 }
 
-// Register adds a compiled managed resource service to the mux. The
-// service becomes immediately routable. Returns an error if a service
-// with the same name is already registered — use [Replace] for
-// atomic updates.
-func (m *DynamicServiceMux) Register(svc *RegisteredService) error {
-	entry := buildEntry(svc)
+// RegisterDesc adds a gRPC service descriptor to the mux. Returns an
+// error if a service with the same name is already registered — use
+// [ReplaceDesc] for atomic updates.
+func (m *DynamicServiceMux) RegisterDesc(desc *grpc.ServiceDesc) error {
+	entry := buildEntryFromDesc(desc)
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if _, exists := m.services[svc.Desc.ServiceName]; exists {
-		return fmt.Errorf("dynamic mux: service %q already registered", svc.Desc.ServiceName)
+	if _, exists := m.services[desc.ServiceName]; exists {
+		return fmt.Errorf("dynamic mux: service %q already registered", desc.ServiceName)
 	}
-	m.services[svc.Desc.ServiceName] = entry
+	m.services[desc.ServiceName] = entry
 	return nil
 }
 
-// Replace atomically swaps an existing service registration. If the
-// service is not currently registered it is added (same as [Register]).
-// In-flight requests that already resolved the old entry are unaffected;
-// new requests route to the replacement immediately.
-func (m *DynamicServiceMux) Replace(svc *RegisteredService) {
-	entry := buildEntry(svc)
+// ReplaceDesc atomically swaps a gRPC service descriptor. If the
+// service is not currently registered it is added.
+func (m *DynamicServiceMux) ReplaceDesc(desc *grpc.ServiceDesc) {
+	entry := buildEntryFromDesc(desc)
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.services[svc.Desc.ServiceName] = entry
+	m.services[desc.ServiceName] = entry
 }
 
 // Deregister removes a service from the mux. Subsequent calls to the
@@ -78,13 +75,13 @@ func (m *DynamicServiceMux) Deregister(serviceName string) {
 	delete(m.services, serviceName)
 }
 
-func buildEntry(svc *RegisteredService) *dynamicEntry {
+func buildEntryFromDesc(desc *grpc.ServiceDesc) *dynamicEntry {
 	entry := &dynamicEntry{
-		methods: make(map[string]grpc.MethodDesc, len(svc.Desc.Methods)),
-		desc:    svc.Desc,
-		svcInfo: buildServiceInfo(svc.Desc),
+		methods: make(map[string]grpc.MethodDesc, len(desc.Methods)),
+		desc:    desc,
+		svcInfo: buildServiceInfo(desc),
 	}
-	for _, md := range svc.Desc.Methods {
+	for _, md := range desc.Methods {
 		entry.methods[md.MethodName] = md
 	}
 	return entry
@@ -218,47 +215,35 @@ func NewDynamicHTTPMux(mux *http.ServeMux, conn *grpc.ClientConn) *DynamicHTTPMu
 	}
 }
 
-// Register adds HTTP routes for a managed resource service at its
-// canonical /apis/{service}/{version}/{collection} prefix. Returns an
-// error if a service with the same canonical prefix is already
-// registered — use [Replace] for atomic updates.
-func (m *DynamicHTTPMux) Register(svc *RegisteredService) error {
-	canonical := svc.Config.CanonicalHTTPPrefix()
-
+// RegisterPrefixHandler adds an HTTP handler at the given prefix.
+func (m *DynamicHTTPMux) RegisterPrefixHandler(prefix string, handler http.HandlerFunc) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if _, exists := m.handlers[canonical]; exists {
-		return fmt.Errorf("dynamic http mux: routes for %q already registered", canonical)
+	if _, exists := m.handlers[prefix]; exists {
+		return fmt.Errorf("dynamic http mux: routes for %q already registered", prefix)
 	}
-	m.installHandler(svc, canonical)
+	m.installPrefixHandler(prefix, handler)
 	return nil
 }
 
-// Replace atomically swaps the HTTP handler for a service. If the
-// service is not currently registered it is added (same as [Register]).
-// Any deprecatedPrefixes are removed in the same lock hold, so the
-// switch from old to new prefix is atomic from the perspective of
-// concurrent requests.
-func (m *DynamicHTTPMux) Replace(svc *RegisteredService, deprecatedPrefixes ...string) {
-	canonical := svc.Config.CanonicalHTTPPrefix()
-
+// ReplacePrefixHandler atomically swaps the handler for a prefix. Any
+// deprecatedPrefixes are removed in the same lock hold.
+func (m *DynamicHTTPMux) ReplacePrefixHandler(prefix string, handler http.HandlerFunc, deprecatedPrefixes ...string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.installHandler(svc, canonical)
-	for _, prefix := range deprecatedPrefixes {
-		if prefix == canonical {
+	m.installPrefixHandler(prefix, handler)
+	for _, dp := range deprecatedPrefixes {
+		if dp == prefix {
 			continue
 		}
-		delete(m.handlers, prefix)
+		delete(m.handlers, dp)
 	}
 }
 
-// installHandler builds the handler and installs it for a single
-// prefix. If the prefix has never been seen, a stable dispatcher is
-// registered on the underlying mux. Must be called with m.mu held.
-func (m *DynamicHTTPMux) installHandler(svc *RegisteredService, prefix string) {
-	handler := buildHTTPHandler(svc, m.conn, prefix)
-
+// installPrefixHandler installs a handler for a single prefix. If the
+// prefix has never been seen, a stable dispatcher is registered on the
+// underlying mux. Must be called with m.mu held.
+func (m *DynamicHTTPMux) installPrefixHandler(prefix string, handler http.HandlerFunc) {
 	_, dispatched := m.handlers[prefix]
 	m.handlers[prefix] = handler
 
@@ -267,6 +252,13 @@ func (m *DynamicHTTPMux) installHandler(svc *RegisteredService, prefix string) {
 		m.mux.HandleFunc(prefix, dispatcher)
 		m.mux.HandleFunc(prefix+"/", dispatcher)
 	}
+}
+
+// Conn returns the shared gRPC loopback client connection. Platform
+// handlers use this for the same conn.Invoke() pattern as extension
+// HTTP handlers.
+func (m *DynamicHTTPMux) Conn() *grpc.ClientConn {
+	return m.conn
 }
 
 // DeregisterByPrefix removes the HTTP handler registered under the

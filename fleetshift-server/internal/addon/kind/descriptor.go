@@ -43,8 +43,6 @@ func Schema() domain.ManagedResourceSchema {
 		},
 		EntryFile:   specProtoPath,
 		SpecMessage: "addons.kind.v1.KindClusterSpec",
-		Relation: domain.RegisteredSelfTarget{
-			AddonTarget: "kind-local",
-		},
+		Relation:    domain.NewRegisteredSelfTarget("kind-local", ClusterManifestType),
 	}
 }

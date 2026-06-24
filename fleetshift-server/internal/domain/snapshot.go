@@ -49,8 +49,8 @@ type FulfillmentSnapshot struct {
 
 // DeploymentSnapshot is the persistence DTO for [Deployment].
 type DeploymentSnapshot struct {
-	ID            DeploymentID
-	UID           string
+	Name          ResourceName
+	UID           DeploymentUID
 	FulfillmentID FulfillmentID
 	CreatedAt     time.Time
 	UpdatedAt     time.Time
@@ -78,7 +78,7 @@ type TargetInfoSnapshot struct {
 	State                 TargetState
 	Labels                map[string]string
 	Properties            map[string]string
-	AcceptedResourceTypes []ResourceType
+	AcceptedManifestTypes []ManifestType
 }
 
 // InventoryItemSnapshot is the persistence DTO for [InventoryItem].
@@ -116,13 +116,11 @@ type SignerEnrollmentSnapshot struct {
 // PlatformResourceSnapshot is the persistence DTO for [PlatformResource].
 // It captures the aggregate's full state including child entities.
 type PlatformResourceSnapshot struct {
-	UID          PlatformResourceUID
-	CollectionID CollectionID
-	RelativeName RelativeResourceName
-	Labels       map[string]string
-	CreatedAt    time.Time
-	UpdatedAt    time.Time
-	DeletedAt    *time.Time
+	UID       PlatformResourceUID
+	Name      ResourceName
+	Labels    map[string]string
+	CreatedAt time.Time
+	UpdatedAt time.Time
 
 	Representations []ResourceRepresentationSnapshot
 	Aliases         []ResourceAliasSnapshot
@@ -132,16 +130,15 @@ type PlatformResourceSnapshot struct {
 // ResourceRepresentationSnapshot is the persistence DTO for
 // [ResourceRepresentation].
 type ResourceRepresentationSnapshot struct {
-	PlatformUID  PlatformResourceUID
-	ServiceName  ServiceName
-	Version      APIVersion
-	CollectionID CollectionID
-	RelativeName RelativeResourceName
-	Roles        []RepresentationRole
-	Labels       map[string]string
-	CreatedAt    time.Time
-	UpdatedAt    time.Time
-	DeletedAt    *time.Time
+	PlatformUID PlatformResourceUID
+	ServiceName ServiceName
+	Version     APIVersion
+	Name        ResourceName
+	Roles       []RepresentationRole
+	Labels      map[string]string
+	CreatedAt   time.Time
+	UpdatedAt   time.Time
+	Deleted     bool
 }
 
 // ResourceAliasSnapshot is the persistence DTO for an [Alias] bound
@@ -171,7 +168,7 @@ type ResourceRelationshipSnapshot struct {
 type ManagedResourceSnapshot struct {
 	ResourceType   ResourceType
 	Name           ResourceName
-	UID            string
+	UID            ManagedResourceUID
 	CurrentVersion IntentVersion
 	FulfillmentID  FulfillmentID
 	CreatedAt      time.Time
@@ -223,7 +220,7 @@ func (f *Fulfillment) Snapshot() FulfillmentSnapshot {
 // Snapshot returns a [DeploymentSnapshot] capturing all persisted state.
 func (d Deployment) Snapshot() DeploymentSnapshot {
 	return DeploymentSnapshot{
-		ID:            d.id,
+		Name:          d.name,
 		UID:           d.uid,
 		FulfillmentID: d.fulfillmentID,
 		CreatedAt:     d.createdAt,
@@ -256,7 +253,7 @@ func (t TargetInfo) Snapshot() TargetInfoSnapshot {
 		State:                 t.state,
 		Labels:                t.labels,
 		Properties:            t.properties,
-		AcceptedResourceTypes: t.acceptedResourceTypes,
+		AcceptedManifestTypes: t.acceptedManifestTypes,
 	}
 }
 
@@ -352,7 +349,7 @@ func FulfillmentFromSnapshot(s FulfillmentSnapshot) *Fulfillment {
 // DeploymentFromSnapshot constructs a [Deployment] from a snapshot.
 func DeploymentFromSnapshot(s DeploymentSnapshot) Deployment {
 	return Deployment{
-		id:            s.ID,
+		name:          s.Name,
 		uid:           s.UID,
 		fulfillmentID: s.FulfillmentID,
 		createdAt:     s.CreatedAt,
@@ -385,7 +382,7 @@ func TargetInfoFromSnapshot(s TargetInfoSnapshot) TargetInfo {
 		state:                 s.State,
 		labels:                s.Labels,
 		properties:            s.Properties,
-		acceptedResourceTypes: s.AcceptedResourceTypes,
+		acceptedManifestTypes: s.AcceptedManifestTypes,
 	}
 }
 
@@ -427,8 +424,8 @@ func SignerEnrollmentFromSnapshot(s SignerEnrollmentSnapshot) SignerEnrollment {
 
 // PlatformResourceFromSnapshot constructs a [PlatformResource] from a
 // snapshot. Labels are shallow-copied to avoid sharing the map with
-// the caller. Child entities (representations, aliases, relationships)
-// are reconstituted from their snapshot slices.
+// the caller. Child entities (representations, aliases,
+// relationships) are reconstituted from their snapshot slices.
 func PlatformResourceFromSnapshot(s PlatformResourceSnapshot) *PlatformResource {
 	labels := make(map[string]string, len(s.Labels))
 	for k, v := range s.Labels {
@@ -452,12 +449,10 @@ func PlatformResourceFromSnapshot(s PlatformResourceSnapshot) *PlatformResource 
 
 	return &PlatformResource{
 		uid:             s.UID,
-		collectionID:    s.CollectionID,
-		relativeName:    s.RelativeName,
+		name:            s.Name,
 		labels:          labels,
 		createdAt:       s.CreatedAt,
 		updatedAt:       s.UpdatedAt,
-		deletedAt:       s.DeletedAt,
 		representations: reps,
 		aliases:         aliases,
 		relationships:   rels,

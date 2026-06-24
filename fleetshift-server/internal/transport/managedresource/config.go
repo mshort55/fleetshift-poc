@@ -1,9 +1,18 @@
+// Package managedresource provides in-process proto compilation and dynamic
+// gRPC + HTTP service registration for addon-defined managed resource types.
+// It enables the platform to host typed, AIP-compliant gRPC services
+// without requiring compile-time Go stub generation for each addon type.
+//
+// Platform-canonical resource APIs live in the sibling
+// [platformresource] package. Shared infrastructure (dynamic mux, file
+// registry, compiler, helpers) lives in [dynamicapi].
 package managedresource
 
 import (
 	"google.golang.org/protobuf/reflect/protoreflect"
 
 	"github.com/fleetshift/fleetshift-poc/fleetshift-server/internal/domain"
+	"github.com/fleetshift/fleetshift-poc/fleetshift-server/internal/transport/dynamicapi"
 )
 
 // ResourceTypeConfig describes an extension service for a platform resource
@@ -11,35 +20,22 @@ import (
 // everything needed to build and register a typed gRPC + HTTP service at
 // runtime without compile-time Go stubs.
 //
-// # Relationship to platform resource identity
-//
 // Each config describes an extension representation of a platform-level
 // resource type. The addon does not define a resource type in isolation;
 // it implements a platform resource type through its own typed API. Multiple
 // extensions can model the same platform resource type (e.g. one manages
 // clusters, another inventories them), each under its own APIServiceName but
-// sharing the same CollectionID.
-//
-// The relative resource name ({CollectionID}/{id}, e.g. "clusters/foo") is
-// identity-equivalent across all extensions that share a CollectionID. This
-// is how extension resources unify under a single platform identity — the
-// CollectionID is the implicit platform identity domain binding.
-//
-// See docs/design/architecture/resource_identity_and_api.md for the full
-// two-layer API model and identity semantics.
-//
-// # Current scope
-//
-// The resource hierarchy is currently flat: resource names are
-// {CollectionID}/{leaf_id} with no parent segments. Workspace and tenant
-// scoping will introduce parent collections in the future.
+// sharing the same [dynamicapi.CollectionConfig.CollectionID].
 type ResourceTypeConfig struct {
+	dynamicapi.CollectionConfig
+
 	// ResourceType is the addon-scoped domain identifier used for
-	// internal dispatch (e.g. "api.kind.cluster"). This identifies
-	// the addon's specific implementation of the resource type — it is
-	// NOT the platform identity. Two addons modeling the same platform
-	// resource type will have different ResourceType values but the
-	// same CollectionID.
+	// internal dispatch (e.g. "kind.fleetshift.io/Cluster"). Per
+	// AIP-123, this follows the {ServiceName}/{Type} pattern. It
+	// identifies the addon's specific implementation of the resource
+	// type — it is NOT the platform identity. Two addons modeling
+	// the same platform resource type will have different
+	// ResourceType values but the same CollectionID.
 	ResourceType domain.ResourceType
 
 	// APIServiceName is the versionless AIP-122 service name that
@@ -49,31 +45,6 @@ type ResourceTypeConfig struct {
 	// HTTP path prefixes. The addon chooses this; the platform imposes
 	// no convention beyond uniqueness.
 	APIServiceName string
-
-	// Version is the HTTP API version segment (e.g. "v1"). Independent
-	// of APIServiceName — the service name is versionless and stable
-	// across API version evolution.
-	Version string
-
-	// CollectionID is the AIP collection identifier that establishes
-	// platform identity domain membership. All extensions sharing the
-	// same CollectionID participate in the same platform identity domain:
-	// the relative resource name "{CollectionID}/{id}" refers to the same
-	// logical resource regardless of which extension's API is used.
-	//
-	// This is used in resource names, HTTP paths, and proto field names
-	// (e.g. "clusters"). It must be consistent across all extensions
-	// that model the same platform resource type.
-	CollectionID string
-
-	// Singular is the PascalCase singular resource name used in RPC
-	// and message names like Create{Singular}, Get{Singular}Request
-	// (e.g. "Cluster").
-	Singular string
-
-	// Plural is the PascalCase plural resource name used in List RPC
-	// and message names (e.g. "Clusters").
-	Plural string
 
 	// ProtoPackage is the versioned proto package for the generated
 	// service (e.g. "kind.fleetshift.v1"). Combined with Singular to

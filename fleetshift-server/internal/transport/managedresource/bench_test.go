@@ -14,6 +14,7 @@ import (
 
 	kindaddon "github.com/fleetshift/fleetshift-poc/fleetshift-server/internal/addon/kind"
 	"github.com/fleetshift/fleetshift-poc/fleetshift-server/internal/domain"
+	"github.com/fleetshift/fleetshift-poc/fleetshift-server/internal/transport/dynamicapi"
 	"github.com/fleetshift/fleetshift-poc/fleetshift-server/internal/transport/managedresource"
 )
 
@@ -34,7 +35,7 @@ func setupBench(b *testing.B) *benchEnv {
 		entryFile = name
 		break
 	}
-	desc, err := managedresource.CompileInline(
+	desc, err := dynamicapi.CompileInline(
 		context.Background(),
 		schema.ProtoFiles,
 		entryFile,
@@ -50,12 +51,14 @@ func setupBench(b *testing.B) *benchEnv {
 	}
 
 	cfg := &managedresource.ResourceTypeConfig{
+		CollectionConfig: dynamicapi.CollectionConfig{
+			Version:      schema.Version,
+			CollectionID: schema.CollectionID,
+			Singular:     schema.Singular,
+			Plural:       schema.Plural,
+		},
 		ResourceType:   kindaddon.ClusterResourceType,
 		APIServiceName: schema.APIServiceName,
-		Version:        schema.Version,
-		CollectionID:   schema.CollectionID,
-		Singular:       schema.Singular,
-		Plural:         schema.Plural,
 		ProtoPackage:   schema.ProtoPackage,
 		SpecMessage:    schema.SpecMessage,
 		SpecDescriptor: desc.Message,
@@ -289,7 +292,7 @@ func BenchmarkFullResponsePath(b *testing.B) {
 		ManagedResource: *domain.ManagedResourceFromSnapshot(domain.ManagedResourceSnapshot{
 			ResourceType:   kindaddon.ClusterResourceType,
 			Name:           "prod-us-east-1",
-			UID:            "550e8400-e29b-41d4-a716-446655440000",
+			UID:            domain.NewManagedResourceUID(),
 			CurrentVersion: 3,
 			FulfillmentID:  "ful-123",
 			CreatedAt:      now.Add(-1 * time.Hour),
@@ -315,7 +318,7 @@ func BenchmarkFullResponsePath(b *testing.B) {
 	for range b.N {
 		msg := dynamicpb.NewMessage(resourceDesc)
 		msg.Set(nameField, protoreflect.ValueOfString("clusters/"+string(view.ManagedResource.Name())))
-		msg.Set(uidField, protoreflect.ValueOfString(view.ManagedResource.UID()))
+		msg.Set(uidField, protoreflect.ValueOfString(view.ManagedResource.UID().String()))
 
 		specMsg := dynamicpb.NewMessage(env.specDesc)
 		_ = protojson.Unmarshal(view.Intent.Spec, specMsg)
@@ -324,7 +327,7 @@ func BenchmarkFullResponsePath(b *testing.B) {
 		msg.Set(versionField, protoreflect.ValueOfInt64(int64(view.ManagedResource.CurrentVersion())))
 		msg.Set(stateField, protoreflect.ValueOfInt32(2))
 		msg.Set(reconcilingField, protoreflect.ValueOfBool(false))
-		msg.Set(etagField, protoreflect.ValueOfString(view.ManagedResource.UID()))
+		msg.Set(etagField, protoreflect.ValueOfString(view.ManagedResource.UID().String()))
 
 		// Wire marshal (what gRPC does)
 		out, _ := proto.Marshal(msg)

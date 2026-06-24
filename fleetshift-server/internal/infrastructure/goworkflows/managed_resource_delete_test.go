@@ -205,7 +205,7 @@ func TestManagedResourceDelete_GoWorkflows_UsesDeleteAuthAndEmitsRemoveEvents(t 
 		t.Fatalf("RegisterDeleteManagedResource: %v", err)
 	}
 
-	typeSvc := &application.ManagedResourceTypeService{Store: store}
+	typeSvc := application.NewManagedResourceTypeService(store)
 	resourceSvc := &application.ManagedResourceService{
 		Store:    store,
 		CreateWF: createWf,
@@ -220,7 +220,7 @@ func TestManagedResourceDelete_GoWorkflows_UsesDeleteAuthAndEmitsRemoveEvents(t 
 		ID:                    "addon-cluster-mgmt",
 		Name:                  "Cluster Management Addon",
 		Type:                  "addon",
-		AcceptedResourceTypes: []domain.ResourceType{"clusters"},
+		AcceptedManifestTypes: []domain.ManifestType{"clusters"},
 	})); err != nil {
 		t.Fatalf("create target: %v", err)
 	}
@@ -229,9 +229,12 @@ func TestManagedResourceDelete_GoWorkflows_UsesDeleteAuthAndEmitsRemoveEvents(t 
 	}
 
 	if _, err := typeSvc.Create(ctx, application.CreateTypeInput{
-		ResourceType: "clusters",
-		Relation:     domain.RegisteredSelfTarget{AddonTarget: "addon-cluster-mgmt"},
-		Signature:    domain.Signature{},
+		ResourceType:   "test.fleetshift.io/Cluster",
+		Relation:       domain.NewRegisteredSelfTarget("addon-cluster-mgmt", "clusters"),
+		Signature:      domain.Signature{},
+		APIServiceName: "kind.fleetshift.io",
+		APIVersion:     "v1",
+		CollectionID:   "clusters",
 	}); err != nil {
 		t.Fatalf("CreateType: %v", err)
 	}
@@ -246,8 +249,8 @@ func TestManagedResourceDelete_GoWorkflows_UsesDeleteAuthAndEmitsRemoveEvents(t 
 		Token: "create-token",
 	})
 	view, err := resourceSvc.Create(createCtx, application.CreateManagedResourceInput{
-		ResourceType: "clusters",
-		Name:         "prod-us-east-1",
+		ResourceType: "test.fleetshift.io/Cluster",
+		Name:         "clusters/prod-us-east-1",
 		Spec:         json.RawMessage(`{"provider":"rosa","version":"4.16.2"}`),
 	})
 	if err != nil {
@@ -265,7 +268,7 @@ func TestManagedResourceDelete_GoWorkflows_UsesDeleteAuthAndEmitsRemoveEvents(t 
 		},
 		Token: "delete-token",
 	})
-	if _, err := resourceSvc.Delete(deleteCtx, "clusters", "prod-us-east-1"); err != nil {
+	if _, err := resourceSvc.Delete(deleteCtx, "test.fleetshift.io/Cluster", "clusters/prod-us-east-1"); err != nil {
 		t.Fatalf("Delete: %v", err)
 	}
 
@@ -293,7 +296,7 @@ func TestManagedResourceDelete_GoWorkflows_UsesDeleteAuthAndEmitsRemoveEvents(t 
 		t.Fatal("expected remove path to emit at least one event")
 	}
 
-	viewDuringDelete, err := resourceSvc.Get(ctx, "clusters", "prod-us-east-1")
+	viewDuringDelete, err := resourceSvc.Get(ctx, "test.fleetshift.io/Cluster", "clusters/prod-us-east-1")
 	if err != nil {
 		t.Fatalf("Get during delete: %v", err)
 	}

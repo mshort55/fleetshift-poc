@@ -1,18 +1,13 @@
 package domain
 
 import (
+	"database/sql/driver"
 	"fmt"
 	"strings"
 	"time"
-)
 
-// ---------------------------------------------------------------------------
-// Value types for platform resource identity
-//
-// These are distinct from the existing ResourceName (which means the leaf
-// managed-resource name, not the AIP relative name). Do not reuse
-// domain.ResourceName for platform identity.
-// ---------------------------------------------------------------------------
+	"github.com/google/uuid"
+)
 
 // ServiceName identifies the extension service that owns a representation
 // (e.g. "kind.fleetshift.io").
@@ -49,13 +44,15 @@ func NewAPIVersion(v string) (APIVersion, error) {
 type CollectionID string
 
 // NewCollectionID validates and returns a [CollectionID]. It rejects
-// empty values, non-lower-case values, and values containing '/'.
+// empty values, values not starting with a lowercase letter
+// (collection identifiers are lowerCamelCase per AIP-122), and values
+// containing '/'.
 func NewCollectionID(s string) (CollectionID, error) {
 	if s == "" {
 		return "", fmt.Errorf("collection id: %w: must not be empty", ErrInvalidArgument)
 	}
-	if s != strings.ToLower(s) {
-		return "", fmt.Errorf("collection id: %w: must be lower-case", ErrInvalidArgument)
+	if s[0] < 'a' || s[0] > 'z' {
+		return "", fmt.Errorf("collection id: %w: must start with a lowercase letter (lowerCamelCase)", ErrInvalidArgument)
 	}
 	if strings.Contains(s, "/") {
 		return "", fmt.Errorf("collection id: %w: must not contain '/'", ErrInvalidArgument)
@@ -63,17 +60,142 @@ func NewCollectionID(s string) (CollectionID, error) {
 	return CollectionID(s), nil
 }
 
-// RelativeResourceName is a collection-qualified, path-safe resource name
-// (e.g. "clusters/prod"). It takes the form "{collection}/{id}".
-type RelativeResourceName string
+// ResourceID identifies a resource within its parent collection
+// (e.g. "prod-us-east-1" in "clusters/prod-us-east-1"). This is
+// the "resource ID segment" per AIP-122.
+type ResourceID string
+
+// NewResourceID validates and returns a [ResourceID]. It rejects empty
+// values and values containing '/'.
+func NewResourceID(s string) (ResourceID, error) {
+	if s == "" {
+		return "", fmt.Errorf("resource id: %w: must not be empty", ErrInvalidArgument)
+	}
+	if strings.Contains(s, "/") {
+		return "", fmt.Errorf("resource id: %w: must not contain '/'", ErrInvalidArgument)
+	}
+	return ResourceID(s), nil
+}
+
+// CollectionName is the full path to a collection container.
+// Flat: "clusters". Nested (future): "publishers/123/books".
+type CollectionName string
+
+// NewCollectionName constructs a [CollectionName] from a flat
+// [CollectionID]. For nested collections, use [ParseCollectionName].
+func NewCollectionName(id CollectionID) CollectionName {
+	return CollectionName(id)
+}
+
+// validateCanonicalPath rejects paths with leading slashes, trailing
+// slashes, or empty segments (double slashes). Returns the split
+// segments on success.
+func validateCanonicalPath(kind, s string) ([]string, error) {
+	if s == "" {
+		return nil, fmt.Errorf("%s: %w: must not be empty", kind, ErrInvalidArgument)
+	}
+	if strings.HasPrefix(s, "/") {
+		return nil, fmt.Errorf("%s: %w: must not start with '/'", kind, ErrInvalidArgument)
+	}
+	if strings.HasSuffix(s, "/") {
+		return nil, fmt.Errorf("%s: %w: must not end with '/'", kind, ErrInvalidArgument)
+	}
+	parts := strings.Split(s, "/")
+	for _, p := range parts {
+		if p == "" {
+			return nil, fmt.Errorf("%s: %w: must not contain empty segments (double slashes)", kind, ErrInvalidArgument)
+		}
+	}
+	return parts, nil
+}
+
+// ParseCollectionName parses a collection name string. It validates
+// that the string is non-empty, contains no leading/trailing/double
+// slashes, has an odd number of segments (collection paths alternate
+// parent-collection / resource-id / child-collection), and that the
+// trailing segment is a valid lowerCamelCase collection ID (starts
+// with a lowercase letter) per AIP-122.
+func ParseCollectionName(s string) (CollectionName, error) {
+	parts, err := validateCanonicalPath("collection name", s)
+	if err != nil {
+		return "", err
+	}
+	if len(parts)%2 == 0 {
+		return "", fmt.Errorf("collection name: %w: must have an odd number of segments (e.g. \"clusters\" or \"publishers/123/books\")", ErrInvalidArgument)
+	}
+	last := parts[len(parts)-1]
+	if len(last) == 0 || last[0] < 'a' || last[0] > 'z' {
+		return "", fmt.Errorf("collection name: %w: trailing segment must start with a lowercase letter (lowerCamelCase)", ErrInvalidArgument)
+	}
+	return CollectionName(s), nil
+}
+
+// CollectionID extracts the immediate (trailing) collection segment.
+func (n CollectionName) CollectionID() CollectionID {
+	parts := strings.Split(string(n), "/")
+	return CollectionID(parts[len(parts)-1])
+}
+
+// Parent returns the parent resource name for a nested collection,
+// or false for a flat (single-segment) collection.
+func (n CollectionName) Parent() (ResourceName, bool) {
+	s := string(n)
+	idx := strings.LastIndex(s, "/")
+	if idx < 0 {
+		return "", false
+	}
+	return ResourceName(s[:idx]), true
+}
+
+// ResourceName is a collection-qualified, path-safe resource name
+// (e.g. "clusters/prod"). Per AIP-122, this is the primary resource
+// identifier — sometimes called "relative resource name" to
+// distinguish from [FullResourceName].
+type ResourceName string
 
 // FullResourceName is the globally unique name of the form
 // "//{service}/{relative_name}" (e.g. "//kind.fleetshift.io/clusters/prod").
 type FullResourceName string
 
 // PlatformResourceUID is the opaque, stable identifier for a platform
-// resource. Generated once at claim time and never changes.
-type PlatformResourceUID string
+// resource. Generated once at claim time and never changes. The
+// underlying type is [uuid.UUID] so structural validity is encoded
+// in the type system.
+type PlatformResourceUID uuid.UUID
+
+// NewPlatformResourceUID generates a new random [PlatformResourceUID].
+func NewPlatformResourceUID() PlatformResourceUID {
+	return PlatformResourceUID(uuid.New())
+}
+
+// ParsePlatformResourceUID parses a string into a [PlatformResourceUID].
+func ParsePlatformResourceUID(s string) (PlatformResourceUID, error) {
+	u, err := uuid.Parse(s)
+	if err != nil {
+		return PlatformResourceUID{}, fmt.Errorf("platform resource uid: %w", err)
+	}
+	return PlatformResourceUID(u), nil
+}
+
+// String returns the canonical UUID string representation.
+func (u PlatformResourceUID) String() string { return uuid.UUID(u).String() }
+
+// MarshalText implements [encoding.TextMarshaler] for JSON string encoding.
+func (u PlatformResourceUID) MarshalText() ([]byte, error) { return uuid.UUID(u).MarshalText() }
+
+// UnmarshalText implements [encoding.TextUnmarshaler] for JSON string decoding.
+func (u *PlatformResourceUID) UnmarshalText(data []byte) error {
+	return (*uuid.UUID)(u).UnmarshalText(data)
+}
+
+// Value implements [driver.Valuer] for SQL persistence.
+func (u PlatformResourceUID) Value() (driver.Value, error) { return uuid.UUID(u).String(), nil }
+
+// Scan implements [sql.Scanner] for SQL hydration.
+func (u *PlatformResourceUID) Scan(src any) error { return (*uuid.UUID)(u).Scan(src) }
+
+// IsZero returns true when the UID is the zero (nil) UUID.
+func (u PlatformResourceUID) IsZero() bool { return uuid.UUID(u) == uuid.Nil }
 
 // AliasNamespace scopes an alias key-space (e.g. "gcp", "aws").
 type AliasNamespace string
@@ -151,43 +273,57 @@ func NewAlias(ns AliasNamespace, key AliasKey, value AliasValue) (Alias, error) 
 	return Alias{Namespace: ns, Key: key, Value: value}, nil
 }
 
-// NewRelativeResourceName constructs a [RelativeResourceName] from a
-// collection and resource ID. It validates the id segment; the
-// collection is assumed valid because it is already a [CollectionID].
-func NewRelativeResourceName(collection CollectionID, id string) (RelativeResourceName, error) {
-	if collection == "" {
-		return "", fmt.Errorf("relative resource name: %w: collection must not be empty", ErrInvalidArgument)
-	}
-	if id == "" {
-		return "", fmt.Errorf("relative resource name: %w: id must not be empty", ErrInvalidArgument)
-	}
-	if strings.Contains(id, "/") {
-		return "", fmt.Errorf("relative resource name: %w: id must not contain '/'", ErrInvalidArgument)
-	}
-	return RelativeResourceName(string(collection) + "/" + id), nil
+// NewResourceName constructs a [ResourceName] from a collection and
+// resource ID.
+func NewResourceName(collection CollectionName, id ResourceID) (ResourceName, error) {
+	return ResourceName(string(collection) + "/" + string(id)), nil
 }
 
-// CollectionID extracts the collection segment from a relative name.
-func (n RelativeResourceName) CollectionID() CollectionID {
-	parts := strings.SplitN(string(n), "/", 2)
-	if len(parts) < 1 {
-		return ""
+// ParseResourceName parses a resource name string into its typed form.
+// It validates that the string contains no leading/trailing/double
+// slashes and has an even number of segments (resource names alternate
+// collection / resource-id, e.g. "clusters/prod" or
+// "publishers/123/books/les-mis").
+func ParseResourceName(s string) (ResourceName, error) {
+	parts, err := validateCanonicalPath("resource name", s)
+	if err != nil {
+		return "", err
 	}
-	return CollectionID(parts[0])
+	if len(parts)%2 != 0 {
+		return "", fmt.Errorf("resource name: %w: must have an even number of segments (e.g. \"clusters/prod\")", ErrInvalidArgument)
+	}
+	return ResourceName(s), nil
 }
 
-// ID extracts the resource ID segment from a relative name.
-func (n RelativeResourceName) ID() string {
-	parts := strings.SplitN(string(n), "/", 2)
-	if len(parts) < 2 {
+// Collection returns the full collection path (everything before the
+// final ID segment).
+func (n ResourceName) Collection() CollectionName {
+	s := string(n)
+	idx := strings.LastIndex(s, "/")
+	if idx < 0 {
 		return ""
 	}
-	return parts[1]
+	return CollectionName(s[:idx])
+}
+
+// CollectionID extracts the immediate collection segment from the name.
+func (n ResourceName) CollectionID() CollectionID {
+	return n.Collection().CollectionID()
+}
+
+// ID extracts the resource ID segment (the final path component).
+func (n ResourceName) ID() ResourceID {
+	s := string(n)
+	idx := strings.LastIndex(s, "/")
+	if idx < 0 {
+		return ResourceID(s)
+	}
+	return ResourceID(s[idx+1:])
 }
 
 // NewFullResourceName constructs a [FullResourceName] from a service
-// name and relative name: "//{service}/{relative_name}".
-func NewFullResourceName(service ServiceName, name RelativeResourceName) FullResourceName {
+// name and resource name: "//{service}/{name}".
+func NewFullResourceName(service ServiceName, name ResourceName) FullResourceName {
 	return FullResourceName("//" + string(service) + "/" + string(name))
 }
 
@@ -201,15 +337,15 @@ func (n FullResourceName) ServiceName() ServiceName {
 	return ServiceName(parts[0])
 }
 
-// RelativeName extracts the relative resource name segment from a full
+// ResourceName extracts the resource name segment from a full
 // resource name.
-func (n FullResourceName) RelativeName() RelativeResourceName {
+func (n FullResourceName) ResourceName() ResourceName {
 	s := strings.TrimPrefix(string(n), "//")
 	parts := strings.SplitN(s, "/", 2)
 	if len(parts) < 2 {
 		return ""
 	}
-	return RelativeResourceName(parts[1])
+	return ResourceName(parts[1])
 }
 
 // validateRepresentationRoles checks that roles is non-empty, all
@@ -252,13 +388,11 @@ func validateRepresentationRoles(roles []RepresentationRole) error {
 // methods ([PlatformResource.SetLabels], [PlatformResource.AttachRepresentation],
 // etc.). Read via accessor methods.
 type PlatformResource struct {
-	uid          PlatformResourceUID
-	collectionID CollectionID
-	relativeName RelativeResourceName
-	labels       map[string]string
-	createdAt    time.Time
-	updatedAt    time.Time
-	deletedAt    *time.Time
+	uid       PlatformResourceUID
+	name      ResourceName
+	labels    map[string]string
+	createdAt time.Time
+	updatedAt time.Time
 
 	representations []ResourceRepresentation
 	aliases         []Alias
@@ -268,28 +402,28 @@ type PlatformResource struct {
 // NewPlatformResource creates a brand-new [PlatformResource]. Use this
 // on creation paths; use [PlatformResourceFromSnapshot] only for
 // reconstituting from persistence.
-func NewPlatformResource(uid PlatformResourceUID, collectionID CollectionID, relativeName RelativeResourceName, labels map[string]string, now time.Time) *PlatformResource {
+func NewPlatformResource(uid PlatformResourceUID, name ResourceName, labels map[string]string, now time.Time) *PlatformResource {
 	if labels == nil {
 		labels = map[string]string{}
 	}
 	return &PlatformResource{
-		uid:          uid,
-		collectionID: collectionID,
-		relativeName: relativeName,
-		labels:       labels,
-		createdAt:    now,
-		updatedAt:    now,
+		uid:       uid,
+		name:      name,
+		labels:    labels,
+		createdAt: now,
+		updatedAt: now,
 	}
 }
 
 // UID returns the platform resource's stable unique identifier.
 func (r *PlatformResource) UID() PlatformResourceUID { return r.uid }
 
-// CollectionID returns the collection this resource belongs to.
-func (r *PlatformResource) CollectionID() CollectionID { return r.collectionID }
+// Collection returns the collection this resource belongs to,
+// derived from its [ResourceName].
+func (r *PlatformResource) Collection() CollectionName { return r.name.Collection() }
 
-// RelativeName returns the collection-qualified resource name.
-func (r *PlatformResource) RelativeName() RelativeResourceName { return r.relativeName }
+// Name returns the collection-qualified resource name.
+func (r *PlatformResource) Name() ResourceName { return r.name }
 
 // Labels returns the user-defined platform labels.
 func (r *PlatformResource) Labels() map[string]string { return r.labels }
@@ -299,9 +433,6 @@ func (r *PlatformResource) CreatedAt() time.Time { return r.createdAt }
 
 // UpdatedAt returns the last-updated timestamp.
 func (r *PlatformResource) UpdatedAt() time.Time { return r.updatedAt }
-
-// DeletedAt returns the soft-delete timestamp, or nil if active.
-func (r *PlatformResource) DeletedAt() *time.Time { return r.deletedAt }
 
 // SetLabels replaces the platform labels and bumps updatedAt.
 func (r *PlatformResource) SetLabels(labels map[string]string, now time.Time) {
@@ -316,18 +447,19 @@ func (r *PlatformResource) SetLabels(labels map[string]string, now time.Time) {
 // Child entity accessors
 // ---------------------------------------------------------------------------
 
-// Representations returns the active (non-tombstoned) representations.
+// Representations returns the active (non-deleted) representations.
 func (r *PlatformResource) Representations() []ResourceRepresentation {
 	var active []ResourceRepresentation
 	for _, rep := range r.representations {
-		if rep.DeletedAt == nil {
-			active = append(active, rep)
+		if rep.deleted {
+			continue
 		}
+		active = append(active, rep)
 	}
 	return active
 }
 
-// AllRepresentations returns all representations including tombstoned
+// AllRepresentations returns all representations including deleted
 // ones.
 func (r *PlatformResource) AllRepresentations() []ResourceRepresentation {
 	return r.representations
@@ -351,10 +483,9 @@ func (r *PlatformResource) Relationships() []ResourceRelationship {
 // AttachRepresentationInput is the input for
 // [PlatformResource.AttachRepresentation].
 //
-// CollectionID and RelativeName are not included because the relative
-// resource name is identity-equivalent across services (see
-// resource_identity_and_api.md). The aggregate stamps them from its own
-// canonical identity.
+// Collection and Name are not included because the resource name is
+// identity-equivalent across services (see resource_identity_and_api.md).
+// The aggregate stamps them from its own canonical identity.
 type AttachRepresentationInput struct {
 	ServiceName ServiceName
 	Version     APIVersion
@@ -364,31 +495,30 @@ type AttachRepresentationInput struct {
 
 // AttachRepresentation adds or updates an extension representation on
 // this platform resource. The representation inherits the aggregate's
-// canonical CollectionID and RelativeName because the relative resource
-// name is identity-equivalent across services. It validates that
-// managed+inventory roles are not combined; other value-object
-// invariants are assumed enforced at construction time by callers.
+// canonical Collection and Name because the resource name is identity-
+// equivalent across services. It validates that managed+inventory roles
+// are not combined; other value-object invariants are assumed enforced
+// at construction time by callers.
 func (r *PlatformResource) AttachRepresentation(in AttachRepresentationInput, now time.Time) error {
 	if err := validateRepresentationRoles(in.Roles); err != nil {
 		return err
 	}
 
 	rep := ResourceRepresentation{
-		PlatformUID:  r.uid,
-		ServiceName:  in.ServiceName,
-		Version:      in.Version,
-		CollectionID: r.collectionID,
-		RelativeName: r.relativeName,
-		Roles:        in.Roles,
-		Labels:       in.Labels,
-		CreatedAt:    now,
-		UpdatedAt:    now,
+		platformUID: r.uid,
+		serviceName: in.ServiceName,
+		version:     in.Version,
+		name:        r.name,
+		roles:       in.Roles,
+		labels:      in.Labels,
+		createdAt:   now,
+		updatedAt:   now,
 	}
 
 	for i, existing := range r.representations {
-		if existing.ServiceName == in.ServiceName {
-			rep.CreatedAt = existing.CreatedAt
-			rep.DeletedAt = nil
+		if existing.serviceName == in.ServiceName {
+			rep.createdAt = existing.createdAt
+			rep.deleted = false
 			r.representations[i] = rep
 			r.updatedAt = now
 			return nil
@@ -400,20 +530,25 @@ func (r *PlatformResource) AttachRepresentation(in AttachRepresentationInput, no
 	return nil
 }
 
-// TombstoneRepresentation marks the representation from the given
-// service as deleted. Since the relative resource name is identity-
-// equivalent across services, the match is by ServiceName only.
-// Returns [ErrNotFound] if no active representation matches.
-func (r *PlatformResource) TombstoneRepresentation(service ServiceName, now time.Time) error {
+// DeleteRepresentation marks the representation from the given service
+// as deleted. Since the resource name is identity-equivalent across
+// services, the match is by [ServiceName] only. Already-deleted
+// representations are a no-op (idempotent) so that delete retries
+// don't fail on re-entry. Returns [ErrNotFound] if no representation
+// from the service exists at all.
+func (r *PlatformResource) DeleteRepresentation(service ServiceName, now time.Time) error {
 	for i, rep := range r.representations {
-		if rep.ServiceName == service && rep.DeletedAt == nil {
-			r.representations[i].DeletedAt = &now
-			r.representations[i].UpdatedAt = now
+		if rep.serviceName == service {
+			if rep.deleted {
+				return nil
+			}
+			r.representations[i].deleted = true
+			r.representations[i].updatedAt = now
 			r.updatedAt = now
 			return nil
 		}
 	}
-	return fmt.Errorf("representation from %s on %s: %w", service, r.relativeName, ErrNotFound)
+	return fmt.Errorf("representation from %s on %s: %w", service, r.name, ErrNotFound)
 }
 
 // AddAlias appends an alias to the platform resource. Duplicate aliases
@@ -440,16 +575,16 @@ func (r *PlatformResource) AddAlias(alias Alias) error {
 // that the source UID matches this aggregate. If a relationship with
 // the same (type, targetUID) already exists, it is updated in place.
 func (r *PlatformResource) AddRelationship(rel ResourceRelationship) error {
-	if rel.SourceUID != r.uid {
+	if rel.sourceUID != r.uid {
 		return fmt.Errorf("relationship source UID %q does not match resource UID %q: %w",
-			rel.SourceUID, r.uid, ErrInvalidArgument)
+			rel.sourceUID, r.uid, ErrInvalidArgument)
 	}
-	if rel.Type == "" {
+	if rel.relType == "" {
 		return fmt.Errorf("relationship type: %w: must not be empty", ErrInvalidArgument)
 	}
 
 	for i, existing := range r.relationships {
-		if existing.Type == rel.Type && existing.TargetUID == rel.TargetUID {
+		if existing.relType == rel.relType && existing.targetUID == rel.targetUID {
 			r.relationships[i] = rel
 			return nil
 		}
@@ -465,11 +600,11 @@ func (r *PlatformResource) AddRelationship(rel ResourceRelationship) error {
 func (r *PlatformResource) EffectiveLabels() map[string]string {
 	result := make(map[string]string)
 	for _, rep := range r.representations {
-		if rep.DeletedAt != nil {
+		if rep.deleted {
 			continue
 		}
-		prefix := string(rep.ServiceName) + "/"
-		for k, v := range rep.Labels {
+		prefix := string(rep.serviceName) + "/"
+		for k, v := range rep.labels {
 			result[prefix+k] = v
 		}
 	}
@@ -499,22 +634,20 @@ func (r *PlatformResource) Snapshot() PlatformResourceSnapshot {
 	relSnaps := make([]ResourceRelationshipSnapshot, len(r.relationships))
 	for i, rel := range r.relationships {
 		relSnaps[i] = ResourceRelationshipSnapshot{
-			SourceUID:     rel.SourceUID,
-			Type:          rel.Type,
-			TargetUID:     rel.TargetUID,
-			SourceService: rel.SourceService,
-			CreatedAt:     rel.CreatedAt,
+			SourceUID:     rel.sourceUID,
+			Type:          rel.relType,
+			TargetUID:     rel.targetUID,
+			SourceService: rel.sourceService,
+			CreatedAt:     rel.createdAt,
 		}
 	}
 
 	return PlatformResourceSnapshot{
 		UID:             r.uid,
-		CollectionID:    r.collectionID,
-		RelativeName:    r.relativeName,
+		Name:            r.name,
 		Labels:          r.labels,
 		CreatedAt:       r.createdAt,
 		UpdatedAt:       r.updatedAt,
-		DeletedAt:       r.deletedAt,
 		Representations: repSnaps,
 		Aliases:         aliasSnaps,
 		Relationships:   relSnaps,
@@ -530,54 +663,79 @@ func (r *PlatformResource) Snapshot() PlatformResourceSnapshot {
 // single platform resource may have multiple representations (e.g. one
 // from Kind, one from GCP Host Connector).
 type ResourceRepresentation struct {
-	PlatformUID  PlatformResourceUID
-	ServiceName  ServiceName
-	Version      APIVersion
-	CollectionID CollectionID
-	RelativeName RelativeResourceName
-	Roles        []RepresentationRole
-	Labels       map[string]string
-	CreatedAt    time.Time
-	UpdatedAt    time.Time
-	DeletedAt    *time.Time
+	platformUID PlatformResourceUID
+	serviceName ServiceName
+	version     APIVersion
+	name        ResourceName
+	roles       []RepresentationRole
+	labels      map[string]string
+	createdAt   time.Time
+	updatedAt   time.Time
+	deleted     bool
 }
 
 // FullResourceName returns the full resource name for this
-// representation: "//{service}/{relative_name}".
+// representation: "//{service}/{name}".
 func (rr ResourceRepresentation) FullResourceName() FullResourceName {
-	return NewFullResourceName(rr.ServiceName, rr.RelativeName)
+	return NewFullResourceName(rr.serviceName, rr.name)
 }
+
+// PlatformUID returns the owning platform resource identifier.
+func (rr ResourceRepresentation) PlatformUID() PlatformResourceUID { return rr.platformUID }
+
+// ServiceName returns the extension service that owns this representation.
+func (rr ResourceRepresentation) ServiceName() ServiceName { return rr.serviceName }
+
+// Version returns the API version of the representation.
+func (rr ResourceRepresentation) Version() APIVersion { return rr.version }
+
+// Name returns the identity-equivalent resource name.
+func (rr ResourceRepresentation) Name() ResourceName { return rr.name }
+
+// Roles returns the declared representation roles.
+func (rr ResourceRepresentation) Roles() []RepresentationRole { return rr.roles }
+
+// Labels returns the representation-contributed labels.
+func (rr ResourceRepresentation) Labels() map[string]string { return rr.labels }
+
+// CreatedAt returns the creation timestamp.
+func (rr ResourceRepresentation) CreatedAt() time.Time { return rr.createdAt }
+
+// UpdatedAt returns the last-updated timestamp.
+func (rr ResourceRepresentation) UpdatedAt() time.Time { return rr.updatedAt }
+
+// Deleted reports whether this representation has been marked deleted
+// in the aggregate and should be hard-deleted by the repository.
+func (rr ResourceRepresentation) Deleted() bool { return rr.deleted }
 
 // ResourceRepresentationFromSnapshot constructs a
 // [ResourceRepresentation] from a snapshot.
 func ResourceRepresentationFromSnapshot(s ResourceRepresentationSnapshot) ResourceRepresentation {
 	return ResourceRepresentation{
-		PlatformUID:  s.PlatformUID,
-		ServiceName:  s.ServiceName,
-		Version:      s.Version,
-		CollectionID: s.CollectionID,
-		RelativeName: s.RelativeName,
-		Roles:        s.Roles,
-		Labels:       s.Labels,
-		CreatedAt:    s.CreatedAt,
-		UpdatedAt:    s.UpdatedAt,
-		DeletedAt:    s.DeletedAt,
+		platformUID: s.PlatformUID,
+		serviceName: s.ServiceName,
+		version:     s.Version,
+		name:        s.Name,
+		roles:       s.Roles,
+		labels:      s.Labels,
+		createdAt:   s.CreatedAt,
+		updatedAt:   s.UpdatedAt,
+		deleted:     s.Deleted,
 	}
 }
 
 // Snapshot returns a [ResourceRepresentationSnapshot].
 func (rr ResourceRepresentation) Snapshot() ResourceRepresentationSnapshot {
 	return ResourceRepresentationSnapshot{
-		PlatformUID:  rr.PlatformUID,
-		ServiceName:  rr.ServiceName,
-		Version:      rr.Version,
-		CollectionID: rr.CollectionID,
-		RelativeName: rr.RelativeName,
-		Roles:        rr.Roles,
-		Labels:       rr.Labels,
-		CreatedAt:    rr.CreatedAt,
-		UpdatedAt:    rr.UpdatedAt,
-		DeletedAt:    rr.DeletedAt,
+		PlatformUID: rr.platformUID,
+		ServiceName: rr.serviceName,
+		Version:     rr.version,
+		Name:        rr.name,
+		Roles:       rr.roles,
+		Labels:      rr.labels,
+		CreatedAt:   rr.createdAt,
+		UpdatedAt:   rr.updatedAt,
+		Deleted:     rr.deleted,
 	}
 }
 
@@ -590,27 +748,61 @@ func (rr ResourceRepresentation) Snapshot() ResourceRepresentationSnapshot {
 // service.
 //
 // TODO: Relationships currently reference resources by UID. Resource
-// names (RelativeResourceName) are stable, human-readable, and the
-// canonical AIP reference mechanism. UIDs force an extra lookup to
-// understand what a relationship points to. Consider switching to
-// names, possibly with deferred resolution for cases where the target
-// resource doesn't exist yet.
+// names ([ResourceName]) are stable, human-readable, and the canonical
+// AIP reference mechanism. UIDs force an extra lookup to understand
+// what a relationship points to. Consider switching to names, possibly
+// with deferred resolution for cases where the target resource doesn't
+// exist yet.
 type ResourceRelationship struct {
-	SourceUID     PlatformResourceUID
-	Type          RelationshipType
-	TargetUID     PlatformResourceUID
-	SourceService ServiceName
-	CreatedAt     time.Time
+	sourceUID     PlatformResourceUID
+	relType       RelationshipType
+	targetUID     PlatformResourceUID
+	sourceService ServiceName
+	createdAt     time.Time
 }
+
+// NewResourceRelationship constructs a [ResourceRelationship] entity.
+// Aggregate-level invariants are enforced by
+// [PlatformResource.AddRelationship].
+func NewResourceRelationship(
+	sourceUID PlatformResourceUID,
+	relType RelationshipType,
+	targetUID PlatformResourceUID,
+	sourceService ServiceName,
+	createdAt time.Time,
+) ResourceRelationship {
+	return ResourceRelationship{
+		sourceUID:     sourceUID,
+		relType:       relType,
+		targetUID:     targetUID,
+		sourceService: sourceService,
+		createdAt:     createdAt,
+	}
+}
+
+// SourceUID returns the source platform resource UID.
+func (rr ResourceRelationship) SourceUID() PlatformResourceUID { return rr.sourceUID }
+
+// Type returns the relationship type.
+func (rr ResourceRelationship) Type() RelationshipType { return rr.relType }
+
+// TargetUID returns the target platform resource UID.
+func (rr ResourceRelationship) TargetUID() PlatformResourceUID { return rr.targetUID }
+
+// SourceService returns the extension service that reported the relationship.
+func (rr ResourceRelationship) SourceService() ServiceName { return rr.sourceService }
+
+// CreatedAt returns the creation timestamp.
+func (rr ResourceRelationship) CreatedAt() time.Time { return rr.createdAt }
 
 // ResourceRelationshipFromSnapshot constructs a [ResourceRelationship]
 // from a snapshot.
 func ResourceRelationshipFromSnapshot(s ResourceRelationshipSnapshot) ResourceRelationship {
 	return ResourceRelationship{
-		SourceUID:     s.SourceUID,
-		Type:          s.Type,
-		TargetUID:     s.TargetUID,
-		SourceService: s.SourceService,
-		CreatedAt:     s.CreatedAt,
+		sourceUID:     s.SourceUID,
+		relType:       s.Type,
+		targetUID:     s.TargetUID,
+		sourceService: s.SourceService,
+		createdAt:     s.CreatedAt,
 	}
 }

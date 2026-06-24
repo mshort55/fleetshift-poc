@@ -62,7 +62,7 @@ func setupKindCluster(t *testing.T) *kindClusterFixture {
 
 	target := domain.TargetInfoFromSnapshot(domain.TargetInfoSnapshot{ID: "kind-k8s-agent", Type: kindaddon.TargetType})
 	manifests := []domain.Manifest{{
-		ResourceType: kindaddon.ClusterResourceType,
+		ManifestType: kindaddon.ClusterManifestType,
 		Raw:          json.RawMessage(`{"name":"` + clusterName + `"}`),
 	}}
 
@@ -163,7 +163,7 @@ func TestKubernetesAgent_RealCluster(t *testing.T) {
 		agent := kubeaddon.NewAgent(reporter)
 
 		manifests := []domain.Manifest{{
-			ResourceType: kubeaddon.ManifestResourceType,
+			ManifestType: kubeaddon.ManifestManifestType,
 			Raw:          json.RawMessage(`{"apiVersion":"v1","kind":"ConfigMap","metadata":{"name":"tp-test","namespace":"default"},"data":{"mode":"passthrough"}}`),
 		}}
 		auth := domain.DeliveryAuth{Token: domain.RawToken(saToken)}
@@ -199,7 +199,7 @@ func TestKubernetesAgent_RealCluster(t *testing.T) {
 		agent := kubeaddon.NewAgent(reporter)
 		auth := domain.DeliveryAuth{Token: domain.RawToken(saToken)}
 		manifest := json.RawMessage(`{"apiVersion":"v1","kind":"ConfigMap","metadata":{"name":"idempotent-test","namespace":"default"},"data":{"v":"1"}}`)
-		manifests := []domain.Manifest{{ResourceType: kubeaddon.ManifestResourceType, Raw: manifest}}
+		manifests := []domain.Manifest{{ManifestType: kubeaddon.ManifestManifestType, Raw: manifest}}
 
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
@@ -226,8 +226,8 @@ func TestKubernetesAgent_RealCluster(t *testing.T) {
 		auth := domain.DeliveryAuth{Token: domain.RawToken(saToken)}
 
 		manifests := []domain.Manifest{
-			{ResourceType: kubeaddon.ManifestResourceType, Raw: json.RawMessage(`{"apiVersion":"v1","kind":"ConfigMap","metadata":{"name":"multi-a","namespace":"default"},"data":{"idx":"a"}}`)},
-			{ResourceType: kubeaddon.ManifestResourceType, Raw: json.RawMessage(`{"apiVersion":"v1","kind":"ConfigMap","metadata":{"name":"multi-b","namespace":"default"},"data":{"idx":"b"}}`)},
+			{ManifestType: kubeaddon.ManifestManifestType, Raw: json.RawMessage(`{"apiVersion":"v1","kind":"ConfigMap","metadata":{"name":"multi-a","namespace":"default"},"data":{"idx":"a"}}`)},
+			{ManifestType: kubeaddon.ManifestManifestType, Raw: json.RawMessage(`{"apiVersion":"v1","kind":"ConfigMap","metadata":{"name":"multi-b","namespace":"default"},"data":{"idx":"b"}}`)},
 		}
 
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -260,9 +260,9 @@ func TestKubernetesAgent_RealCluster(t *testing.T) {
 
 	t.Run("AttestedDelivery_VaultCredentials", func(t *testing.T) {
 		configMap := json.RawMessage(`{"apiVersion":"v1","kind":"ConfigMap","metadata":{"name":"attested-vault-test","namespace":"default"},"data":{"mode":"attested-vault"}}`)
-		manifests := []domain.Manifest{{ResourceType: kubeaddon.ManifestResourceType, Raw: configMap}}
+		manifests := []domain.Manifest{{ManifestType: kubeaddon.ManifestManifestType, Raw: configMap}}
 
-		att := buildTestAttestation(t, "attested-dep", manifests)
+		att := buildTestAttestation(t, "deployments/attested-dep", manifests)
 
 		reporter := newChannelReporter()
 		agent := kubeaddon.NewAgent(reporter,
@@ -346,7 +346,7 @@ type testAttestationBundle struct {
 	trustBundleJSON string
 }
 
-func buildTestAttestation(t *testing.T, depID domain.DeploymentID, manifests []domain.Manifest) testAttestationBundle {
+func buildTestAttestation(t *testing.T, name domain.ResourceName, manifests []domain.Manifest) testAttestationBundle {
 	t.Helper()
 
 	provider := oidctest.Start(t, oidctest.WithAudience("fleetshift-enroll"))
@@ -379,7 +379,7 @@ func buildTestAttestation(t *testing.T, depID domain.DeploymentID, manifests []d
 	validUntil := time.Now().Add(24 * time.Hour)
 	gen := domain.Generation(1)
 
-	envelope, err := domain.BuildSignedInputEnvelope(depID, ms, ps, validUntil, nil, gen)
+	envelope, err := domain.BuildSignedInputEnvelope(name, ms, ps, validUntil, nil, gen)
 	if err != nil {
 		t.Fatalf("build envelope: %v", err)
 	}
@@ -395,7 +395,7 @@ func buildTestAttestation(t *testing.T, depID domain.DeploymentID, manifests []d
 		Input: domain.SignedInput{
 			Provenance: domain.Provenance{
 				Content: domain.DeploymentContent{
-					DeploymentID:      depID,
+					Name:              name,
 					ManifestStrategy:  ms,
 					PlacementStrategy: ps,
 				},

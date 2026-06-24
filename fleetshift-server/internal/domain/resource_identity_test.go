@@ -74,9 +74,10 @@ func TestNewCollectionID(t *testing.T) {
 		input   string
 		wantErr bool
 	}{
-		{name: "valid", input: "clusters"},
+		{name: "valid lowercase", input: "clusters"},
+		{name: "valid camelCase", input: "userEvents"},
 		{name: "empty rejected", input: "", wantErr: true},
-		{name: "uppercase rejected", input: "Clusters", wantErr: true},
+		{name: "UpperCamelCase rejected", input: "Clusters", wantErr: true},
 		{name: "slash rejected", input: "a/b", wantErr: true},
 	}
 	for _, tt := range tests {
@@ -92,6 +93,35 @@ func TestNewCollectionID(t *testing.T) {
 				t.Fatalf("unexpected error: %v", err)
 			}
 			if got != CollectionID(tt.input) {
+				t.Errorf("got %q, want %q", got, tt.input)
+			}
+		})
+	}
+}
+
+func TestNewResourceID(t *testing.T) {
+	tests := []struct {
+		name    string
+		input   string
+		wantErr bool
+	}{
+		{name: "valid", input: "prod-us-east-1"},
+		{name: "empty rejected", input: "", wantErr: true},
+		{name: "slash rejected", input: "a/b", wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := NewResourceID(tt.input)
+			if tt.wantErr {
+				if !errors.Is(err, ErrInvalidArgument) {
+					t.Errorf("got %v, want ErrInvalidArgument", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if got != ResourceID(tt.input) {
 				t.Errorf("got %q, want %q", got, tt.input)
 			}
 		})
@@ -159,39 +189,132 @@ func TestNewRelationshipType(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// RelativeResourceName (existing tests, preserved)
+// CollectionName
 // ---------------------------------------------------------------------------
 
-func TestNewRelativeResourceName(t *testing.T) {
-	tests := []struct {
-		name       string
-		collection CollectionID
-		id         string
-		wantErr    bool
-	}{
-		{name: "valid", collection: "clusters", id: "prod"},
-		{name: "empty collection", collection: "", id: "prod", wantErr: true},
-		{name: "empty id", collection: "clusters", id: "", wantErr: true},
-		{name: "id with slash", collection: "clusters", id: "a/b", wantErr: true},
+func TestNewCollectionName(t *testing.T) {
+	cn := NewCollectionName("clusters")
+	if cn != "clusters" {
+		t.Errorf("NewCollectionName = %q, want clusters", cn)
 	}
+	if cn.CollectionID() != "clusters" {
+		t.Errorf("CollectionID() = %q, want clusters", cn.CollectionID())
+	}
+	if _, ok := cn.Parent(); ok {
+		t.Error("flat CollectionName should have no parent")
+	}
+}
 
+func TestParseCollectionName(t *testing.T) {
+	tests := []struct {
+		name    string
+		input   string
+		wantErr bool
+	}{
+		{name: "flat", input: "clusters"},
+		{name: "flat camelCase", input: "userEvents"},
+		{name: "nested", input: "publishers/123/books"},
+		{name: "nested camelCase tail", input: "publishers/123/bookEditions"},
+		{name: "empty rejected", input: "", wantErr: true},
+		{name: "UpperCamelCase tail rejected", input: "publishers/123/BookEditions", wantErr: true},
+		{name: "leading slash rejected", input: "/clusters", wantErr: true},
+		{name: "trailing slash rejected", input: "clusters/", wantErr: true},
+		{name: "double slash rejected", input: "publishers//books", wantErr: true},
+		{name: "even segments rejected", input: "publishers/123", wantErr: true},
+		{name: "four segments rejected", input: "publishers/123/books/les-mis", wantErr: true},
+	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := NewRelativeResourceName(tt.collection, tt.id)
+			_, err := ParseCollectionName(tt.input)
 			if tt.wantErr {
 				if !errors.Is(err, ErrInvalidArgument) {
-					t.Errorf("got err %v, want ErrInvalidArgument", err)
+					t.Errorf("got %v, want ErrInvalidArgument", err)
 				}
 				return
 			}
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
-			if got.CollectionID() != tt.collection {
-				t.Errorf("CollectionID() = %q, want %q", got.CollectionID(), tt.collection)
+		})
+	}
+}
+
+func TestCollectionName_NestedParent(t *testing.T) {
+	cn := CollectionName("publishers/123/books")
+	if cn.CollectionID() != "books" {
+		t.Errorf("CollectionID() = %q, want books", cn.CollectionID())
+	}
+	parent, ok := cn.Parent()
+	if !ok {
+		t.Fatal("nested CollectionName should have a parent")
+	}
+	if parent != "publishers/123" {
+		t.Errorf("Parent() = %q, want publishers/123", parent)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// ResourceName (renamed from RelativeResourceName)
+// ---------------------------------------------------------------------------
+
+func TestNewResourceName(t *testing.T) {
+	tests := []struct {
+		name       string
+		collection CollectionName
+		id         ResourceID
+	}{
+		{name: "flat", collection: "clusters", id: "prod"},
+		{name: "nested", collection: "publishers/123/books", id: "les-mis"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := NewResourceName(tt.collection, tt.id)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if got.CollectionID() != tt.collection.CollectionID() {
+				t.Errorf("CollectionID() = %q, want %q", got.CollectionID(), tt.collection.CollectionID())
 			}
 			if got.ID() != tt.id {
 				t.Errorf("ID() = %q, want %q", got.ID(), tt.id)
+			}
+			if got.Collection() != tt.collection {
+				t.Errorf("Collection() = %q, want %q", got.Collection(), tt.collection)
+			}
+		})
+	}
+}
+
+func TestParseResourceName(t *testing.T) {
+	tests := []struct {
+		name    string
+		input   string
+		wantErr bool
+	}{
+		{name: "valid flat", input: "clusters/prod"},
+		{name: "valid nested", input: "publishers/123/books/les-mis"},
+		{name: "empty rejected", input: "", wantErr: true},
+		{name: "no slash rejected", input: "prod", wantErr: true},
+		{name: "trailing slash rejected", input: "clusters/", wantErr: true},
+		{name: "leading slash rejected", input: "/clusters/prod", wantErr: true},
+		{name: "double slash rejected", input: "clusters//prod", wantErr: true},
+		{name: "odd segments rejected", input: "publishers/123/books", wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := ParseResourceName(tt.input)
+			if tt.wantErr {
+				if !errors.Is(err, ErrInvalidArgument) {
+					t.Errorf("got %v, want ErrInvalidArgument", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if string(got) != tt.input {
+				t.Errorf("got %q, want %q", got, tt.input)
 			}
 		})
 	}
@@ -206,8 +329,58 @@ func TestFullResourceName_ConstructsAndParses(t *testing.T) {
 	if frn.ServiceName() != "kind.fleetshift.io" {
 		t.Errorf("ServiceName() = %q, want kind.fleetshift.io", frn.ServiceName())
 	}
-	if frn.RelativeName() != "clusters/prod" {
-		t.Errorf("RelativeName() = %q, want clusters/prod", frn.RelativeName())
+	if frn.ResourceName() != "clusters/prod" {
+		t.Errorf("ResourceName() = %q, want clusters/prod", frn.ResourceName())
+	}
+}
+
+// ---------------------------------------------------------------------------
+// PlatformResourceUID
+// ---------------------------------------------------------------------------
+
+func TestPlatformResourceUID_NewAndParse(t *testing.T) {
+	uid := NewPlatformResourceUID()
+	if uid.IsZero() {
+		t.Fatal("NewPlatformResourceUID returned zero UUID")
+	}
+
+	s := uid.String()
+	parsed, err := ParsePlatformResourceUID(s)
+	if err != nil {
+		t.Fatalf("ParsePlatformResourceUID(%q): %v", s, err)
+	}
+	if parsed != uid {
+		t.Errorf("round-trip: got %s, want %s", parsed, uid)
+	}
+}
+
+func TestPlatformResourceUID_TextRoundTrip(t *testing.T) {
+	uid := NewPlatformResourceUID()
+	text, err := uid.MarshalText()
+	if err != nil {
+		t.Fatalf("MarshalText: %v", err)
+	}
+	var parsed PlatformResourceUID
+	if err := parsed.UnmarshalText(text); err != nil {
+		t.Fatalf("UnmarshalText: %v", err)
+	}
+	if parsed != uid {
+		t.Errorf("round-trip: got %s, want %s", parsed, uid)
+	}
+}
+
+func TestPlatformResourceUID_SQLRoundTrip(t *testing.T) {
+	uid := NewPlatformResourceUID()
+	val, err := uid.Value()
+	if err != nil {
+		t.Fatalf("Value: %v", err)
+	}
+	var parsed PlatformResourceUID
+	if err := parsed.Scan(val); err != nil {
+		t.Fatalf("Scan: %v", err)
+	}
+	if parsed != uid {
+		t.Errorf("round-trip: got %s, want %s", parsed, uid)
 	}
 }
 
@@ -217,7 +390,8 @@ func TestFullResourceName_ConstructsAndParses(t *testing.T) {
 
 func TestPlatformResource_SetLabels(t *testing.T) {
 	now := time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)
-	r := NewPlatformResource("uid-1", "clusters", "clusters/prod", map[string]string{"a": "1"}, now)
+	uid := NewPlatformResourceUID()
+	r := NewPlatformResource(uid, "clusters/prod", map[string]string{"a": "1"}, now)
 
 	later := now.Add(time.Hour)
 	r.SetLabels(map[string]string{"b": "2"}, later)
@@ -238,7 +412,8 @@ func TestPlatformResource_SetLabels(t *testing.T) {
 
 func TestPlatformResource_AttachRepresentation(t *testing.T) {
 	now := time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)
-	r := NewPlatformResource("uid-1", "clusters", "clusters/prod", nil, now)
+	uid := NewPlatformResourceUID()
+	r := NewPlatformResource(uid, "clusters/prod", nil, now)
 
 	later := now.Add(time.Hour)
 	err := r.AttachRepresentation(AttachRepresentationInput{
@@ -255,29 +430,27 @@ func TestPlatformResource_AttachRepresentation(t *testing.T) {
 	if len(reps) != 1 {
 		t.Fatalf("len(Representations) = %d, want 1", len(reps))
 	}
-	if reps[0].ServiceName != "kind.fleetshift.io" {
-		t.Errorf("ServiceName = %q, want kind.fleetshift.io", reps[0].ServiceName)
+	if reps[0].ServiceName() != "kind.fleetshift.io" {
+		t.Errorf("ServiceName = %q, want kind.fleetshift.io", reps[0].ServiceName())
 	}
-	if reps[0].Version != "v1alpha1" {
-		t.Errorf("Version = %q, want v1alpha1", reps[0].Version)
+	if reps[0].Version() != "v1alpha1" {
+		t.Errorf("Version = %q, want v1alpha1", reps[0].Version())
 	}
-	if reps[0].Labels["runtime"] != "containerd" {
-		t.Errorf("Labels[runtime] = %q, want containerd", reps[0].Labels["runtime"])
+	if reps[0].Labels()["runtime"] != "containerd" {
+		t.Errorf("Labels[runtime] = %q, want containerd", reps[0].Labels()["runtime"])
 	}
-	if reps[0].PlatformUID != "uid-1" {
-		t.Errorf("PlatformUID = %q, want uid-1", reps[0].PlatformUID)
+	if reps[0].PlatformUID() != uid {
+		t.Errorf("PlatformUID = %s, want %s", reps[0].PlatformUID(), uid)
 	}
-	if reps[0].CollectionID != "clusters" {
-		t.Errorf("CollectionID = %q, want clusters (inherited from aggregate)", reps[0].CollectionID)
-	}
-	if reps[0].RelativeName != "clusters/prod" {
-		t.Errorf("RelativeName = %q, want clusters/prod (inherited from aggregate)", reps[0].RelativeName)
+	if reps[0].Name() != "clusters/prod" {
+		t.Errorf("Name = %q, want clusters/prod (inherited from aggregate)", reps[0].Name())
 	}
 }
 
 func TestPlatformResource_AttachRepresentation_UpdatesExisting(t *testing.T) {
 	now := time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)
-	r := NewPlatformResource("uid-1", "clusters", "clusters/prod", nil, now)
+	uid := NewPlatformResourceUID()
+	r := NewPlatformResource(uid, "clusters/prod", nil, now)
 
 	err := r.AttachRepresentation(AttachRepresentationInput{
 		ServiceName: "kind.fleetshift.io",
@@ -304,17 +477,18 @@ func TestPlatformResource_AttachRepresentation_UpdatesExisting(t *testing.T) {
 	if len(reps) != 1 {
 		t.Fatalf("len(Representations) = %d, want 1 (upsert)", len(reps))
 	}
-	if reps[0].Version != "v1beta1" {
-		t.Errorf("Version = %q, want v1beta1", reps[0].Version)
+	if reps[0].Version() != "v1beta1" {
+		t.Errorf("Version = %q, want v1beta1", reps[0].Version())
 	}
-	if reps[0].Labels["v"] != "2" {
-		t.Errorf("Labels[v] = %q, want 2", reps[0].Labels["v"])
+	if reps[0].Labels()["v"] != "2" {
+		t.Errorf("Labels[v] = %q, want 2", reps[0].Labels()["v"])
 	}
 }
 
 func TestPlatformResource_AttachRepresentation_RejectsInvalidRoles(t *testing.T) {
 	now := time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)
-	r := NewPlatformResource("uid-1", "clusters", "clusters/prod", nil, now)
+	uid := NewPlatformResourceUID()
+	r := NewPlatformResource(uid, "clusters/prod", nil, now)
 
 	err := r.AttachRepresentation(AttachRepresentationInput{
 		ServiceName: "kind.fleetshift.io",
@@ -326,9 +500,10 @@ func TestPlatformResource_AttachRepresentation_RejectsInvalidRoles(t *testing.T)
 	}
 }
 
-func TestPlatformResource_TombstoneRepresentation(t *testing.T) {
+func TestPlatformResource_DeleteRepresentation(t *testing.T) {
 	now := time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)
-	r := NewPlatformResource("uid-1", "clusters", "clusters/prod", nil, now)
+	uid := NewPlatformResourceUID()
+	r := NewPlatformResource(uid, "clusters/prod", nil, now)
 
 	err := r.AttachRepresentation(AttachRepresentationInput{
 		ServiceName: "kind.fleetshift.io",
@@ -340,39 +515,39 @@ func TestPlatformResource_TombstoneRepresentation(t *testing.T) {
 	}
 
 	later := now.Add(time.Hour)
-	err = r.TombstoneRepresentation("kind.fleetshift.io", later)
+	err = r.DeleteRepresentation("kind.fleetshift.io", later)
 	if err != nil {
-		t.Fatalf("tombstone: %v", err)
+		t.Fatalf("delete: %v", err)
 	}
 
-	// Active representations should be empty.
 	if len(r.Representations()) != 0 {
-		t.Errorf("active representations len = %d, want 0", len(r.Representations()))
+		t.Errorf("representations len = %d, want 0", len(r.Representations()))
 	}
 
-	// AllRepresentations (including tombstoned) should still have it.
 	all := r.AllRepresentations()
 	if len(all) != 1 {
 		t.Fatalf("all representations len = %d, want 1", len(all))
 	}
-	if all[0].DeletedAt == nil {
-		t.Fatal("DeletedAt is nil, want non-nil")
+	if !all[0].Deleted() {
+		t.Fatal("Deleted is false, want true")
 	}
 }
 
-func TestPlatformResource_TombstoneRepresentation_NotFound(t *testing.T) {
+func TestPlatformResource_DeleteRepresentation_NotFound(t *testing.T) {
 	now := time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)
-	r := NewPlatformResource("uid-1", "clusters", "clusters/prod", nil, now)
+	uid := NewPlatformResourceUID()
+	r := NewPlatformResource(uid, "clusters/prod", nil, now)
 
-	err := r.TombstoneRepresentation("missing.io", now)
+	err := r.DeleteRepresentation("missing.io", now)
 	if !errors.Is(err, ErrNotFound) {
-		t.Errorf("tombstone missing: got %v, want ErrNotFound", err)
+		t.Errorf("delete missing: got %v, want ErrNotFound", err)
 	}
 }
 
 func TestPlatformResource_AddAlias(t *testing.T) {
 	now := time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)
-	r := NewPlatformResource("uid-1", "clusters", "clusters/prod", nil, now)
+	uid := NewPlatformResourceUID()
+	r := NewPlatformResource(uid, "clusters/prod", nil, now)
 
 	alias, _ := NewAlias("gcp", "project_id", "my-proj")
 	if err := r.AddAlias(alias); err != nil {
@@ -390,7 +565,8 @@ func TestPlatformResource_AddAlias(t *testing.T) {
 
 func TestPlatformResource_AddAlias_Idempotent(t *testing.T) {
 	now := time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)
-	r := NewPlatformResource("uid-1", "clusters", "clusters/prod", nil, now)
+	uid := NewPlatformResourceUID()
+	r := NewPlatformResource(uid, "clusters/prod", nil, now)
 
 	alias, _ := NewAlias("gcp", "project_id", "my-proj")
 	if err := r.AddAlias(alias); err != nil {
@@ -407,7 +583,8 @@ func TestPlatformResource_AddAlias_Idempotent(t *testing.T) {
 
 func TestPlatformResource_AddAlias_RejectsConflictingValue(t *testing.T) {
 	now := time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)
-	r := NewPlatformResource("uid-1", "clusters", "clusters/prod", nil, now)
+	uid := NewPlatformResourceUID()
+	r := NewPlatformResource(uid, "clusters/prod", nil, now)
 
 	first, _ := NewAlias("gcp", "project_id", "proj-a")
 	if err := r.AddAlias(first); err != nil {
@@ -420,7 +597,6 @@ func TestPlatformResource_AddAlias_RejectsConflictingValue(t *testing.T) {
 		t.Errorf("conflicting alias: got %v, want ErrInvalidArgument", err)
 	}
 
-	// Original alias should be unchanged.
 	aliases := r.Aliases()
 	if len(aliases) != 1 {
 		t.Fatalf("len(Aliases) = %d, want 1", len(aliases))
@@ -432,7 +608,8 @@ func TestPlatformResource_AddAlias_RejectsConflictingValue(t *testing.T) {
 
 func TestPlatformResource_AddAlias_AllowsDifferentKeysInSameNamespace(t *testing.T) {
 	now := time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)
-	r := NewPlatformResource("uid-1", "clusters", "clusters/prod", nil, now)
+	uid := NewPlatformResourceUID()
+	r := NewPlatformResource(uid, "clusters/prod", nil, now)
 
 	a1, _ := NewAlias("gcp", "project_id", "proj-a")
 	a2, _ := NewAlias("gcp", "zone", "us-central1-a")
@@ -450,15 +627,11 @@ func TestPlatformResource_AddAlias_AllowsDifferentKeysInSameNamespace(t *testing
 
 func TestPlatformResource_AddRelationship(t *testing.T) {
 	now := time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)
-	r := NewPlatformResource("uid-1", "clusters", "clusters/prod", nil, now)
+	uid1 := NewPlatformResourceUID()
+	uid2 := NewPlatformResourceUID()
+	r := NewPlatformResource(uid1, "clusters/prod", nil, now)
 
-	err := r.AddRelationship(ResourceRelationship{
-		SourceUID:     "uid-1",
-		Type:          "runs-on",
-		TargetUID:     "uid-2",
-		SourceService: "kind.fleetshift.io",
-		CreatedAt:     now,
-	})
+	err := r.AddRelationship(NewResourceRelationship(uid1, "runs-on", uid2, "kind.fleetshift.io", now))
 	if err != nil {
 		t.Fatalf("AddRelationship: %v", err)
 	}
@@ -467,22 +640,18 @@ func TestPlatformResource_AddRelationship(t *testing.T) {
 	if len(rels) != 1 {
 		t.Fatalf("len(Relationships) = %d, want 1", len(rels))
 	}
-	if rels[0].Type != "runs-on" {
-		t.Errorf("Type = %q, want runs-on", rels[0].Type)
+	if rels[0].Type() != "runs-on" {
+		t.Errorf("Type = %q, want runs-on", rels[0].Type())
 	}
 }
 
 func TestPlatformResource_AddRelationship_RejectsEmptyType(t *testing.T) {
 	now := time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)
-	r := NewPlatformResource("uid-1", "clusters", "clusters/prod", nil, now)
+	uid1 := NewPlatformResourceUID()
+	uid2 := NewPlatformResourceUID()
+	r := NewPlatformResource(uid1, "clusters/prod", nil, now)
 
-	err := r.AddRelationship(ResourceRelationship{
-		SourceUID:     "uid-1",
-		Type:          "",
-		TargetUID:     "uid-2",
-		SourceService: "kind.fleetshift.io",
-		CreatedAt:     now,
-	})
+	err := r.AddRelationship(NewResourceRelationship(uid1, "", uid2, "kind.fleetshift.io", now))
 	if !errors.Is(err, ErrInvalidArgument) {
 		t.Errorf("empty type: got %v, want ErrInvalidArgument", err)
 	}
@@ -490,15 +659,12 @@ func TestPlatformResource_AddRelationship_RejectsEmptyType(t *testing.T) {
 
 func TestPlatformResource_AddRelationship_RejectsForeignSourceUID(t *testing.T) {
 	now := time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)
-	r := NewPlatformResource("uid-1", "clusters", "clusters/prod", nil, now)
+	uid1 := NewPlatformResourceUID()
+	uid2 := NewPlatformResourceUID()
+	foreignUID := NewPlatformResourceUID()
+	r := NewPlatformResource(uid1, "clusters/prod", nil, now)
 
-	err := r.AddRelationship(ResourceRelationship{
-		SourceUID:     "uid-999",
-		Type:          "runs-on",
-		TargetUID:     "uid-2",
-		SourceService: "kind.fleetshift.io",
-		CreatedAt:     now,
-	})
+	err := r.AddRelationship(NewResourceRelationship(foreignUID, "runs-on", uid2, "kind.fleetshift.io", now))
 	if !errors.Is(err, ErrInvalidArgument) {
 		t.Errorf("foreign source UID: got %v, want ErrInvalidArgument", err)
 	}
@@ -509,7 +675,8 @@ func TestPlatformResource_AddRelationship_RejectsForeignSourceUID(t *testing.T) 
 
 func TestPlatformResource_EffectiveLabels(t *testing.T) {
 	now := time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)
-	r := NewPlatformResource("uid-1", "clusters", "clusters/prod", map[string]string{"env": "prod", "team": "infra"}, now)
+	uid := NewPlatformResourceUID()
+	r := NewPlatformResource(uid, "clusters/prod", map[string]string{"env": "prod", "team": "infra"}, now)
 
 	if err := r.AttachRepresentation(AttachRepresentationInput{
 		ServiceName: "kind.fleetshift.io",
@@ -542,7 +709,8 @@ func TestPlatformResource_EffectiveLabels(t *testing.T) {
 
 func TestPlatformResource_EffectiveLabels_PlatformOverrides(t *testing.T) {
 	now := time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)
-	r := NewPlatformResource("uid-1", "clusters", "clusters/prod", map[string]string{"kind.fleetshift.io/version": "override"}, now)
+	uid := NewPlatformResourceUID()
+	r := NewPlatformResource(uid, "clusters/prod", map[string]string{"kind.fleetshift.io/version": "override"}, now)
 
 	if err := r.AttachRepresentation(AttachRepresentationInput{
 		ServiceName: "kind.fleetshift.io",
@@ -557,9 +725,10 @@ func TestPlatformResource_EffectiveLabels_PlatformOverrides(t *testing.T) {
 	assertEq(t, "override", got["kind.fleetshift.io/version"], "override")
 }
 
-func TestPlatformResource_EffectiveLabels_ExcludesTombstoned(t *testing.T) {
+func TestPlatformResource_EffectiveLabels_ExcludesDeletedRepresentations(t *testing.T) {
 	now := time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)
-	r := NewPlatformResource("uid-1", "clusters", "clusters/prod", map[string]string{"env": "prod"}, now)
+	uid := NewPlatformResourceUID()
+	r := NewPlatformResource(uid, "clusters/prod", map[string]string{"env": "prod"}, now)
 
 	if err := r.AttachRepresentation(AttachRepresentationInput{
 		ServiceName: "kind.fleetshift.io",
@@ -570,13 +739,13 @@ func TestPlatformResource_EffectiveLabels_ExcludesTombstoned(t *testing.T) {
 		t.Fatalf("attach: %v", err)
 	}
 
-	if err := r.TombstoneRepresentation("kind.fleetshift.io", now.Add(time.Hour)); err != nil {
-		t.Fatalf("tombstone: %v", err)
+	if err := r.DeleteRepresentation("kind.fleetshift.io", now.Add(time.Hour)); err != nil {
+		t.Fatalf("delete: %v", err)
 	}
 
 	got := r.EffectiveLabels()
 	if _, ok := got["kind.fleetshift.io/version"]; ok {
-		t.Error("tombstoned representation labels should not appear in effective labels")
+		t.Error("deleted representation labels should not appear in effective labels")
 	}
 	assertEq(t, "env", got["env"], "prod")
 }

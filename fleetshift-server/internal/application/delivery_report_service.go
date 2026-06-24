@@ -23,6 +23,7 @@ type DeliveryReportService struct {
 	signaler    domain.FulfillmentSignaler
 	attestation domain.AttestationAssembler
 	observer    domain.DeliveryObserver
+	now         func() time.Time
 }
 
 // DeliveryReportServiceOption configures a [DeliveryReportService].
@@ -39,6 +40,17 @@ func WithAttestationAssembler(a domain.AttestationAssembler) DeliveryReportServi
 	return func(s *DeliveryReportService) { s.attestation = a }
 }
 
+// WithDeliveryReportClock overrides the wall-clock used for delivery
+// state transition timestamps. Defaults to [time.Now]. A nil fn is
+// treated as a no-op to prevent nil-dereference panics at runtime.
+func WithDeliveryReportClock(fn func() time.Time) DeliveryReportServiceOption {
+	return func(s *DeliveryReportService) {
+		if fn != nil {
+			s.now = fn
+		}
+	}
+}
+
 // NewDeliveryReportService creates a service with the given
 // dependencies. The signaler is called to notify the fulfillment
 // workflow when a delivery reaches a terminal state; any
@@ -52,6 +64,7 @@ func NewDeliveryReportService(
 		store:    store,
 		signaler: signaler,
 		observer: domain.NoOpDeliveryObserver{},
+		now:      time.Now,
 	}
 	for _, o := range opts {
 		o(s)
@@ -93,7 +106,7 @@ func (s *DeliveryReportService) ReportEvent(ctx context.Context, deliveryID doma
 
 	wasPending := d.State() == domain.DeliveryStatePending
 
-	if err := d.TransitionTo(domain.DeliveryStateProgressing, time.Now()); err != nil {
+	if err := d.TransitionTo(domain.DeliveryStateProgressing, s.now()); err != nil {
 		if errors.Is(err, domain.ErrIllegalStateTransition) {
 			return nil
 		}
@@ -157,7 +170,7 @@ func (s *DeliveryReportService) ReportResult(ctx context.Context, deliveryID dom
 
 	wasPending := d.State() == domain.DeliveryStatePending
 
-	if err := d.TransitionTo(result.State, time.Now()); err != nil {
+	if err := d.TransitionTo(result.State, s.now()); err != nil {
 		if errors.Is(err, domain.ErrIllegalStateTransition) {
 			return nil
 		}

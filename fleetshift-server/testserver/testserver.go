@@ -20,6 +20,7 @@ import (
 	"github.com/fleetshift/fleetshift-poc/fleetshift-server/internal/infrastructure/delivery"
 	"github.com/fleetshift/fleetshift-poc/fleetshift-server/internal/infrastructure/memworkflow"
 	"github.com/fleetshift/fleetshift-poc/fleetshift-server/internal/infrastructure/sqlite"
+	"github.com/fleetshift/fleetshift-poc/fleetshift-server/internal/transport/dynamicapi"
 	transportgrpc "github.com/fleetshift/fleetshift-poc/fleetshift-server/internal/transport/grpc"
 	"github.com/fleetshift/fleetshift-poc/fleetshift-server/internal/transport/managedresource"
 )
@@ -184,8 +185,8 @@ func Start(t *testing.T) string {
 	}
 	authnInterceptor := transportgrpc.NewAuthnInterceptor(authMethodSvc, stubVerifier{}, domain.NoOpAuthnObserver{})
 
-	dynamicMux := managedresource.NewDynamicServiceMux()
-	fileRegistry := managedresource.NewDynamicFileRegistry()
+	dynamicMux := dynamicapi.NewDynamicServiceMux()
+	fileRegistry := dynamicapi.NewDynamicFileRegistry()
 
 	srv := grpc.NewServer(
 		grpc.ChainUnaryInterceptor(authnInterceptor.Unary()),
@@ -198,7 +199,7 @@ func Start(t *testing.T) string {
 	pb.RegisterAuthMethodServiceServer(srv, &transportgrpc.AuthMethodServer{
 		AuthMethods: authMethodSvc,
 	})
-	managedresource.RegisterCompositeReflection(srv, dynamicMux, fileRegistry)
+	dynamicapi.RegisterCompositeReflection(srv, dynamicMux, fileRegistry)
 
 	activator := &managedresource.DynamicSchemaActivator{
 		GRPCMux:      dynamicMux,
@@ -212,7 +213,7 @@ func Start(t *testing.T) string {
 	// Use the AddonManager lifecycle (Enable → Connect) to match
 	// production wiring in serve.go. This registers targets, creates
 	// managed resource type definitions, and activates schemas.
-	typeSvc := &application.ManagedResourceTypeService{Store: store}
+	typeSvc := application.NewManagedResourceTypeService(store)
 	addonMgr := application.NewAddonManager(application.AddonManagerDeps{
 		Router:    router,
 		TypeSvc:   typeSvc,
@@ -230,7 +231,7 @@ func Start(t *testing.T) string {
 			ID:                    "kind-local",
 			Type:                  kindaddon.TargetType,
 			Name:                  "Local Kind Provider",
-			AcceptedResourceTypes: []domain.ResourceType{kindaddon.ClusterResourceType},
+			AcceptedManifestTypes: []domain.ManifestType{kindaddon.ClusterManifestType},
 		})},
 		Schemas: []domain.ManagedResourceSchema{schema},
 	}); err != nil {
@@ -247,7 +248,7 @@ func Start(t *testing.T) string {
 			ID:                    "gcphcp-test",
 			Type:                  gcphcpaddon.TargetType,
 			Name:                  "Test GCP HCP Provider",
-			AcceptedResourceTypes: []domain.ResourceType{gcphcpaddon.ClusterResourceType},
+			AcceptedManifestTypes: []domain.ManifestType{gcphcpaddon.ClusterManifestType},
 		})},
 		Schemas: []domain.ManagedResourceSchema{gcpSchema},
 	}); err != nil {

@@ -28,6 +28,7 @@ import (
 	"github.com/fleetshift/fleetshift-poc/fleetshift-server/internal/infrastructure/delivery"
 	"github.com/fleetshift/fleetshift-poc/fleetshift-server/internal/infrastructure/memworkflow"
 	"github.com/fleetshift/fleetshift-poc/fleetshift-server/internal/infrastructure/sqlite"
+	"github.com/fleetshift/fleetshift-poc/fleetshift-server/internal/transport/dynamicapi"
 	"github.com/fleetshift/fleetshift-poc/fleetshift-server/internal/transport/managedresource"
 )
 
@@ -118,16 +119,19 @@ func buildFullClusterServiceN(t *testing.T, n int) *managedresource.RegisteredSe
 	targetSvc := &application.TargetService{Store: store}
 	if err := targetSvc.Register(context.Background(), domain.TargetInfoFromSnapshot(domain.TargetInfoSnapshot{
 		ID: "kind-local", Type: clusterTargetType, Name: "Kind Cluster Addon",
-		AcceptedResourceTypes: []domain.ResourceType{kindaddon.ClusterResourceType},
+		AcceptedManifestTypes: []domain.ManifestType{kindaddon.ClusterManifestType},
 	})); err != nil {
 		t.Fatalf("register target: %v", err)
 	}
 
-	typeSvc := &application.ManagedResourceTypeService{Store: store}
+	typeSvc := application.NewManagedResourceTypeService(store)
 	if _, err := typeSvc.Create(context.Background(), application.CreateTypeInput{
-		ResourceType: kindaddon.ClusterResourceType,
-		Relation:     domain.RegisteredSelfTarget{AddonTarget: "kind-local"},
-		Signature:    domain.Signature{},
+		ResourceType:   kindaddon.ClusterResourceType,
+		Relation:       domain.NewRegisteredSelfTarget("kind-local", kindaddon.ClusterManifestType),
+		Signature:      domain.Signature{},
+		APIServiceName: "kind.fleetshift.io",
+		APIVersion:     "v1",
+		CollectionID:   "clusters",
 	}); err != nil {
 		t.Fatalf("register cluster type: %v", err)
 	}
@@ -149,7 +153,7 @@ func buildFullClusterServiceN(t *testing.T, n int) *managedresource.RegisteredSe
 // dialMux starts a gRPC server with mux.Handle as the unknown service
 // handler and returns a client connection over bufconn. Additional
 // server options (e.g. stream interceptors) can be passed.
-func dialMux(t *testing.T, mux *managedresource.DynamicServiceMux, opts ...grpc.ServerOption) *grpc.ClientConn {
+func dialMux(t *testing.T, mux *dynamicapi.DynamicServiceMux, opts ...grpc.ServerOption) *grpc.ClientConn {
 	t.Helper()
 
 	allOpts := append([]grpc.ServerOption{grpc.UnknownServiceHandler(mux.Handle)}, opts...)
@@ -192,26 +196,26 @@ func createClusterRequest(svc *managedresource.RegisteredService, id string) *dy
 
 func TestDynamicMux_DuplicateRegisterReturnsError(t *testing.T) {
 	svc := buildClusterService(t)
-	mux := managedresource.NewDynamicServiceMux()
+	mux := dynamicapi.NewDynamicServiceMux()
 
-	if err := mux.Register(svc); err != nil {
+	if err := mux.RegisterDesc(svc.Desc); err != nil {
 		t.Fatalf("first Register: %v", err)
 	}
-	if err := mux.Register(svc); err == nil {
+	if err := mux.RegisterDesc(svc.Desc); err == nil {
 		t.Fatal("expected error on duplicate register, got nil")
 	}
 }
 
 func TestDynamicMux_ReplaceSwapsService(t *testing.T) {
 	svc := buildClusterService(t)
-	mux := managedresource.NewDynamicServiceMux()
+	mux := dynamicapi.NewDynamicServiceMux()
 
-	if err := mux.Register(svc); err != nil {
+	if err := mux.RegisterDesc(svc.Desc); err != nil {
 		t.Fatalf("Register: %v", err)
 	}
 
 	svc2 := buildClusterService(t)
-	mux.Replace(svc2)
+	mux.ReplaceDesc(svc2.Desc)
 
 	info := mux.ServiceInfo()
 	if _, ok := info["kind.fleetshift.v1.ClusterService"]; !ok {
@@ -221,9 +225,9 @@ func TestDynamicMux_ReplaceSwapsService(t *testing.T) {
 
 func TestDynamicMux_ReplaceAddsIfAbsent(t *testing.T) {
 	svc := buildClusterService(t)
-	mux := managedresource.NewDynamicServiceMux()
+	mux := dynamicapi.NewDynamicServiceMux()
 
-	mux.Replace(svc)
+	mux.ReplaceDesc(svc.Desc)
 
 	info := mux.ServiceInfo()
 	if _, ok := info["kind.fleetshift.v1.ClusterService"]; !ok {
@@ -232,10 +236,10 @@ func TestDynamicMux_ReplaceAddsIfAbsent(t *testing.T) {
 }
 
 func TestDynamicMux_ReplaceDispatchesToNewHandler(t *testing.T) {
-	mux := managedresource.NewDynamicServiceMux()
+	mux := dynamicapi.NewDynamicServiceMux()
 
 	svc1 := buildFullClusterServiceN(t, 1)
-	if err := mux.Register(svc1); err != nil {
+	if err := mux.RegisterDesc(svc1.Desc); err != nil {
 		t.Fatalf("Register: %v", err)
 	}
 	conn := dialMux(t, mux)
@@ -248,7 +252,7 @@ func TestDynamicMux_ReplaceDispatchesToNewHandler(t *testing.T) {
 
 	// Replace with a service backed by a fresh, empty database.
 	svc2 := buildFullClusterServiceN(t, 2)
-	mux.Replace(svc2)
+	mux.ReplaceDesc(svc2.Desc)
 
 	getReq := dynamicpb.NewMessage(svc2.Descriptors.GetRequest)
 	getReq.Set(svc2.Descriptors.GetRequest.Fields().ByName("name"),
@@ -280,9 +284,9 @@ func TestDynamicMux_ReplaceDispatchesToNewHandler(t *testing.T) {
 
 func TestDynamicMux_ServiceInfo(t *testing.T) {
 	svc := buildClusterService(t)
-	mux := managedresource.NewDynamicServiceMux()
+	mux := dynamicapi.NewDynamicServiceMux()
 
-	if err := mux.Register(svc); err != nil {
+	if err := mux.RegisterDesc(svc.Desc); err != nil {
 		t.Fatalf("Register: %v", err)
 	}
 
@@ -308,13 +312,13 @@ func TestDynamicMux_ServiceInfo(t *testing.T) {
 
 func TestDynamicMux_CompositeServiceInfoProvider(t *testing.T) {
 	svc := buildClusterService(t)
-	mux := managedresource.NewDynamicServiceMux()
-	if err := mux.Register(svc); err != nil {
+	mux := dynamicapi.NewDynamicServiceMux()
+	if err := mux.RegisterDesc(svc.Desc); err != nil {
 		t.Fatalf("Register: %v", err)
 	}
 
 	srv := grpc.NewServer()
-	composite := &managedresource.CompositeServiceInfoProvider{
+	composite := &dynamicapi.CompositeServiceInfoProvider{
 		Server:     srv,
 		DynamicMux: mux,
 	}
@@ -331,7 +335,7 @@ func TestDynamicMux_CompositeServiceInfoProvider(t *testing.T) {
 
 func TestDynamicMux_UnregisteredServiceReturnsUnimplemented(t *testing.T) {
 	svc := buildClusterService(t)
-	mux := managedresource.NewDynamicServiceMux()
+	mux := dynamicapi.NewDynamicServiceMux()
 	conn := dialMux(t, mux)
 
 	req := dynamicpb.NewMessage(svc.Descriptors.CreateRequest)
@@ -352,10 +356,10 @@ func TestDynamicMux_UnregisteredServiceReturnsUnimplemented(t *testing.T) {
 
 func TestDynamicMux_DeregisterMakesServiceUnreachable(t *testing.T) {
 	svc := buildClusterService(t)
-	mux := managedresource.NewDynamicServiceMux()
+	mux := dynamicapi.NewDynamicServiceMux()
 	conn := dialMux(t, mux)
 
-	if err := mux.Register(svc); err != nil {
+	if err := mux.RegisterDesc(svc.Desc); err != nil {
 		t.Fatalf("Register: %v", err)
 	}
 
@@ -383,8 +387,8 @@ func TestDynamicMux_DeregisterMakesServiceUnreachable(t *testing.T) {
 
 func TestDynamicMux_RegisterAndDispatch(t *testing.T) {
 	svc := buildFullClusterService(t)
-	mux := managedresource.NewDynamicServiceMux()
-	if err := mux.Register(svc); err != nil {
+	mux := dynamicapi.NewDynamicServiceMux()
+	if err := mux.RegisterDesc(svc.Desc); err != nil {
 		t.Fatalf("Register: %v", err)
 	}
 	conn := dialMux(t, mux)
@@ -404,8 +408,8 @@ func TestDynamicMux_RegisterAndDispatch(t *testing.T) {
 
 func TestDynamicMux_StreamInterceptorFires(t *testing.T) {
 	svc := buildFullClusterService(t)
-	mux := managedresource.NewDynamicServiceMux()
-	if err := mux.Register(svc); err != nil {
+	mux := dynamicapi.NewDynamicServiceMux()
+	if err := mux.RegisterDesc(svc.Desc); err != nil {
 		t.Fatalf("Register: %v", err)
 	}
 
@@ -436,10 +440,10 @@ func TestDynamicMux_StreamInterceptorFires(t *testing.T) {
 // registered via a DynamicServiceMux and returns the listener address
 // and a client connection to it. The DynamicServiceMux is also
 // returned so callers can replace the service for swap tests.
-func serveGRPCOverTCP(t *testing.T, svc *managedresource.RegisteredService) (string, *grpc.ClientConn, *managedresource.DynamicServiceMux) {
+func serveGRPCOverTCP(t *testing.T, svc *managedresource.RegisteredService) (string, *grpc.ClientConn, *dynamicapi.DynamicServiceMux) {
 	t.Helper()
-	grpcMux := managedresource.NewDynamicServiceMux()
-	if err := grpcMux.Register(svc); err != nil {
+	grpcMux := dynamicapi.NewDynamicServiceMux()
+	if err := grpcMux.RegisterDesc(svc.Desc); err != nil {
 		t.Fatalf("Register: %v", err)
 	}
 	lis, err := net.Listen("tcp", "localhost:0")
@@ -471,6 +475,23 @@ func dummyGRPCConn(t *testing.T) *grpc.ClientConn {
 	return conn
 }
 
+// registerHTTPService is a test helper that inlines the old
+// DynamicHTTPMux.Register convenience that was removed when the mux
+// moved to the dynamicapi leaf package.
+func registerHTTPService(httpMux *dynamicapi.DynamicHTTPMux, svc *managedresource.RegisteredService) error {
+	prefix := svc.Config.CanonicalHTTPPrefix()
+	handler := managedresource.BuildHTTPHandler(svc, httpMux.Conn(), prefix)
+	return httpMux.RegisterPrefixHandler(prefix, handler)
+}
+
+// replaceHTTPService is a test helper that inlines the old
+// DynamicHTTPMux.Replace convenience.
+func replaceHTTPService(httpMux *dynamicapi.DynamicHTTPMux, svc *managedresource.RegisteredService) {
+	prefix := svc.Config.CanonicalHTTPPrefix()
+	handler := managedresource.BuildHTTPHandler(svc, httpMux.Conn(), prefix)
+	httpMux.ReplacePrefixHandler(prefix, handler)
+}
+
 const kindHTTPPrefix = "/apis/kind.fleetshift.io/v1/clusters"
 
 func httpCreateCluster(t *testing.T, baseURL, id string) *http.Response {
@@ -496,8 +517,8 @@ func TestDynamicHTTPMux_RegisterAndDispatch(t *testing.T) {
 	svc := buildFullClusterService(t)
 	_, conn, _ := serveGRPCOverTCP(t, svc)
 
-	httpMux := managedresource.NewDynamicHTTPMux(nil, conn)
-	if err := httpMux.Register(svc); err != nil {
+	httpMux := dynamicapi.NewDynamicHTTPMux(nil, conn)
+	if err := registerHTTPService(httpMux, svc); err != nil {
 		t.Fatalf("Register: %v", err)
 	}
 
@@ -522,8 +543,8 @@ func TestDynamicHTTPMux_DeregisterReturns404(t *testing.T) {
 	svc := buildFullClusterService(t)
 	_, conn, _ := serveGRPCOverTCP(t, svc)
 
-	httpMux := managedresource.NewDynamicHTTPMux(nil, conn)
-	if err := httpMux.Register(svc); err != nil {
+	httpMux := dynamicapi.NewDynamicHTTPMux(nil, conn)
+	if err := registerHTTPService(httpMux, svc); err != nil {
 		t.Fatalf("Register: %v", err)
 	}
 
@@ -565,11 +586,11 @@ func TestDynamicHTTPMux_KeyedByFullPrefix(t *testing.T) {
 		t.Fatalf("Build gcp: %v", err)
 	}
 
-	httpMux := managedresource.NewDynamicHTTPMux(nil, dummyGRPCConn(t))
-	if err := httpMux.Register(kindSvc); err != nil {
+	httpMux := dynamicapi.NewDynamicHTTPMux(nil, dummyGRPCConn(t))
+	if err := registerHTTPService(httpMux, kindSvc); err != nil {
 		t.Fatalf("Register kind: %v", err)
 	}
-	if err := httpMux.Register(gcpSvc); err != nil {
+	if err := registerHTTPService(httpMux, gcpSvc); err != nil {
 		t.Fatalf("Register gcp should succeed (different canonical prefix): %v", err)
 	}
 }
@@ -577,11 +598,11 @@ func TestDynamicHTTPMux_KeyedByFullPrefix(t *testing.T) {
 func TestDynamicHTTPMux_DuplicateRegisterReturnsError(t *testing.T) {
 	svc := buildClusterService(t)
 
-	httpMux := managedresource.NewDynamicHTTPMux(nil, dummyGRPCConn(t))
-	if err := httpMux.Register(svc); err != nil {
+	httpMux := dynamicapi.NewDynamicHTTPMux(nil, dummyGRPCConn(t))
+	if err := registerHTTPService(httpMux, svc); err != nil {
 		t.Fatalf("first Register: %v", err)
 	}
-	if err := httpMux.Register(svc); err == nil {
+	if err := registerHTTPService(httpMux, svc); err == nil {
 		t.Fatal("expected error on duplicate Register")
 	}
 }
@@ -590,8 +611,8 @@ func TestDynamicHTTPMux_ReplaceDispatchesToNewHandler(t *testing.T) {
 	svc1 := buildFullClusterServiceN(t, 1)
 	_, conn, grpcMux := serveGRPCOverTCP(t, svc1)
 
-	httpMux := managedresource.NewDynamicHTTPMux(nil, conn)
-	if err := httpMux.Register(svc1); err != nil {
+	httpMux := dynamicapi.NewDynamicHTTPMux(nil, conn)
+	if err := registerHTTPService(httpMux, svc1); err != nil {
 		t.Fatalf("Register: %v", err)
 	}
 
@@ -609,8 +630,8 @@ func TestDynamicHTTPMux_ReplaceDispatchesToNewHandler(t *testing.T) {
 	// production wiring where one gRPC server hosts all dynamic
 	// services via DynamicServiceMux.
 	svc2 := buildFullClusterServiceN(t, 2)
-	grpcMux.Replace(svc2)
-	httpMux.Replace(svc2)
+	grpcMux.ReplaceDesc(svc2.Desc)
+	replaceHTTPService(httpMux, svc2)
 
 	// The old resource should not be reachable through the new handler.
 	resp2 := httpGetCluster(t, ts.URL, "before-swap")
@@ -631,8 +652,8 @@ func TestDynamicHTTPMux_ReplaceAddsIfAbsent(t *testing.T) {
 	svc := buildFullClusterService(t)
 	_, conn, _ := serveGRPCOverTCP(t, svc)
 
-	httpMux := managedresource.NewDynamicHTTPMux(nil, conn)
-	httpMux.Replace(svc)
+	httpMux := dynamicapi.NewDynamicHTTPMux(nil, conn)
+	replaceHTTPService(httpMux, svc)
 
 	ts := httptest.NewServer(httpMux.ServeMux())
 	defer ts.Close()
@@ -650,8 +671,8 @@ func TestDynamicHTTPMux_ReplaceAddsIfAbsent(t *testing.T) {
 // which fires stream interceptors, matching production wiring.
 func serveGRPCOverTCPWithAuth(t *testing.T, svc *managedresource.RegisteredService) *grpc.ClientConn {
 	t.Helper()
-	grpcMux := managedresource.NewDynamicServiceMux()
-	if err := grpcMux.Register(svc); err != nil {
+	grpcMux := dynamicapi.NewDynamicServiceMux()
+	if err := grpcMux.RegisterDesc(svc.Desc); err != nil {
 		t.Fatalf("Register: %v", err)
 	}
 
@@ -700,8 +721,8 @@ func TestDynamicHTTPMux_ResumeForwardsAuth(t *testing.T) {
 	svc := buildFullClusterService(t)
 	conn := serveGRPCOverTCPWithAuth(t, svc)
 
-	httpMux := managedresource.NewDynamicHTTPMux(nil, conn)
-	if err := httpMux.Register(svc); err != nil {
+	httpMux := dynamicapi.NewDynamicHTTPMux(nil, conn)
+	if err := registerHTTPService(httpMux, svc); err != nil {
 		t.Fatalf("Register: %v", err)
 	}
 
@@ -755,8 +776,8 @@ func TestDynamicHTTPMux_ResumeWithoutAuth_Rejected(t *testing.T) {
 	svc := buildFullClusterService(t)
 	conn := serveGRPCOverTCPWithAuth(t, svc)
 
-	httpMux := managedresource.NewDynamicHTTPMux(nil, conn)
-	if err := httpMux.Register(svc); err != nil {
+	httpMux := dynamicapi.NewDynamicHTTPMux(nil, conn)
+	if err := registerHTTPService(httpMux, svc); err != nil {
 		t.Fatalf("Register: %v", err)
 	}
 

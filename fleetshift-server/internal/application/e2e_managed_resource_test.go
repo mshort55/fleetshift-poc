@@ -89,9 +89,7 @@ func TestEndToEnd_ManagedResource_DeliveryWithAttestation(t *testing.T) {
 		t.Fatalf("RegisterDeleteManagedResource: %v", err)
 	}
 
-	typeSvc := &application.ManagedResourceTypeService{
-		Store: store,
-	}
+	typeSvc := application.NewManagedResourceTypeService(store)
 	resourceSvc := &application.ManagedResourceService{
 		Store:         store,
 		CreateWF:      createWf,
@@ -106,7 +104,7 @@ func TestEndToEnd_ManagedResource_DeliveryWithAttestation(t *testing.T) {
 			ID:                    "addon-cluster-mgmt",
 			Name:                  "Cluster Management Addon",
 			Type:                  "addon",
-			AcceptedResourceTypes: []domain.ResourceType{"clusters"},
+			AcceptedManifestTypes: []domain.ManifestType{"clusters"},
 		}))
 		_ = tx.Commit()
 	}
@@ -119,9 +117,12 @@ func TestEndToEnd_ManagedResource_DeliveryWithAttestation(t *testing.T) {
 	}
 
 	_, err = typeSvc.Create(ctx, application.CreateTypeInput{
-		ResourceType: "clusters",
-		Relation:     domain.RegisteredSelfTarget{AddonTarget: "addon-cluster-mgmt"},
-		Signature:    addonSig,
+		ResourceType:   "test.fleetshift.io/Cluster",
+		Relation:       domain.NewRegisteredSelfTarget("addon-cluster-mgmt", "clusters"),
+		Signature:      addonSig,
+		APIServiceName: "kind.fleetshift.io",
+		APIVersion:     "v1",
+		CollectionID:   "clusters",
 	})
 	if err != nil {
 		t.Fatalf("RegisterType: %v", err)
@@ -133,7 +134,7 @@ func TestEndToEnd_ManagedResource_DeliveryWithAttestation(t *testing.T) {
 	privateKey := enrollSigner(t, store, fakeReg, subjectID, issuer)
 	validSpec := json.RawMessage(`{"provider":"rosa","version":"4.16.2"}`)
 	validUntil := time.Date(2026, 5, 5, 12, 0, 0, 0, time.UTC)
-	sig := signManagedResourceEnvelope(t, privateKey, "clusters", "prod-us-east-1", validSpec, validUntil, 1)
+	sig := signManagedResourceEnvelope(t, privateKey, "test.fleetshift.io/Cluster", "clusters/prod-us-east-1", validSpec, validUntil, 1)
 
 	signedCtx := application.ContextWithAuth(ctx, &application.AuthorizationContext{
 		Subject: &domain.SubjectClaims{FederatedIdentity: domain.FederatedIdentity{Subject: subjectID, Issuer: issuer}},
@@ -141,8 +142,8 @@ func TestEndToEnd_ManagedResource_DeliveryWithAttestation(t *testing.T) {
 	})
 
 	view, err := resourceSvc.Create(signedCtx, application.CreateManagedResourceInput{
-		ResourceType:  "clusters",
-		Name:          "prod-us-east-1",
+		ResourceType:  "test.fleetshift.io/Cluster",
+		Name:          "clusters/prod-us-east-1",
 		Spec:          validSpec,
 		UserSignature: sig,
 		ValidUntil:    validUntil,
@@ -151,8 +152,8 @@ func TestEndToEnd_ManagedResource_DeliveryWithAttestation(t *testing.T) {
 		t.Fatalf("Create: %v", err)
 	}
 
-	if view.ManagedResource.Name() != "prod-us-east-1" {
-		t.Errorf("Name = %q, want %q", view.ManagedResource.Name(), "prod-us-east-1")
+	if view.ManagedResource.Name() != "clusters/prod-us-east-1" {
+		t.Errorf("Name = %q, want %q", view.ManagedResource.Name(), "clusters/prod-us-east-1")
 	}
 	if view.ManagedResource.CurrentVersion() != 1 {
 		t.Errorf("CurrentVersion = %d, want 1", view.ManagedResource.CurrentVersion())
@@ -160,8 +161,8 @@ func TestEndToEnd_ManagedResource_DeliveryWithAttestation(t *testing.T) {
 	if view.Fulfillment.ManifestStrategy().Type != domain.ManifestStrategyManagedResource {
 		t.Errorf("ManifestStrategy.Type = %q, want %q", view.Fulfillment.ManifestStrategy().Type, domain.ManifestStrategyManagedResource)
 	}
-	if view.Fulfillment.ManifestStrategy().IntentRef.ResourceType != "clusters" {
-		t.Errorf("IntentRef.ResourceType = %q, want %q", view.Fulfillment.ManifestStrategy().IntentRef.ResourceType, "clusters")
+	if view.Fulfillment.ManifestStrategy().IntentRef.ResourceType != "test.fleetshift.io/Cluster" {
+		t.Errorf("IntentRef.ResourceType = %q, want %q", view.Fulfillment.ManifestStrategy().IntentRef.ResourceType, "test.fleetshift.io/Cluster")
 	}
 	if view.Fulfillment.ManifestStrategy().IntentRef.Version != 1 {
 		t.Errorf("IntentRef.Version = %d, want 1", view.Fulfillment.ManifestStrategy().IntentRef.Version)
@@ -172,8 +173,8 @@ func TestEndToEnd_ManagedResource_DeliveryWithAttestation(t *testing.T) {
 	if view.Fulfillment.AttestationRef() == nil {
 		t.Fatal("expected AttestationRef on signed managed resource fulfillment")
 	}
-	if view.Fulfillment.AttestationRef().RelationRef == nil || *view.Fulfillment.AttestationRef().RelationRef != "clusters" {
-		t.Errorf("AttestationRef.RelationRef = %v, want clusters", view.Fulfillment.AttestationRef().RelationRef)
+	if view.Fulfillment.AttestationRef().RelationRef == nil || *view.Fulfillment.AttestationRef().RelationRef != "test.fleetshift.io/Cluster" {
+		t.Errorf("AttestationRef.RelationRef = %v, want test.fleetshift.io/Cluster", view.Fulfillment.AttestationRef().RelationRef)
 	}
 
 	// --- Step 4: Wait for delivery (orchestration runs async) ---
@@ -194,11 +195,11 @@ func TestEndToEnd_ManagedResource_DeliveryWithAttestation(t *testing.T) {
 	if !ok {
 		t.Fatalf("Attestation.Input.Provenance.Content = %T, want ManagedResourceContent", att.Input.Provenance.Content)
 	}
-	if content.ResourceType != "clusters" {
-		t.Errorf("ManagedResourceContent.ResourceType = %q, want clusters", content.ResourceType)
+	if content.ResourceType != "test.fleetshift.io/Cluster" {
+		t.Errorf("ManagedResourceContent.ResourceType = %q, want test.fleetshift.io/Cluster", content.ResourceType)
 	}
-	if content.ResourceName != "prod-us-east-1" {
-		t.Errorf("ManagedResourceContent.ResourceName = %q, want prod-us-east-1", content.ResourceName)
+	if content.ResourceName != "clusters/prod-us-east-1" {
+		t.Errorf("ManagedResourceContent.ResourceName = %q, want clusters/prod-us-east-1", content.ResourceName)
 	}
 	if string(content.Spec) != string(validSpec) {
 		t.Errorf("ManagedResourceContent.Spec = %s, want %s", content.Spec, validSpec)
@@ -206,12 +207,12 @@ func TestEndToEnd_ManagedResource_DeliveryWithAttestation(t *testing.T) {
 	if att.SignedRelation == nil {
 		t.Fatal("expected SignedRelation in managed resource attestation")
 	}
-	rel, ok := att.SignedRelation.Relation.(domain.RegisteredSelfTarget)
+	signedRel, ok := att.SignedRelation.Relation.(domain.RegisteredSelfTarget)
 	if !ok {
 		t.Fatalf("SignedRelation.Relation = %T, want RegisteredSelfTarget", att.SignedRelation.Relation)
 	}
-	if rel.AddonTarget != "addon-cluster-mgmt" {
-		t.Errorf("SignedRelation.AddonTarget = %q, want addon-cluster-mgmt", rel.AddonTarget)
+	if signedRel.AddonTarget() != "addon-cluster-mgmt" {
+		t.Errorf("SignedRelation.AddonTarget() = %q, want addon-cluster-mgmt", signedRel.AddonTarget())
 	}
 	if att.SignedRelation.Signature.Signer.Subject != "addon-cluster-svc" {
 		t.Errorf("SignedRelation.Signature.Signer.Subject = %q, want addon-cluster-svc", att.SignedRelation.Signature.Signer.Subject)
@@ -221,8 +222,8 @@ func TestEndToEnd_ManagedResource_DeliveryWithAttestation(t *testing.T) {
 	if len(manifests) == 0 {
 		t.Fatal("no manifests delivered")
 	}
-	if manifests[0].ResourceType != "clusters" {
-		t.Errorf("Manifest.ResourceType = %q, want %q", manifests[0].ResourceType, "clusters")
+	if manifests[0].ManifestType != "clusters" {
+		t.Errorf("Manifest.ResourceType = %q, want %q", manifests[0].ManifestType, "clusters")
 	}
 	if string(manifests[0].Raw) != string(validSpec) {
 		t.Errorf("Manifest.Raw = %s, want %s", manifests[0].Raw, validSpec)
@@ -244,7 +245,7 @@ func TestEndToEnd_ManagedResource_DeliveryWithAttestation(t *testing.T) {
 	}
 
 	// --- Step 6: Verify the resource is retrievable from the service ---
-	got, err := resourceSvc.Get(ctx, "clusters", "prod-us-east-1")
+	got, err := resourceSvc.Get(ctx, "test.fleetshift.io/Cluster", "clusters/prod-us-east-1")
 	if err != nil {
 		t.Fatalf("Get: %v", err)
 	}

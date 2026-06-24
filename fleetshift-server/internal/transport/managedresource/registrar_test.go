@@ -24,6 +24,7 @@ import (
 	"github.com/fleetshift/fleetshift-poc/fleetshift-server/internal/infrastructure/memworkflow"
 	"github.com/fleetshift/fleetshift-poc/fleetshift-server/internal/infrastructure/sqlite"
 	"github.com/fleetshift/fleetshift-poc/fleetshift-server/internal/testutil"
+	"github.com/fleetshift/fleetshift-poc/fleetshift-server/internal/transport/dynamicapi"
 	"github.com/fleetshift/fleetshift-poc/fleetshift-server/internal/transport/managedresource"
 )
 
@@ -38,7 +39,7 @@ func clusterConfig(t *testing.T) *managedresource.ResourceTypeConfig {
 		entryFile = name
 		break
 	}
-	desc, err := managedresource.CompileInline(
+	desc, err := dynamicapi.CompileInline(
 		context.Background(),
 		schema.ProtoFiles,
 		entryFile,
@@ -49,12 +50,14 @@ func clusterConfig(t *testing.T) *managedresource.ResourceTypeConfig {
 	}
 
 	return &managedresource.ResourceTypeConfig{
+		CollectionConfig: dynamicapi.CollectionConfig{
+			Version:      schema.Version,
+			CollectionID: schema.CollectionID,
+			Singular:     schema.Singular,
+			Plural:       schema.Plural,
+		},
 		ResourceType:   kindaddon.ClusterResourceType,
 		APIServiceName: schema.APIServiceName,
-		Version:        schema.Version,
-		CollectionID:   schema.CollectionID,
-		Singular:       schema.Singular,
-		Plural:         schema.Plural,
 		ProtoPackage:   schema.ProtoPackage,
 		SpecMessage:    schema.SpecMessage,
 		SpecDescriptor: desc.Message,
@@ -214,20 +217,19 @@ func setupWithDelivery(
 	targetSvc := &application.TargetService{Store: store}
 	if err := targetSvc.Register(context.Background(), domain.TargetInfoFromSnapshot(domain.TargetInfoSnapshot{
 		ID: "kind-local", Type: clusterTargetType, Name: "Kind Cluster Addon",
-		AcceptedResourceTypes: []domain.ResourceType{kindaddon.ClusterResourceType},
+		AcceptedManifestTypes: []domain.ManifestType{kindaddon.ClusterManifestType},
 	})); err != nil {
 		t.Fatalf("register target: %v", err)
 	}
 
-	typeSvc := &application.ManagedResourceTypeService{
-		Store: store,
-	}
+	typeSvc := application.NewManagedResourceTypeService(store)
 	if _, err := typeSvc.Create(context.Background(), application.CreateTypeInput{
-		ResourceType: kindaddon.ClusterResourceType,
-		Relation: domain.RegisteredSelfTarget{
-			AddonTarget: "kind-local",
-		},
-		Signature: domain.Signature{},
+		ResourceType:   kindaddon.ClusterResourceType,
+		Relation:       domain.NewRegisteredSelfTarget("kind-local", kindaddon.ClusterManifestType),
+		Signature:      domain.Signature{},
+		APIServiceName: "kind.fleetshift.io",
+		APIVersion:     "v1",
+		CollectionID:   "clusters",
 	}); err != nil {
 		t.Fatalf("register cluster type: %v", err)
 	}
@@ -726,7 +728,7 @@ func TestDynamic_ProvenanceOnResponse(t *testing.T) {
 	if err != nil {
 		t.Fatalf("begin tx: %v", err)
 	}
-	mr, err := tx.ManagedResources().GetInstance(ctx, kindaddon.ClusterResourceType, "prov-cluster")
+	mr, err := tx.ManagedResources().GetInstance(ctx, kindaddon.ClusterResourceType, "clusters/prov-cluster")
 	if err != nil {
 		t.Fatalf("get managed resource: %v", err)
 	}
@@ -820,7 +822,7 @@ func TestDynamic_ResumeRPC(t *testing.T) {
 	if err != nil {
 		t.Fatalf("begin tx: %v", err)
 	}
-	mr, err := tx.ManagedResources().GetInstance(ctx, kindaddon.ClusterResourceType, "resume-cluster")
+	mr, err := tx.ManagedResources().GetInstance(ctx, kindaddon.ClusterResourceType, "clusters/resume-cluster")
 	if err != nil {
 		t.Fatalf("get managed resource: %v", err)
 	}

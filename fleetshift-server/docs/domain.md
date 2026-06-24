@@ -9,7 +9,11 @@ Logic about an object, like its state transitions, should be pushed to that stru
 ## Aggregates, entities, and value objects
 
 There are three kinds of domain objects, each with different ownership and
-identity semantics.
+identity semantics. All objects should be valid on construction, following the "parse, don't validate" principle. "Normalization" is also an acceptable behavior during construction.
+
+Accepting a domain object means it is valid. You do not need to redundantly validate or re-parse it because the type communicates what "valid" means already.
+
+As such, types are never "empty" unless "empty" has semantic meaning for the type. If an argument is optional, a pointer is used.
 
 **Value objects** are the simplest and most preferred. A value is defined
 entirely by its data — two values with the same fields are equal. Values have
@@ -20,8 +24,8 @@ constructors, even when they are just type aliases over primitives (e.g.
 **Entities** have identity and a lifecycle but do not form a consistency
 boundary on their own. They are always owned by an aggregate and accessed
 through it. For example, `ResourceRepresentation` is an entity within the
-`PlatformResource` aggregate — it has identity (service + collection + name)
-and mutable state, but is never loaded or persisted independently.
+`PlatformResource` aggregate — it has identity (service + collection_name +
+resource_id) and mutable state, but is never loaded or persisted independently.
 
 **Aggregates** are consistency boundaries. An aggregate owns its entities and
 values, and all mutations go through the aggregate root's methods. External
@@ -29,6 +33,8 @@ code never reaches into an aggregate to mutate a child entity directly. The
 aggregate enforces invariants that span multiple fields or child entities (e.g.
 "a representation's collection must match the aggregate's collection"). The
 repository loads and saves entire aggregates, not individual child entities.
+
+Fields are always private and encapsulated with getters and methods named for the relevant operation or behavior.
 
 ### Where logic belongs
 
@@ -89,11 +95,9 @@ Each aggregate `Foo` has:
 - **Snapshot fields are pure data.** Primitives, type aliases, value objects,
   or slices/maps thereof. Never embed a domain object inside a snapshot.
 - **Pending buffers are write-path only.** `Snapshot()` captures pending
-  strategy records / intents non-mutatively. `FromSnapshot()` always
-  initializes them as empty — the object starts in "freshly loaded" state.
-  Repositories use the explicit drain methods (`DrainPendingStrategyRecords`,
-  `DrainPendingIntents`) to extract and clear pending buffers for flushing
-  to storage, ensuring each record is written exactly once.
+  objects non-mutatively. `FromSnapshot()` always initializes them symmetrically.
+  Of course, pending state is not likely to be hydrated on read, so this state is typically
+  never provided to FromSnapshot in the first place.
 - **Repositories use snapshots for both reads and writes.** Write paths call
   `obj.Snapshot()` and read individual fields. Read paths scan into a snapshot
   struct and call `FooFromSnapshot(s)` to produce the domain object.

@@ -99,7 +99,7 @@ func createOIDCCluster(t *testing.T, clusterName string, auth domain.DeliveryAut
 
 	target := domain.TargetInfoFromSnapshot(domain.TargetInfoSnapshot{ID: "oidc-kind", Type: kindaddon.TargetType, Name: "OIDC Kind"})
 	manifests := []domain.Manifest{{
-		ResourceType: kindaddon.ClusterResourceType,
+		ManifestType: kindaddon.ClusterManifestType,
 		Raw:          json.RawMessage(specBytes),
 	}}
 
@@ -266,7 +266,7 @@ func TestKindAddon_OIDCIntegration(t *testing.T) {
 			}
 		}`)
 		manifests := []domain.Manifest{{
-			ResourceType: kubeaddon.ManifestResourceType,
+			ManifestType: kubeaddon.ManifestManifestType,
 			Raw:          configMapManifest,
 		}}
 
@@ -336,7 +336,7 @@ func TestKindAddon_OIDCIntegration(t *testing.T) {
 		}`)
 
 		err = kubeAgent.Deliver(ctx, k8sTarget, "d-bob:k8s-test", []domain.Manifest{{
-			ResourceType: kubeaddon.ManifestResourceType,
+			ManifestType: kubeaddon.ManifestManifestType,
 			Raw:          bobManifest,
 		}}, bobAuth, nil, 1)
 		if err != nil {
@@ -424,7 +424,7 @@ func TestKindAddon_ManagedResource_OIDCAuth(t *testing.T) {
 		t.Fatalf("RegisterCreateManagedResource: %v", err)
 	}
 
-	typeSvc := &application.ManagedResourceTypeService{Store: store}
+	typeSvc := application.NewManagedResourceTypeService(store)
 	resourceSvc := &application.ManagedResourceService{
 		Store:    store,
 		CreateWF: createMRWf,
@@ -440,15 +440,18 @@ func TestKindAddon_ManagedResource_OIDCAuth(t *testing.T) {
 			ID:                    "kind-mr-oidc",
 			Type:                  kindaddon.TargetType,
 			Name:                  "Docker Kind Provider (MR OIDC)",
-			AcceptedResourceTypes: []domain.ResourceType{kindaddon.ClusterResourceType},
+			AcceptedManifestTypes: []domain.ManifestType{kindaddon.ClusterManifestType},
 		}))
 		_ = tx.Commit()
 	}
 
 	// Register managed resource type.
 	_, err = typeSvc.Create(ctx, application.CreateTypeInput{
-		ResourceType: kindaddon.ClusterResourceType,
-		Relation:     domain.RegisteredSelfTarget{AddonTarget: "kind-mr-oidc"},
+		ResourceType:   kindaddon.ClusterResourceType,
+		Relation:       domain.NewRegisteredSelfTarget("kind-mr-oidc", kindaddon.ClusterManifestType),
+		APIServiceName: "kind.fleetshift.io",
+		APIVersion:     "v1",
+		CollectionID:   "clusters",
 		Signature: domain.Signature{
 			Signer:         domain.FederatedIdentity{Subject: "kind-addon", Issuer: "https://kind.test"},
 			ContentHash:    []byte("hash"),

@@ -3,6 +3,7 @@ package application_test
 import (
 	"context"
 	"crypto/sha256"
+	"errors"
 	"fmt"
 	"slices"
 	"sync"
@@ -24,45 +25,40 @@ import (
 type recordingActivator struct {
 	mu          sync.Mutex
 	activated   []domain.ManagedResourceSchema
-	deactivated []application.SchemaHandle
+	deactivated []application.SchemaRegistrationID
 	nextErr     error
 	hashes      map[string][32]byte
 }
 
-func (r *recordingActivator) Activate(_ context.Context, schema domain.ManagedResourceSchema) (application.SchemaHandle, error) {
+func (r *recordingActivator) Activate(_ context.Context, schema domain.ManagedResourceSchema) (application.SchemaRegistrationID, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.nextErr != nil {
 		err := r.nextErr
 		r.nextErr = nil
-		return application.SchemaHandle{}, err
+		return "", err
 	}
 
-	grpcServiceName := schema.ProtoPackage + "." + schema.Singular + "Service"
-	handle := application.SchemaHandle{
-		GRPCServiceName: grpcServiceName,
-		HTTPPrefix:      fmt.Sprintf("/apis/%s/%s/%s", schema.APIServiceName, schema.Version, schema.CollectionID),
-		DescriptorPath:  "dynamic/" + schema.Singular + "_service.proto",
-	}
+	serviceName := schema.ProtoPackage + "." + schema.Singular + "Service"
 
 	hash := testSchemaHash(schema)
 	if r.hashes == nil {
 		r.hashes = make(map[string][32]byte)
 	}
-	if prev, ok := r.hashes[handle.GRPCServiceName]; ok && prev == hash {
-		return handle, nil
+	if prev, ok := r.hashes[serviceName]; ok && prev == hash {
+		return application.SchemaRegistrationID(serviceName), nil
 	}
 
 	r.activated = append(r.activated, schema)
-	r.hashes[handle.GRPCServiceName] = hash
-	return handle, nil
+	r.hashes[serviceName] = hash
+	return application.SchemaRegistrationID(serviceName), nil
 }
 
-func (r *recordingActivator) Deactivate(handle application.SchemaHandle) {
+func (r *recordingActivator) Deactivate(id application.SchemaRegistrationID) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.deactivated = append(r.deactivated, handle)
-	delete(r.hashes, handle.GRPCServiceName)
+	r.deactivated = append(r.deactivated, id)
+	delete(r.hashes, string(id))
 }
 
 func (r *recordingActivator) activatedCount() int {
@@ -159,7 +155,7 @@ func setupAddonManager(t *testing.T) *addonManagerEnv {
 		Store: store, CreateWF: createMRWf, DeleteWF: deleteMRWf,
 	}
 
-	typeSvc := &application.ManagedResourceTypeService{Store: store}
+	typeSvc := application.NewManagedResourceTypeService(store)
 	targetSvc := &application.TargetService{Store: store}
 
 	activator := &recordingActivator{}
@@ -187,14 +183,14 @@ func clusterMgmtDescriptor() domain.AddonDescriptor {
 		ID:   "cluster-mgmt",
 		Name: "Cluster Management",
 		Capabilities: []domain.Capability{
-			domain.ManagedResourceCapability{ResourceType: "clusters"},
+			domain.ManagedResourceCapability{ResourceType: "test.fleetshift.io/Cluster"},
 		},
 	}
 }
 
 func clusterSchema() domain.ManagedResourceSchema {
 	return domain.ManagedResourceSchema{
-		ResourceType:   "clusters",
+		ResourceType:   "test.fleetshift.io/Cluster",
 		APIServiceName: "test.fleetshift.io",
 		ProtoPackage:   "test.fleetshift.v1",
 		Version:        "v1",
@@ -203,7 +199,7 @@ func clusterSchema() domain.ManagedResourceSchema {
 		Plural:         "Clusters",
 		ProtoFiles:     map[string]string{"fake.proto": "syntax = \"proto3\";"},
 		SpecMessage:    "fake.ClusterSpec",
-		Relation:       domain.RegisteredSelfTarget{AddonTarget: "kind-local"},
+		Relation:       domain.NewRegisteredSelfTarget("kind-local", "api.kind.cluster"),
 	}
 }
 
@@ -254,7 +250,7 @@ func TestAddonManager_ConnectActivatesSchemas(t *testing.T) {
 
 	if err := env.targetSvc.Register(ctx, domain.TargetInfoFromSnapshot(domain.TargetInfoSnapshot{
 		ID: "kind-local", Type: "kind", Name: "Local Kind",
-		AcceptedResourceTypes: []domain.ResourceType{"clusters"},
+		AcceptedManifestTypes: []domain.ManifestType{"clusters"},
 	})); err != nil {
 		t.Fatalf("register target: %v", err)
 	}
@@ -274,16 +270,16 @@ func TestAddonManager_ConnectActivatesSchemas(t *testing.T) {
 	if env.activator.activatedCount() != 1 {
 		t.Fatalf("activated count = %d, want 1", env.activator.activatedCount())
 	}
-	if env.activator.activated[0].ResourceType != "clusters" {
-		t.Errorf("activated resource type = %q, want clusters", env.activator.activated[0].ResourceType)
+	if env.activator.activated[0].ResourceType != "test.fleetshift.io/Cluster" {
+		t.Errorf("activated resource type = %q, want test.fleetshift.io/Cluster", env.activator.activated[0].ResourceType)
 	}
 
-	typeDef, err := env.typeSvc.Get(ctx, "clusters")
+	typeDef, err := env.typeSvc.Get(ctx, "test.fleetshift.io/Cluster")
 	if err != nil {
 		t.Fatalf("Get type def: %v", err)
 	}
-	if typeDef.ResourceType != "clusters" {
-		t.Errorf("type def resource type = %q, want clusters", typeDef.ResourceType)
+	if typeDef.ResourceType != "test.fleetshift.io/Cluster" {
+		t.Errorf("type def resource type = %q, want test.fleetshift.io/Cluster", typeDef.ResourceType)
 	}
 }
 
@@ -397,7 +393,7 @@ func TestAddonManager_DisconnectDoesNotDeactivateSchemas(t *testing.T) {
 	}
 	if err := env.targetSvc.Register(ctx, domain.TargetInfoFromSnapshot(domain.TargetInfoSnapshot{
 		ID: "kind-local", Type: "kind", Name: "Local Kind",
-		AcceptedResourceTypes: []domain.ResourceType{"clusters"},
+		AcceptedManifestTypes: []domain.ManifestType{"clusters"},
 	})); err != nil {
 		t.Fatalf("register target: %v", err)
 	}
@@ -425,7 +421,7 @@ func TestAddonManager_DisableDeactivatesSchemas(t *testing.T) {
 	}
 	if err := env.targetSvc.Register(ctx, domain.TargetInfoFromSnapshot(domain.TargetInfoSnapshot{
 		ID: "kind-local", Type: "kind", Name: "Local Kind",
-		AcceptedResourceTypes: []domain.ResourceType{"clusters"},
+		AcceptedManifestTypes: []domain.ManifestType{"clusters"},
 	})); err != nil {
 		t.Fatalf("register target: %v", err)
 	}
@@ -447,9 +443,9 @@ func TestAddonManager_DisableDeactivatesSchemas(t *testing.T) {
 	if env.activator.deactivatedCount() != 1 {
 		t.Fatalf("deactivated count = %d, want 1", env.activator.deactivatedCount())
 	}
-	if env.activator.deactivated[0].GRPCServiceName != "test.fleetshift.v1.ClusterService" {
+	if env.activator.deactivated[0] != "test.fleetshift.v1.ClusterService" {
 		t.Errorf("deactivated service = %q, want test.fleetshift.v1.ClusterService",
-			env.activator.deactivated[0].GRPCServiceName)
+			env.activator.deactivated[0])
 	}
 }
 
@@ -470,7 +466,7 @@ func TestAddonManager_ConnectRegistersTargets(t *testing.T) {
 				ID:                    "kind-local",
 				Type:                  kindaddon.TargetType,
 				Name:                  "Local Kind Provider",
-				AcceptedResourceTypes: []domain.ResourceType{"clusters", domain.TrustBundleResourceType},
+				AcceptedManifestTypes: []domain.ManifestType{"clusters", domain.TrustBundleManifestType},
 			}),
 		},
 	})
@@ -496,7 +492,7 @@ func TestAddonManager_ConnectDuplicateTargetIsIdempotent(t *testing.T) {
 		ID:                    "kind-local",
 		Type:                  kindaddon.TargetType,
 		Name:                  "Local Kind Provider",
-		AcceptedResourceTypes: []domain.ResourceType{"clusters"},
+		AcceptedManifestTypes: []domain.ManifestType{"clusters"},
 	})
 
 	if err := env.targetSvc.Register(ctx, target); err != nil {
@@ -522,8 +518,8 @@ func TestAddonManager_ReconnectReconcilesStaleSchemasOnConnect(t *testing.T) {
 		ID:   "multi-resource",
 		Name: "Multi Resource Addon",
 		Capabilities: []domain.Capability{
-			domain.ManagedResourceCapability{ResourceType: "clusters"},
-			domain.ManagedResourceCapability{ResourceType: "databases"},
+			domain.ManagedResourceCapability{ResourceType: "test.fleetshift.io/Cluster"},
+			domain.ManagedResourceCapability{ResourceType: "test.fleetshift.io/Database"},
 		},
 	}
 	if err := env.mgr.Enable(ctx, desc); err != nil {
@@ -532,14 +528,14 @@ func TestAddonManager_ReconnectReconcilesStaleSchemasOnConnect(t *testing.T) {
 
 	if err := env.targetSvc.Register(ctx, domain.TargetInfoFromSnapshot(domain.TargetInfoSnapshot{
 		ID: "kind-local", Type: "kind", Name: "Local Kind",
-		AcceptedResourceTypes: []domain.ResourceType{"clusters", "databases"},
+		AcceptedManifestTypes: []domain.ManifestType{"clusters", "databases"},
 	})); err != nil {
 		t.Fatalf("register target: %v", err)
 	}
 
 	clusterS := clusterSchema()
 	databaseS := domain.ManagedResourceSchema{
-		ResourceType:   "databases",
+		ResourceType:   "test.fleetshift.io/Database",
 		APIServiceName: "test.fleetshift.io",
 		ProtoPackage:   "test.fleetshift.v1",
 		Version:        "v1",
@@ -548,7 +544,7 @@ func TestAddonManager_ReconnectReconcilesStaleSchemasOnConnect(t *testing.T) {
 		Plural:         "Databases",
 		ProtoFiles:     map[string]string{"fake_db.proto": "syntax = \"proto3\";"},
 		SpecMessage:    "fake.DatabaseSpec",
-		Relation:       domain.RegisteredSelfTarget{AddonTarget: "kind-local"},
+		Relation:       domain.NewRegisteredSelfTarget("kind-local", "api.fake.database"),
 	}
 	if err := env.mgr.Connect(ctx, "multi-resource", application.ConnectInput{
 		Schemas: []domain.ManagedResourceSchema{clusterS, databaseS},
@@ -575,9 +571,9 @@ func TestAddonManager_ReconnectReconcilesStaleSchemasOnConnect(t *testing.T) {
 	if env.activator.deactivatedCount() != 1 {
 		t.Fatalf("deactivated count = %d, want 1 (databases)", env.activator.deactivatedCount())
 	}
-	if env.activator.deactivated[0].GRPCServiceName != "test.fleetshift.v1.DatabaseService" {
+	if env.activator.deactivated[0] != "test.fleetshift.v1.DatabaseService" {
 		t.Errorf("deactivated service = %q, want test.fleetshift.v1.DatabaseService",
-			env.activator.deactivated[0].GRPCServiceName)
+			env.activator.deactivated[0])
 	}
 
 	// Clusters should NOT have been re-activated — still 2 total.
@@ -596,7 +592,7 @@ func TestAddonManager_ReconnectWithSameSchemasIsIdempotent(t *testing.T) {
 	}
 	if err := env.targetSvc.Register(ctx, domain.TargetInfoFromSnapshot(domain.TargetInfoSnapshot{
 		ID: "kind-local", Type: "kind", Name: "Local Kind",
-		AcceptedResourceTypes: []domain.ResourceType{"clusters"},
+		AcceptedManifestTypes: []domain.ManifestType{"clusters"},
 	})); err != nil {
 		t.Fatalf("register target: %v", err)
 	}
@@ -637,7 +633,7 @@ func TestAddonManager_ReconnectWithUpdatedSchemaReactivates(t *testing.T) {
 	}
 	if err := env.targetSvc.Register(ctx, domain.TargetInfoFromSnapshot(domain.TargetInfoSnapshot{
 		ID: "kind-local", Type: "kind", Name: "Local Kind",
-		AcceptedResourceTypes: []domain.ResourceType{"clusters"},
+		AcceptedManifestTypes: []domain.ManifestType{"clusters"},
 	})); err != nil {
 		t.Fatalf("register target: %v", err)
 	}
@@ -680,6 +676,53 @@ func TestAddonManager_ReconnectWithUpdatedSchemaReactivates(t *testing.T) {
 	}
 }
 
+func TestAddonManager_ReconnectDeactivatesOldRegistrationOnIDChange(t *testing.T) {
+	env := setupAddonManager(t)
+	ctx := context.Background()
+
+	if err := env.mgr.Enable(ctx, clusterMgmtDescriptor()); err != nil {
+		t.Fatalf("Enable: %v", err)
+	}
+	if err := env.targetSvc.Register(ctx, domain.TargetInfoFromSnapshot(domain.TargetInfoSnapshot{
+		ID: "kind-local", Type: "kind", Name: "Local Kind",
+		AcceptedManifestTypes: []domain.ManifestType{"clusters"},
+	})); err != nil {
+		t.Fatalf("register target: %v", err)
+	}
+
+	v1 := clusterSchema()
+	if err := env.mgr.Connect(ctx, "cluster-mgmt", application.ConnectInput{
+		Schemas: []domain.ManagedResourceSchema{v1},
+	}); err != nil {
+		t.Fatalf("first Connect: %v", err)
+	}
+
+	if err := env.mgr.Disconnect(ctx, "cluster-mgmt"); err != nil {
+		t.Fatalf("Disconnect: %v", err)
+	}
+
+	// Reconnect with a schema that yields a different registration ID
+	// (different ProtoPackage produces a different gRPC service name).
+	v2 := clusterSchema()
+	v2.ProtoPackage = "test.fleetshift.v2"
+	v2.ProtoFiles = map[string]string{"fake.proto": "syntax = \"proto3\";\nmessage ClusterSpecV2 {}"}
+	v2.SpecMessage = "fake.ClusterSpecV2"
+
+	if err := env.mgr.Connect(ctx, "cluster-mgmt", application.ConnectInput{
+		Schemas: []domain.ManagedResourceSchema{v2},
+	}); err != nil {
+		t.Fatalf("second Connect: %v", err)
+	}
+
+	if env.activator.deactivatedCount() != 1 {
+		t.Fatalf("deactivated count = %d, want 1 (old registration ID)", env.activator.deactivatedCount())
+	}
+	if env.activator.deactivated[0] != "test.fleetshift.v1.ClusterService" {
+		t.Errorf("deactivated service = %q, want test.fleetshift.v1.ClusterService",
+			env.activator.deactivated[0])
+	}
+}
+
 func TestAddonManager_ReEnableAfterDisable(t *testing.T) {
 	env := setupAddonManager(t)
 	ctx := context.Background()
@@ -690,7 +733,7 @@ func TestAddonManager_ReEnableAfterDisable(t *testing.T) {
 	}
 	if err := env.targetSvc.Register(ctx, domain.TargetInfoFromSnapshot(domain.TargetInfoSnapshot{
 		ID: "kind-local", Type: "kind", Name: "Local Kind",
-		AcceptedResourceTypes: []domain.ResourceType{"clusters"},
+		AcceptedManifestTypes: []domain.ManifestType{"clusters"},
 	})); err != nil {
 		t.Fatalf("register target: %v", err)
 	}
@@ -733,6 +776,70 @@ func TestAddonManager_DuplicateEnableReturnsError(t *testing.T) {
 	err := env.mgr.Enable(ctx, desc)
 	if err == nil {
 		t.Fatal("expected error on duplicate Enable")
+	}
+}
+
+// TestAddonManager_ConnectRejectsConflictingAPIMetadata verifies that
+// when an existing type def has non-empty API identity metadata and the
+// reconnecting addon provides different values, Connect fails.
+func TestAddonManager_ConnectRejectsConflictingAPIMetadata(t *testing.T) {
+	db := sqlite.OpenTestDB(t)
+	store := &sqlite.Store{DB: db}
+
+	buildManager := func() *addonManagerEnv {
+		router := delivery.NewRoutingDeliveryService()
+		typeSvc := application.NewManagedResourceTypeService(store)
+		targetSvc := &application.TargetService{Store: store}
+		activator := &recordingActivator{}
+		mgr := application.NewAddonManager(application.AddonManagerDeps{
+			Router:    router,
+			TypeSvc:   typeSvc,
+			Activator: activator,
+		})
+		return &addonManagerEnv{
+			mgr:       mgr,
+			activator: activator,
+			router:    router,
+			typeSvc:   typeSvc,
+			targetSvc: targetSvc,
+		}
+	}
+
+	ctx := context.Background()
+
+	// --- first "pod": creates type def WITH API metadata ---
+	env1 := buildManager()
+	if err := env1.mgr.Enable(ctx, clusterMgmtDescriptor()); err != nil {
+		t.Fatalf("Enable (pod 1): %v", err)
+	}
+	if err := env1.targetSvc.Register(ctx, domain.TargetInfoFromSnapshot(domain.TargetInfoSnapshot{
+		ID: "kind-local", Type: "kind", Name: "Local Kind",
+		AcceptedManifestTypes: []domain.ManifestType{"clusters"},
+	})); err != nil {
+		t.Fatalf("register target: %v", err)
+	}
+	schema1 := clusterSchema()
+	if err := env1.mgr.Connect(ctx, "cluster-mgmt", application.ConnectInput{
+		Schemas: []domain.ManagedResourceSchema{schema1},
+	}); err != nil {
+		t.Fatalf("Connect (pod 1): %v", err)
+	}
+
+	// --- second "pod": reconnects with DIFFERENT API metadata ---
+	env2 := buildManager()
+	if err := env2.mgr.Enable(ctx, clusterMgmtDescriptor()); err != nil {
+		t.Fatalf("Enable (pod 2): %v", err)
+	}
+	schema2 := clusterSchema()
+	schema2.APIServiceName = "different.service.io"
+	err := env2.mgr.Connect(ctx, "cluster-mgmt", application.ConnectInput{
+		Schemas: []domain.ManagedResourceSchema{schema2},
+	})
+	if err == nil {
+		t.Fatal("expected error when reconnecting with conflicting API metadata")
+	}
+	if !errors.Is(err, domain.ErrInvalidArgument) {
+		t.Fatalf("expected ErrInvalidArgument, got: %v", err)
 	}
 }
 
@@ -789,7 +896,7 @@ func TestAddonManager_ConnectTypeDefAlreadyExistsIsIdempotent(t *testing.T) {
 		}
 		_ = createMRWf
 
-		typeSvc := &application.ManagedResourceTypeService{Store: store}
+		typeSvc := application.NewManagedResourceTypeService(store)
 		targetSvc := &application.TargetService{Store: store}
 		activator := &recordingActivator{}
 
@@ -817,7 +924,7 @@ func TestAddonManager_ConnectTypeDefAlreadyExistsIsIdempotent(t *testing.T) {
 	}
 	if err := env1.targetSvc.Register(ctx, domain.TargetInfoFromSnapshot(domain.TargetInfoSnapshot{
 		ID: "kind-local", Type: "kind", Name: "Local Kind",
-		AcceptedResourceTypes: []domain.ResourceType{"clusters"},
+		AcceptedManifestTypes: []domain.ManifestType{"clusters"},
 	})); err != nil {
 		t.Fatalf("register target (pod 1): %v", err)
 	}
@@ -839,11 +946,11 @@ func TestAddonManager_ConnectTypeDefAlreadyExistsIsIdempotent(t *testing.T) {
 	}
 
 	// Verify the type def is still intact in the DB.
-	typeDef, err := env2.typeSvc.Get(ctx, "clusters")
+	typeDef, err := env2.typeSvc.Get(ctx, "test.fleetshift.io/Cluster")
 	if err != nil {
 		t.Fatalf("Get type def: %v", err)
 	}
-	if typeDef.ResourceType != "clusters" {
-		t.Errorf("type def resource type = %q, want clusters", typeDef.ResourceType)
+	if typeDef.ResourceType != "test.fleetshift.io/Cluster" {
+		t.Errorf("type def resource type = %q, want test.fleetshift.io/Cluster", typeDef.ResourceType)
 	}
 }
