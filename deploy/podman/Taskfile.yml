@@ -198,6 +198,6 @@ tasks:
     cmds:
       - podman compose $COMPOSE_FILES --env-file {{.ROOT_DIR}}/.env stop keycloak
       - podman compose $COMPOSE_FILES --env-file {{.ROOT_DIR}}/.env rm -f keycloak
-      - podman volume rm fleetshift_keycloak-certs 2>/dev/null || podman volume rm keycloak-certs 2>/dev/null || true
+      - rm -rf .certs/
       - rm -f .realm.json
       - echo "Keycloak state wiped. Run 'task podman:up' to restart with fresh realm and passwords."

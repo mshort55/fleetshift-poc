@@ -239,7 +239,7 @@ if should_run 1; then
   echo "1c. cli-setup picks up local auth (no args)"
   task pd:cli-setup
   assert_file_exists "$AUTH_JSON" "auth.json created"
-  assert_json_field "$AUTH_JSON" ".issuer_url" "http://keycloak:8180/auth/realms/fleetshift" "issuer_url is local keycloak"
+  assert_json_field "$AUTH_JSON" ".issuer_url" "https://keycloak:8443/auth/realms/fleetshift" "issuer_url is local keycloak"
   assert_json_field "$AUTH_JSON" ".client_id" "fleetshift-cli" "client_id correct"
   assert_json_field "$AUTH_JSON" ".key_enrollment_client_id" "fleetshift-signing" "enrollment client correct"
 

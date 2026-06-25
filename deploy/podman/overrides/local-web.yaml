@@ -23,8 +23,5 @@ services:
       - ${PODMAN_SOCKET:-/dev/null}:/var/run/docker.sock
       - ${KIND_TEMP_DIR:-/tmp}:${KIND_TEMP_DIR:-/tmp}
       - fleetshift-data:/data
-      - keycloak-certs:/certs:ro
+      - ./.certs/ca.crt:/certs/ca.crt:ro
       - ${UI_DIR:-../../../fleetshift-user-interface}/web:/srv/web:ro
-
-volumes:
-  keycloak-certs:
