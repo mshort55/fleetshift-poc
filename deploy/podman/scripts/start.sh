@@ -16,11 +16,11 @@ source "$(cd "$(dirname "$0")" && pwd)/common.sh"
 # AUTH_MODE is derived from AUTH for backwards compatibility within this script.
 AUTH_MODE="$AUTH"
 DB_BACKEND="$DB"
-detect_podman_socket
+ensure_podman_ready
 
 : "${KIND_TEMP_DIR:=${HOME}/.fleetshift/tmp}"
-mkdir -p "$KIND_TEMP_DIR"
 export KIND_TEMP_DIR
+mkdir -p "$KIND_TEMP_DIR"
 podman network exists kind 2>/dev/null || podman network create kind
 
 REALM_TEMPLATE="${DEPLOY_DIR}/keycloak/fleetshift-realm.json"
@@ -60,7 +60,7 @@ if [ "${DEV:-}" = "true" ] || [ "${BUILD:-}" = "true" ]; then
   UP_ARGS+=(--build)
   podman volume rm -f web-assets podman_web-assets 2>/dev/null || true
 fi
-PODMAN_SOCKET="$PODMAN_SOCKET" compose up "${UP_ARGS[@]}"
+compose up "${UP_ARGS[@]}"
 
 if [ "$AUTH_MODE" = "local" ]; then
   KC_URL="https://${KC_HOSTNAME:-keycloak}:${KC_HTTPS_PORT:-8443}/auth"

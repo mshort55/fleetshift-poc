@@ -22,8 +22,8 @@ x-fleetshift-server: &fleetshift-server
     - "${FLEETSHIFT_SERVER_HTTP_PORT}:${FLEETSHIFT_SERVER_HTTP_PORT}"
     - "${FLEETSHIFT_SERVER_GRPC_PORT}:${FLEETSHIFT_SERVER_GRPC_PORT}"
   volumes:
-    - ${PODMAN_SOCKET:-/dev/null}:/var/run/docker.sock
-    - ${KIND_TEMP_DIR:-/tmp}:${KIND_TEMP_DIR:-/tmp}
+    - ${PODMAN_SOCKET}:/var/run/docker.sock
+    - ${KIND_TEMP_DIR}:${KIND_TEMP_DIR}
     - web-assets:/srv/web:ro
   networks:
     - default

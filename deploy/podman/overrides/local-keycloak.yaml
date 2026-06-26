@@ -6,8 +6,7 @@ services:
     environment:
       - KC_BOOTSTRAP_ADMIN_USERNAME=admin
       - KC_BOOTSTRAP_ADMIN_PASSWORD
-      - KC_HTTP_ENABLED=true
-      - KC_HTTP_PORT=${KC_HTTP_PORT}
+      - KC_HTTP_ENABLED=false
       - KC_HTTPS_PORT=${KC_HTTPS_PORT}
       - KC_HTTPS_CERTIFICATE_FILE=/opt/keycloak/certs/keycloak.crt
       - KC_HTTPS_CERTIFICATE_KEY_FILE=/opt/keycloak/certs/keycloak.key
@@ -16,7 +15,6 @@ services:
       - KC_HOSTNAME_STRICT=false
     ports:
       - "${KC_HTTPS_PORT}:${KC_HTTPS_PORT}"
-      - "${KC_HTTP_PORT}:${KC_HTTP_PORT}"
     volumes:
       - ./.certs/keycloak.crt:/opt/keycloak/certs/keycloak.crt:ro
       - ./.certs/keycloak.key:/opt/keycloak/certs/keycloak.key:ro
@@ -25,7 +23,7 @@ services:
       - default
       - kind
     healthcheck:
-      test: ["CMD-SHELL", "exec 3<>/dev/tcp/localhost/${KC_HTTP_PORT}"]
+      test: ["CMD-SHELL", "exec 3<>/dev/tcp/localhost/${KC_HTTPS_PORT}"]
       interval: 5s
       timeout: 3s
       retries: 30

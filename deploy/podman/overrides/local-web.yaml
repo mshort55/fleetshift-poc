@@ -20,8 +20,8 @@ services:
   # Re-declares all mounts from base + earlier overrides (sqlite data, socket, tmp).
   fleetshift-server:
     volumes: !override
-      - ${PODMAN_SOCKET:-/dev/null}:/var/run/docker.sock
-      - ${KIND_TEMP_DIR:-/tmp}:${KIND_TEMP_DIR:-/tmp}
+      - ${PODMAN_SOCKET}:/var/run/docker.sock
+      - ${KIND_TEMP_DIR}:${KIND_TEMP_DIR}
       - fleetshift-data:/data
       - ./.certs/ca.crt:/certs/ca.crt:ro
       - ${UI_DIR:-../../../fleetshift-user-interface}/web:/srv/web:ro
