@@ -13,6 +13,7 @@ services:
       - KC_HTTP_RELATIVE_PATH=/auth
       - KC_HOSTNAME=https://${KC_HOSTNAME}:${KC_HTTPS_PORT}/auth
       - KC_HOSTNAME_STRICT=false
+      - KC_HEALTH_ENABLED=true
     ports:
       - "${KC_HTTPS_PORT}:${KC_HTTPS_PORT}"
     volumes:
@@ -23,10 +24,11 @@ services:
       - default
       - kind
     healthcheck:
-      test: ["CMD-SHELL", "exec 3<>/dev/tcp/localhost/${KC_HTTPS_PORT}"]
-      interval: 5s
-      timeout: 3s
-      retries: 30
+      test: ["CMD-SHELL", "{ printf 'HEAD /health/ready HTTP/1.0\\r\\n\\r\\n' >&0; grep 'HTTP/1.0 200'; } 0<>/dev/tcp/localhost/9000"]
+      start_period: 30s
+      interval: 10s
+      timeout: 5s
+      retries: 3
 
   fleetshift-server:
     command:
@@ -56,11 +58,13 @@ services:
         [ -n "${KEY_REGISTRY_ID:-}" ] && ARGS="$$ARGS --registry-id ${KEY_REGISTRY_ID:-}"
         [ -n "${KEY_REGISTRY_SUBJECT_EXPR:-}" ] && ARGS="$$ARGS --registry-subject-expression ${KEY_REGISTRY_SUBJECT_EXPR:-}"
         [ -n "${PUBLIC_KEY_CLAIM_EXPR:-}" ] && ARGS="$$ARGS --public-key-claim-expression ${PUBLIC_KEY_CLAIM_EXPR:-}"
-        for i in $(seq 1 30); do
-          fleetctl auth setup $$ARGS && break
-          echo "Server not ready, retrying in 2s... ($$i/30)"
+        for i in $(seq 1 5); do
+          fleetctl auth setup $$ARGS && exit 0
+          echo "Server not ready, retrying in 2s... ($$i/5)"
           sleep 2
         done
+        echo "auth setup failed after 5 attempts" >&2
+        exit 1
     depends_on:
       fleetshift-server:
         condition: service_started

@@ -39,6 +39,11 @@ ensure_podman_ready() {
     fi
   fi
 
+  if [ -z "$PODMAN_SOCKET" ]; then
+    echo "ERROR: Could not determine podman socket path. Is podman running?" >&2
+    return 1
+  fi
+
   # On Linux the socket is a local file we can verify. On macOS it lives
   # inside the podman VM — podman info reports the VM-internal path, which
   # is correct for container volume mounts but doesn't exist on the host.
