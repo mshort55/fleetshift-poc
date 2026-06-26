@@ -28,11 +28,6 @@ x-fleetshift-server: &fleetshift-server
   networks:
     - default
     - kind
-  healthcheck:
-    test: ["CMD", "curl", "-sf", "http://localhost:${FLEETSHIFT_SERVER_HTTP_PORT}/v1/deployments"]
-    interval: 5s
-    timeout: 3s
-    retries: 30
 
 services:
 
