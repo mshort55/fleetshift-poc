@@ -63,8 +63,18 @@ if [ "$AUTH_MODE" = "local" ]; then
   KC_URL="https://${KC_HOSTNAME:-keycloak}:${KC_HTTPS_PORT:-8443}/auth"
 
   echo "==> Waiting for Keycloak API..."
-  until curl -sf "$KC_URL/realms/master" >/dev/null 2>&1; do
-    sleep 2
+  api_deadline=$((SECONDS + 15))
+  while true; do
+    if curl -sf --connect-timeout 2 --max-time 3 \
+      "$KC_URL/realms/master" >/dev/null 2>&1; then
+      break
+    fi
+    if (( SECONDS >= api_deadline )); then
+      echo "ERROR: Keycloak API not reachable after 15 seconds." >&2
+      echo "  Check local mkcert trust or rerun ./deploy/podman/scripts/generate-certs.sh." >&2
+      exit 1
+    fi
+    sleep 1
   done
 
   ADMIN_TOKEN=$(curl -sf "$KC_URL/realms/master/protocol/openid-connect/token" \

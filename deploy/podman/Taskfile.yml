@@ -49,8 +49,6 @@ tasks:
     desc: Generate local TLS certs for Keycloak (one-time, requires mkcert)
     cmds:
       - ./scripts/generate-certs.sh
-    status:
-      - test -f {{.ROOT_DIR}}/deploy/podman/.certs/keycloak.crt
     preconditions:
       - sh: command -v mkcert
         msg: "mkcert is not installed. Install: brew install mkcert (macOS) or go install filippo.io/mkcert@latest"

@@ -24,7 +24,7 @@ services:
       - default
       - kind
     healthcheck:
-      test: ["CMD-SHELL", "{ printf 'HEAD /health/ready HTTP/1.0\\r\\n\\r\\n' >&0; grep 'HTTP/1.0 200'; } 0<>/dev/tcp/localhost/9000"]
+      test: ["CMD-SHELL", "exec 3<>/dev/tcp/localhost/9000"]
       start_period: 30s
       interval: 10s
       timeout: 5s
