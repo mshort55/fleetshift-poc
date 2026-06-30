@@ -22,9 +22,16 @@ func (s *ManagedResourceManifestStrategy) Generate(ctx context.Context, _ Genera
 	if err != nil {
 		return nil, err
 	}
+
+	er, err := tx.ExtensionResources().GetByUID(ctx, s.Ref.ExtensionResourceUID)
+	if err != nil {
+		return nil, err
+	}
+
 	return []Manifest{{
 		ManifestType: s.Ref.ManifestType,
 		ManifestID:   ManifestID(s.Ref.ExtensionResourceUID.String()),
+		ResourceName: er.Name(),
 		Raw:          intent.Spec,
 	}}, nil
 }

@@ -35,6 +35,9 @@ func TestManagedResourceManifestStrategy_ResolvesIntentFromStore(t *testing.T) {
 	if string(got[0].Raw) != string(spec) {
 		t.Errorf("Raw = %s, want %s", got[0].Raw, spec)
 	}
+	if got[0].ResourceName != "prod-us-east-1" {
+		t.Errorf("ResourceName = %q, want %q", got[0].ResourceName, "prod-us-east-1")
+	}
 }
 
 func TestManagedResourceManifestStrategy_IntentNotFound(t *testing.T) {
