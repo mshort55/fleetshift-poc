@@ -16,6 +16,18 @@ import (
 	"github.com/fleetshift/fleetshift-poc/fleetshift-server/internal/domain"
 )
 
+func mustWrapEnvelopeInternal(name string, spec json.RawMessage) json.RawMessage {
+	raw, err := domain.WrapManifestEnvelope(
+		domain.ResourceName(name),
+		domain.NewExtensionResourceUID(),
+		spec,
+	)
+	if err != nil {
+		panic(fmt.Sprintf("WrapManifestEnvelope: %v", err))
+	}
+	return raw
+}
+
 type reconcileContextKey string
 
 func TestNewReconcileContext_AddsDeadlineAndPreservesValues(t *testing.T) {
@@ -328,8 +340,7 @@ func TestAgent_Deliver_SuccessReportsProvisionedTargetAndSecrets(t *testing.T) {
 		[]domain.Manifest{{
 			ManifestType: ClusterManifestType,
 			ManifestID:   "uid-1234",
-			ResourceName: "clusters/test-cls",
-			Raw:          spec,
+			Raw:          mustWrapEnvelopeInternal("clusters/test-cls", spec),
 		}},
 		domain.DeliveryAuth{Token: "caller-token"},
 		nil,
@@ -430,8 +441,7 @@ func TestAgent_Remove_DeletesClusterViaReconciler(t *testing.T) {
 		[]domain.Manifest{{
 			ManifestType: ClusterManifestType,
 			ManifestID:   "uid-1234",
-			ResourceName: "clusters/test-cls",
-			Raw:          spec,
+			Raw:          mustWrapEnvelopeInternal("clusters/test-cls", spec),
 		}},
 		domain.DeliveryAuth{Token: "caller-token"},
 		nil,
@@ -516,8 +526,7 @@ func TestAgent_Remove_ClearsGenerationSoRecreateIsAccepted(t *testing.T) {
 	manifest := domain.Manifest{
 		ManifestType: ClusterManifestType,
 		ManifestID:   "uid-1234",
-		ResourceName: "clusters/test-cls",
-		Raw:          spec,
+		Raw:          mustWrapEnvelopeInternal("clusters/test-cls", spec),
 	}
 
 	// Seed generation high-water mark as if prior deliveries happened.
@@ -591,8 +600,7 @@ func TestAgent_Remove_AuthExpiredSignalsAuthFailed(t *testing.T) {
 		[]domain.Manifest{{
 			ManifestType: ClusterManifestType,
 			ManifestID:   "uid-1234",
-			ResourceName: "clusters/test-cls",
-			Raw:          spec,
+			Raw:          mustWrapEnvelopeInternal("clusters/test-cls", spec),
 		}},
 		domain.DeliveryAuth{Token: "stale-token"},
 		nil,
@@ -679,8 +687,7 @@ func TestAgent_Remove_SubprocessInvalidGrantSignalsAuthFailed(t *testing.T) {
 		[]domain.Manifest{{
 			ManifestType: ClusterManifestType,
 			ManifestID:   "uid-1234",
-			ResourceName: "clusters/test-cls",
-			Raw:          spec,
+			Raw:          mustWrapEnvelopeInternal("clusters/test-cls", spec),
 		}},
 		domain.DeliveryAuth{Token: "caller-token"},
 		nil,
