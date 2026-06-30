@@ -339,7 +339,7 @@ func TestAgent_Deliver_SuccessReportsProvisionedTargetAndSecrets(t *testing.T) {
 		domain.DeliveryID("delivery-success"),
 		[]domain.Manifest{{
 			ManifestType: ClusterManifestType,
-			ManifestID:   "uid-1234",
+			ManifestID:   "f47ac10b-58cc-4372-a567-0e02b2c3d479",
 			Raw:          mustWrapEnvelopeInternal("clusters/test-cls", spec),
 		}},
 		domain.DeliveryAuth{Token: "caller-token"},
@@ -440,7 +440,7 @@ func TestAgent_Remove_DeletesClusterViaReconciler(t *testing.T) {
 		domain.DeliveryID("remove-1"),
 		[]domain.Manifest{{
 			ManifestType: ClusterManifestType,
-			ManifestID:   "uid-1234",
+			ManifestID:   "f47ac10b-58cc-4372-a567-0e02b2c3d479",
 			Raw:          mustWrapEnvelopeInternal("clusters/test-cls", spec),
 		}},
 		domain.DeliveryAuth{Token: "caller-token"},
@@ -525,7 +525,7 @@ func TestAgent_Remove_ClearsGenerationSoRecreateIsAccepted(t *testing.T) {
 	}})
 	manifest := domain.Manifest{
 		ManifestType: ClusterManifestType,
-		ManifestID:   "uid-1234",
+		ManifestID:   "f47ac10b-58cc-4372-a567-0e02b2c3d479",
 		Raw:          mustWrapEnvelopeInternal("clusters/test-cls", spec),
 	}
 
@@ -599,7 +599,7 @@ func TestAgent_Remove_AuthExpiredSignalsAuthFailed(t *testing.T) {
 		domain.DeliveryID("remove-auth-fail"),
 		[]domain.Manifest{{
 			ManifestType: ClusterManifestType,
-			ManifestID:   "uid-1234",
+			ManifestID:   "f47ac10b-58cc-4372-a567-0e02b2c3d479",
 			Raw:          mustWrapEnvelopeInternal("clusters/test-cls", spec),
 		}},
 		domain.DeliveryAuth{Token: "stale-token"},
@@ -686,7 +686,7 @@ func TestAgent_Remove_SubprocessInvalidGrantSignalsAuthFailed(t *testing.T) {
 		domain.DeliveryID("remove-invalid-grant"),
 		[]domain.Manifest{{
 			ManifestType: ClusterManifestType,
-			ManifestID:   "uid-1234",
+			ManifestID:   "f47ac10b-58cc-4372-a567-0e02b2c3d479",
 			Raw:          mustWrapEnvelopeInternal("clusters/test-cls", spec),
 		}},
 		domain.DeliveryAuth{Token: "caller-token"},

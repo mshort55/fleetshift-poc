@@ -6,13 +6,11 @@ import (
 )
 
 // ManifestEnvelope wraps a managed resource spec with identity fields.
-// This mirrors the Kubernetes pattern where identity (name, namespace)
-// lives inside the manifest payload. Addons unwrap the envelope to
-// extract the resource name and inner spec.
+// Addons unwrap the envelope to extract the identity fields and inner spec.
 type ManifestEnvelope struct {
-	Name ResourceName        `json:"name"`
+	Name ResourceName         `json:"name"`
 	UID  ExtensionResourceUID `json:"uid"`
-	Spec json.RawMessage     `json:"spec"`
+	Spec json.RawMessage      `json:"spec"`
 }
 
 // WrapManifestEnvelope marshals a ManifestEnvelope into JSON suitable

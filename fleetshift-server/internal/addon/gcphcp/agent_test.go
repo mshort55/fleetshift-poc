@@ -267,19 +267,7 @@ func TestAgent_Deliver_UsesEnvelopeNameNotManifestID(t *testing.T) {
 	reporter := newRecordingReporter()
 	agent := newTestAgent(reporter)
 
-	// Envelope has name "clusters/test-cls" but ManifestID is a UUID.
-	// The cluster name should come from the envelope, not ManifestID.
-	spec := validClusterSpecJSON(t)
-	raw, err := domain.WrapManifestEnvelope("clusters/test-cls", domain.NewExtensionResourceUID(), spec)
-	if err != nil {
-		t.Fatalf("WrapManifestEnvelope() error = %v", err)
-	}
-
-	manifest := domain.Manifest{
-		ManifestType: gcphcp.ClusterManifestType,
-		ManifestID:   "totally-not-a-cluster-name",
-		Raw:          raw,
-	}
+	manifest := envelopedClusterManifest(t, "test-cls", validClusterSpecJSON(t))
 
 	_ = agent.Deliver(
 		context.Background(),
@@ -291,8 +279,6 @@ func TestAgent_Deliver_UsesEnvelopeNameNotManifestID(t *testing.T) {
 		1,
 	)
 
-	// Delivery will fail async (no real backend), but it should NOT fail
-	// with "invalid cluster name" — the envelope name is valid.
 	select {
 	case result := <-reporter.done:
 		if result.State == domain.DeliveryStateFailed && strings.Contains(result.Message, "invalid cluster name") {
@@ -453,7 +439,7 @@ func envelopedClusterManifest(t *testing.T, clusterName string, specJSON json.Ra
 	}
 	return domain.Manifest{
 		ManifestType: gcphcp.ClusterManifestType,
-		ManifestID:   "uid-1234",
+		ManifestID:   "f47ac10b-58cc-4372-a567-0e02b2c3d479",
 		Raw:          raw,
 	}
 }
@@ -542,7 +528,7 @@ func makeActiveDelivery(id string, clusterName string, gen domain.Generation, to
 			Operation:  domain.DeliveryOperationDeliver,
 			Manifests: []domain.Manifest{{
 				ManifestType: gcphcp.ClusterManifestType,
-				ManifestID:   "uid-1234",
+				ManifestID:   "f47ac10b-58cc-4372-a567-0e02b2c3d479",
 				Raw:          mustWrapEnvelope("clusters/"+clusterName, spec),
 			}},
 		}),
@@ -728,7 +714,7 @@ func TestAgent_RecoverActiveDeliveries_SkipsInvalidClusterSpec(t *testing.T) {
 			State:      domain.DeliveryStateProgressing,
 			Manifests: []domain.Manifest{{
 				ManifestType: gcphcp.ClusterManifestType,
-				ManifestID:   "uid-1234",
+				ManifestID:   "f47ac10b-58cc-4372-a567-0e02b2c3d479",
 				Raw:          json.RawMessage(`{{{not json`),
 			}},
 		}),
