@@ -267,9 +267,6 @@ func TestAgent_Deliver_UsesResourceNameNotManifestID(t *testing.T) {
 	reporter := newRecordingReporter()
 	agent := newTestAgent(reporter)
 
-	// ManifestID is a valid cluster name, but ResourceName is empty.
-	// If the addon read ManifestID, validation would pass.
-	// If it reads ResourceName (empty → ""), validation must fail.
 	manifest := domain.Manifest{
 		ManifestType: gcphcp.ClusterManifestType,
 		ManifestID:   "test-cls",
