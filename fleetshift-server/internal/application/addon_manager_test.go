@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	kindaddon "github.com/fleetshift/fleetshift-poc/fleetshift-server/internal/addon/kind"
+	kubernetesaddon "github.com/fleetshift/fleetshift-poc/fleetshift-server/internal/addon/kubernetes"
 	"github.com/fleetshift/fleetshift-poc/fleetshift-server/internal/application"
 	"github.com/fleetshift/fleetshift-poc/fleetshift-server/internal/domain"
 	"github.com/fleetshift/fleetshift-poc/fleetshift-server/internal/infrastructure/delivery"
@@ -1214,6 +1215,82 @@ func TestAddonManager_ConnectRejectsManagementWithoutCapability(t *testing.T) {
 	}
 	if !errors.Is(err, domain.ErrInvalidArgument) {
 		t.Fatalf("expected ErrInvalidArgument, got: %v", err)
+	}
+}
+
+func TestAddonManager_EnableKubernetesDescriptorRecordsCapabilities(t *testing.T) {
+	env := setupAddonManager(t)
+	ctx := context.Background()
+
+	if err := env.mgr.Enable(ctx, kubernetesaddon.Descriptor()); err != nil {
+		t.Fatalf("Enable: %v", err)
+	}
+
+	addon, err := env.mgr.Get(kubernetesaddon.AddonID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if addon.State != domain.AddonStateEnabled {
+		t.Errorf("state = %d, want %d (enabled)", addon.State, domain.AddonStateEnabled)
+	}
+
+	var hasDelivery, hasInventory bool
+	for _, cap := range addon.Capabilities {
+		switch c := cap.(type) {
+		case domain.DeliveryCapability:
+			hasDelivery = c.TargetType == kubernetesaddon.TargetType
+		case domain.InventoryResourceCapability:
+			hasInventory = c.ResourceType == kubernetesaddon.ObjectResourceType
+		}
+	}
+	if !hasDelivery {
+		t.Error("expected a DeliveryCapability for kubernetes.TargetType")
+	}
+	if !hasInventory {
+		t.Error("expected an InventoryResourceCapability for kubernetes.ObjectResourceType")
+	}
+}
+
+func TestAddonManager_ConnectKubernetesSchemaRegistersInventoryTypeWithoutActivation(t *testing.T) {
+	env := setupAddonManager(t)
+	ctx := context.Background()
+
+	if err := env.mgr.Enable(ctx, kubernetesaddon.Descriptor()); err != nil {
+		t.Fatalf("Enable: %v", err)
+	}
+
+	if err := env.mgr.Connect(ctx, kubernetesaddon.AddonID, application.ConnectInput{
+		Schemas: []domain.ExtensionResourceSchema{kubernetesaddon.Schema()},
+	}); err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+
+	addon, _ := env.mgr.Get(kubernetesaddon.AddonID)
+	if addon.State != domain.AddonStateConnected {
+		t.Errorf("state = %d, want %d (connected)", addon.State, domain.AddonStateConnected)
+	}
+
+	// Inventory-only schemas must NOT trigger schema activation (no
+	// dynamic API surface yet).
+	if env.activator.activatedCount() != 0 {
+		t.Errorf("activated count = %d, want 0 (inventory-only schema)", env.activator.activatedCount())
+	}
+
+	typeDef, err := env.typeSvc.Get(ctx, kubernetesaddon.ObjectResourceType)
+	if err != nil {
+		t.Fatalf("Get type def: %v", err)
+	}
+	if typeDef.Inventory() == nil {
+		t.Error("type def Inventory() is nil, want non-nil")
+	}
+	if typeDef.Management() != nil {
+		t.Error("type def Management() is non-nil, want nil for inventory-only type")
+	}
+	if typeDef.APIVersion() != "v1" {
+		t.Errorf("APIVersion() = %q, want %q", typeDef.APIVersion(), "v1")
+	}
+	if typeDef.CollectionID() != "objects" {
+		t.Errorf("CollectionID() = %q, want %q", typeDef.CollectionID(), "objects")
 	}
 }
 
