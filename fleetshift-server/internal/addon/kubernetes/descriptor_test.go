@@ -54,8 +54,8 @@ func TestSchema_ObjectInventoryShape(t *testing.T) {
 	if s.Version != "v1" {
 		t.Errorf("Version = %q, want %q", s.Version, "v1")
 	}
-	if s.CollectionID != "objects" {
-		t.Errorf("CollectionID = %q, want %q", s.CollectionID, "objects")
+	if s.CollectionID != string(kubernetes.ObjectCollectionID) {
+		t.Errorf("CollectionID = %q, want %q", s.CollectionID, kubernetes.ObjectCollectionID)
 	}
 	if s.Singular != "Object" {
 		t.Errorf("Singular = %q, want %q", s.Singular, "Object")

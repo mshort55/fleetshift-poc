@@ -35,7 +35,7 @@ func Schema() domain.ExtensionResourceSchema {
 		ResourceType: ObjectResourceType,
 		ProtoPackage: "kubernetes.fleetshift.v1",
 		Version:      "v1",
-		CollectionID: "objects",
+		CollectionID: string(ObjectCollectionID),
 		Singular:     "Object",
 		Plural:       "Objects",
 		Inventory:    &domain.InventorySchema{},

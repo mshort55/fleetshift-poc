@@ -139,6 +139,77 @@ func TestTargetObjectSubtree(t *testing.T) {
 	})
 }
 
+func TestObjectCollectionName(t *testing.T) {
+	t.Run("BasicShape", func(t *testing.T) {
+		got, err := kubernetes.ObjectCollectionName("prod", schema.GroupVersionResource{
+			Group: "apps", Version: "v1", Resource: "deployments",
+		})
+		if err != nil {
+			t.Fatalf("ObjectCollectionName: %v", err)
+		}
+		want := domain.CollectionName("clusters/prod/apiResources/apps~v1~deployments/objects")
+		if got != want {
+			t.Fatalf("ObjectCollectionName = %q, want %q", got, want)
+		}
+	})
+
+	t.Run("MatchesObjectResourceNameCollection", func(t *testing.T) {
+		gvr := schema.GroupVersionResource{Version: "v1", Resource: "pods"}
+		objName, err := kubernetes.ObjectResourceName(kubernetes.KubernetesObjectIdentity{
+			TargetID: "prod", GVR: gvr, UID: "uid-1",
+		})
+		if err != nil {
+			t.Fatalf("ObjectResourceName: %v", err)
+		}
+		collection, err := kubernetes.ObjectCollectionName("prod", gvr)
+		if err != nil {
+			t.Fatalf("ObjectCollectionName: %v", err)
+		}
+		if objName.Collection() != collection {
+			t.Fatalf("ObjectCollectionName = %q, ObjectResourceName.Collection = %q",
+				collection, objName.Collection())
+		}
+	})
+
+	t.Run("SlashBearingTargetIDIsEncoded", func(t *testing.T) {
+		got, err := kubernetes.ObjectCollectionName("prod/us-east-1", schema.GroupVersionResource{
+			Version: "v1", Resource: "pods",
+		})
+		if err != nil {
+			t.Fatalf("ObjectCollectionName: %v", err)
+		}
+		want := domain.CollectionName("clusters/prod%2Fus-east-1/apiResources/core~v1~pods/objects")
+		if got != want {
+			t.Fatalf("ObjectCollectionName = %q, want %q", got, want)
+		}
+	})
+
+	t.Run("RejectsEmptyTargetID", func(t *testing.T) {
+		_, err := kubernetes.ObjectCollectionName("", schema.GroupVersionResource{
+			Version: "v1", Resource: "pods",
+		})
+		if !errors.Is(err, domain.ErrInvalidArgument) {
+			t.Fatalf("ObjectCollectionName error = %v, want ErrInvalidArgument", err)
+		}
+	})
+}
+
+func TestResourceNameCollectionIDs(t *testing.T) {
+	if kubernetes.TargetCollectionID != "clusters" {
+		t.Errorf("TargetCollectionID = %q, want %q", kubernetes.TargetCollectionID, "clusters")
+	}
+	if kubernetes.APIResourceCollectionID != "apiResources" {
+		t.Errorf("APIResourceCollectionID = %q, want %q", kubernetes.APIResourceCollectionID, "apiResources")
+	}
+	if kubernetes.ObjectCollectionID != "objects" {
+		t.Errorf("ObjectCollectionID = %q, want %q", kubernetes.ObjectCollectionID, "objects")
+	}
+	if kubernetes.Schema().CollectionID != string(kubernetes.ObjectCollectionID) {
+		t.Errorf("Schema().CollectionID = %q, want ObjectCollectionID %q",
+			kubernetes.Schema().CollectionID, kubernetes.ObjectCollectionID)
+	}
+}
+
 func TestObjectLabels(t *testing.T) {
 	t.Run("Namespaced", func(t *testing.T) {
 		got := kubernetes.ObjectLabels(kubernetes.KubernetesObjectIdentity{

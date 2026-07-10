@@ -1289,8 +1289,8 @@ func TestAddonManager_ConnectKubernetesSchemaRegistersInventoryTypeWithoutActiva
 	if typeDef.APIVersion() != "v1" {
 		t.Errorf("APIVersion() = %q, want %q", typeDef.APIVersion(), "v1")
 	}
-	if typeDef.CollectionID() != "objects" {
-		t.Errorf("CollectionID() = %q, want %q", typeDef.CollectionID(), "objects")
+	if typeDef.CollectionID() != kubernetesaddon.ObjectCollectionID {
+		t.Errorf("CollectionID() = %q, want %q", typeDef.CollectionID(), kubernetesaddon.ObjectCollectionID)
 	}
 }
 

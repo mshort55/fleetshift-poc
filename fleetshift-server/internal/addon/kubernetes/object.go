@@ -22,6 +22,18 @@ import (
 // the addon-ownership rule the platform validates against.
 const ObjectResourceType domain.ResourceType = domain.ResourceType(AddonID) + "/Object"
 
+// Resource-name path collection IDs for Kubernetes object inventory.
+// Together they form:
+//
+//	{TargetCollectionID}/{targetID}/{APIResourceCollectionID}/{gvrKey}/{ObjectCollectionID}/{uid}
+//
+// ObjectCollectionID is also the schema CollectionID in [Schema].
+const (
+	TargetCollectionID      domain.CollectionID = "clusters"
+	APIResourceCollectionID domain.CollectionID = "apiResources"
+	ObjectCollectionID      domain.CollectionID = "objects"
+)
+
 // KubernetesObjectIdentity carries the fields needed to compute a
 // watched Kubernetes object's [domain.ResourceName], query labels, and
 // observation payload. All three are derived from the same identity
@@ -50,8 +62,8 @@ func objectScope(namespace string) string {
 // GVRKey returns a stable, slash-free key for gvr:
 // "{groupKey}~{version}~{resource}", where groupKey is "core" for the
 // core API group and the raw group otherwise. This is used for the
-// "apiResources" resource-name segment and the k8s.gvr label. Neither
-// the raw "group/version/resource" form nor a dotted
+// [APIResourceCollectionID] resource-name segment and the k8s.gvr
+// label. Neither the raw "group/version/resource" form nor a dotted
 // "group.version.resource" form work as a single resource-name
 // segment: "/" cannot appear inside one segment, and groups already
 // contain dots, which would make a dotted key ambiguous to split back
@@ -76,7 +88,8 @@ func encodeResourceNameSegment(s string) string {
 }
 
 // ObjectResourceName returns the canonical Kubernetes object resource
-// name: "clusters/{targetID}/apiResources/{gvrKey}/objects/{uid}".
+// name:
+// "{TargetCollectionID}/{targetID}/{APIResourceCollectionID}/{gvrKey}/{ObjectCollectionID}/{uid}".
 // Every dynamic segment is path-encoded before being joined, and the
 // result is built with [domain.ParseResourceName] rather than cast
 // from a raw string, so a malformed identity (e.g. an empty UID) fails
@@ -87,9 +100,9 @@ func encodeResourceNameSegment(s string) string {
 // correctly treated as a new incarnation rather than an overwrite.
 func ObjectResourceName(id KubernetesObjectIdentity) (domain.ResourceName, error) {
 	name, err := domain.ParseResourceName(
-		"clusters/" + encodeResourceNameSegment(string(id.TargetID)) +
-			"/apiResources/" + encodeResourceNameSegment(GVRKey(id.GVR)) +
-			"/objects/" + encodeResourceNameSegment(id.UID),
+		string(TargetCollectionID) + "/" + encodeResourceNameSegment(string(id.TargetID)) +
+			"/" + string(APIResourceCollectionID) + "/" + encodeResourceNameSegment(GVRKey(id.GVR)) +
+			"/" + string(ObjectCollectionID) + "/" + encodeResourceNameSegment(id.UID),
 	)
 	if err != nil {
 		return "", fmt.Errorf("kubernetes object resource name (target %q, gvr %q, uid %q): %w", id.TargetID, GVRKey(id.GVR), id.UID, err)
@@ -98,13 +111,31 @@ func ObjectResourceName(id KubernetesObjectIdentity) (domain.ResourceName, error
 }
 
 // TargetObjectSubtree returns the parsed parent resource name
-// "clusters/{targetID}" under which every Kubernetes object for
-// targetID lives, for target-scoped subtree cleanup when a target is
-// torn down.
+// "{TargetCollectionID}/{targetID}" under which every Kubernetes
+// object for targetID lives, for target-scoped subtree cleanup when a
+// target is torn down.
 func TargetObjectSubtree(targetID domain.TargetID) (domain.ResourceName, error) {
-	name, err := domain.ParseResourceName("clusters/" + encodeResourceNameSegment(string(targetID)))
+	name, err := domain.ParseResourceName(string(TargetCollectionID) + "/" + encodeResourceNameSegment(string(targetID)))
 	if err != nil {
 		return "", fmt.Errorf("kubernetes target object subtree (target %q): %w", targetID, err)
+	}
+	return name, nil
+}
+
+// ObjectCollectionName returns the exact inventory collection for
+// targetID + gvr:
+// "{TargetCollectionID}/{target}/{APIResourceCollectionID}/{gvrKey}/{ObjectCollectionID}".
+// This is the collection boundary used by ReplaceCollection and
+// DeleteCollection, and matches [ObjectResourceName]'s parent
+// collection.
+func ObjectCollectionName(targetID domain.TargetID, gvr schema.GroupVersionResource) (domain.CollectionName, error) {
+	name, err := domain.ParseCollectionName(
+		string(TargetCollectionID) + "/" + encodeResourceNameSegment(string(targetID)) +
+			"/" + string(APIResourceCollectionID) + "/" + encodeResourceNameSegment(GVRKey(gvr)) +
+			"/" + string(ObjectCollectionID),
+	)
+	if err != nil {
+		return "", fmt.Errorf("kubernetes object collection name (target %q, gvr %q): %w", targetID, GVRKey(gvr), err)
 	}
 	return name, nil
 }
