@@ -133,6 +133,31 @@ type PersistAndCompleteInput struct {
 	ReconciledGen Generation
 }
 
+// DeliveryOutputCleanupPlan is the output of
+// [OrchestrationWorkflowSpec.PlanDeliveryOutputCleanup] and the input
+// to [OrchestrationWorkflowSpec.CleanupDeliveryData]. It is computed
+// once, while delivery records, target rows, and old delivery-owned
+// inventory rows still exist, so [OrchestrationWorkflowSpec.CleanupDeliveryData]
+// never needs to reconstruct cleanup inputs from partially deleted
+// state.
+type DeliveryOutputCleanupPlan struct {
+	FulfillmentID FulfillmentID
+	Targets       []TargetInfo
+	InventoryIDs  []InventoryItemID
+	SecretRefs    []SecretRef
+}
+
+// TerminatingTargets is the input to
+// [OrchestrationWorkflowSpec.CleanupTargetIndexedInventory]: the
+// targets whose source-owned indexed inventory must be cleaned up
+// before their target rows are deleted. It carries only the targets,
+// not the rest of [DeliveryOutputCleanupPlan], because indexed
+// inventory cleanup has nothing to do with delivery-owned outputs
+// (secrets, delivery-owned inventory items) -- see that plan's doc.
+type TerminatingTargets struct {
+	Targets []TargetInfo
+}
+
 // OrchestrationWorkflowSpec is the fulfillment pipeline expressed as a
 // deterministic workflow. Each reconciliation loads the current state,
 // runs the full pipeline (or delete), and atomically completes. If
@@ -150,6 +175,11 @@ type OrchestrationWorkflowSpec struct {
 	Observer        FulfillmentObserver
 	Vault           Vault
 	Now             func() time.Time
+
+	// TargetOutputHooks handles post-registration hooks and pre-deletion
+	// cleanup for delivery-produced target outputs. Defaults to
+	// [NoOpTargetOutputHooks].
+	TargetOutputHooks TargetOutputHooks
 
 	// AckRetryInterval is how long the dispatch-and-await loop waits
 	// for an acknowledgement signal before redispatching unacked
@@ -171,6 +201,12 @@ type OrchestrationWorkflowOption func(*OrchestrationWorkflowSpec)
 // orchestration workflow.
 func WithFulfillmentObserver(o FulfillmentObserver) OrchestrationWorkflowOption {
 	return func(s *OrchestrationWorkflowSpec) { s.Observer = o }
+}
+
+// WithTargetOutputHooks sets the [TargetOutputHooks] for the
+// orchestration workflow.
+func WithTargetOutputHooks(h TargetOutputHooks) OrchestrationWorkflowOption {
+	return func(s *OrchestrationWorkflowSpec) { s.TargetOutputHooks = h }
 }
 
 // WithAttestation sets the [AttestationAssembler] for provenance.
@@ -205,11 +241,12 @@ func NewOrchestrationWorkflowSpec(
 	opts ...OrchestrationWorkflowOption,
 ) *OrchestrationWorkflowSpec {
 	s := &OrchestrationWorkflowSpec{
-		Store:           store,
-		Delivery:        delivery,
-		Strategies:      strategies,
-		CleanupSignaler: signaler,
-		Observer:        NoOpFulfillmentObserver{},
+		Store:             store,
+		Delivery:          delivery,
+		Strategies:        strategies,
+		CleanupSignaler:   signaler,
+		Observer:          NoOpFulfillmentObserver{},
+		TargetOutputHooks: NoOpTargetOutputHooks{},
 	}
 	for _, o := range opts {
 		o(s)
@@ -503,42 +540,95 @@ func (s *OrchestrationWorkflowSpec) RemoveFromTarget() Activity[RemoveInput, Rem
 	})
 }
 
-// CleanupDeliveryData cleans up delivery-owned outputs (provisioned
-// targets, inventory items, and referenced vault secrets) and
-// hard-deletes delivery records for a fulfillment. The fulfillment row
-// itself is NOT deleted here; that responsibility belongs to an
-// abstraction-specific cleanup workflow such as
-// [DeleteDeploymentCleanupWorkflow] or
-// [DeleteManagedResourceCleanupWorkflow], which runs after receiving a
-// [DeleteCleanupCompleteSignal].
-func (s *OrchestrationWorkflowSpec) CleanupDeliveryData() Activity[FulfillmentID, struct{}] {
-	return NewActivity("cleanup-delivery-data", func(ctx context.Context, id FulfillmentID) (struct{}, error) {
-		readTx, err := s.Store.BeginReadOnly(ctx)
+// PlanDeliveryOutputCleanup computes everything the later delete
+// cleanup activities need while delivery records, target rows, and
+// old delivery-owned inventory rows still exist, so
+// [OrchestrationWorkflowSpec.CleanupTargetIndexedInventory] and
+// [OrchestrationWorkflowSpec.CleanupDeliveryData] never need to
+// reconstruct cleanup inputs from partially deleted state. It does not
+// mutate persistent state. A target ID from a delivery-owned
+// inventory item whose target row is already gone is skipped, not
+// treated as an error.
+func (s *OrchestrationWorkflowSpec) PlanDeliveryOutputCleanup() Activity[FulfillmentID, DeliveryOutputCleanupPlan] {
+	return NewActivity("plan-delivery-output-cleanup", func(ctx context.Context, id FulfillmentID) (DeliveryOutputCleanupPlan, error) {
+		tx, err := s.Store.BeginReadOnly(ctx)
 		if err != nil {
-			return struct{}{}, fmt.Errorf("begin tx: %w", err)
+			return DeliveryOutputCleanupPlan{}, fmt.Errorf("begin tx: %w", err)
 		}
-		defer readTx.Rollback()
+		defer tx.Rollback()
 
-		deliveries, err := readTx.Deliveries().ListByFulfillment(ctx, id)
+		deliveries, err := tx.Deliveries().ListByFulfillment(ctx, id)
 		if err != nil {
-			return struct{}{}, fmt.Errorf("list deliveries: %w", err)
+			return DeliveryOutputCleanupPlan{}, fmt.Errorf("list deliveries: %w", err)
 		}
 
-		items, err := readTx.Inventory().List(ctx)
+		items, err := tx.Inventory().List(ctx)
 		if err != nil {
-			return struct{}{}, fmt.Errorf("list inventory items: %w", err)
+			return DeliveryOutputCleanupPlan{}, fmt.Errorf("list inventory items: %w", err)
 		}
 
 		plan, err := buildOutputCleanupPlan(deliveries, items)
 		if err != nil {
-			return struct{}{}, err
-		}
-		if err := readTx.Rollback(); err != nil {
-			return struct{}{}, fmt.Errorf("close read tx: %w", err)
+			return DeliveryOutputCleanupPlan{}, err
 		}
 
+		targets := make([]TargetInfo, 0, len(plan.targetIDs))
+		for _, targetID := range plan.targetIDs {
+			target, err := tx.Targets().Get(ctx, targetID)
+			if err != nil {
+				if errors.Is(err, ErrNotFound) {
+					continue
+				}
+				return DeliveryOutputCleanupPlan{}, fmt.Errorf("load target %s: %w", targetID, err)
+			}
+			targets = append(targets, target)
+		}
+
+		return DeliveryOutputCleanupPlan{
+			FulfillmentID: id,
+			Targets:       targets,
+			InventoryIDs:  plan.inventoryIDs,
+			SecretRefs:    plan.secretRefs,
+		}, nil
+	})
+}
+
+// CleanupTargetIndexedInventory delegates pre-deletion handling to
+// [TargetOutputHooks] before target rows are deleted. The hook
+// implementation may send non-failing runtime hints and may delete
+// source-owned indexed inventory. Returning an error from the hook
+// blocks target row deletion, which happens later in
+// [OrchestrationWorkflowSpec.CleanupDeliveryData]. The activity is
+// idempotent as long as the configured hook implementation is
+// idempotent.
+func (s *OrchestrationWorkflowSpec) CleanupTargetIndexedInventory() Activity[TerminatingTargets, struct{}] {
+	return NewActivity("cleanup-target-indexed-inventory", func(ctx context.Context, in TerminatingTargets) (struct{}, error) {
+		for _, target := range in.Targets {
+			if err := s.targetOutputHooks().BeforeTargetDeleted(ctx, target); err != nil {
+				return struct{}{}, fmt.Errorf("cleanup terminating target %s: %w", target.ID(), err)
+			}
+		}
+		return struct{}{}, nil
+	})
+}
+
+// CleanupDeliveryData deletes delivery-owned outputs (provisioned
+// targets, inventory items, and referenced vault secrets) from the
+// plan and hard-deletes delivery records for the fulfillment. It must
+// run after [OrchestrationWorkflowSpec.CleanupTargetIndexedInventory]
+// has cleaned up source-owned indexed inventory for the planned
+// targets, so target row deletion never strands indexed inventory
+// behind a deleted target. It does not clean up source-owned indexed
+// inventory itself and does not construct any source-specific
+// resource names. The fulfillment row itself is NOT deleted here;
+// that responsibility belongs to an abstraction-specific cleanup
+// workflow such as [DeleteDeploymentCleanupWorkflow] or
+// [DeleteManagedResourceCleanupWorkflow], which runs after receiving a
+// [DeleteCleanupCompleteSignal].
+func (s *OrchestrationWorkflowSpec) CleanupDeliveryData() Activity[DeliveryOutputCleanupPlan, struct{}] {
+	return NewActivity("cleanup-delivery-data", func(ctx context.Context, plan DeliveryOutputCleanupPlan) (struct{}, error) {
 		if s.Vault != nil {
-			for _, ref := range plan.secretRefs {
+			for _, ref := range plan.SecretRefs {
 				if err := s.Vault.Delete(ctx, ref); err != nil && !errors.Is(err, ErrNotFound) {
 					return struct{}{}, fmt.Errorf("delete secret %q: %w", ref, err)
 				}
@@ -551,18 +641,18 @@ func (s *OrchestrationWorkflowSpec) CleanupDeliveryData() Activity[FulfillmentID
 		}
 		defer tx.Rollback()
 
-		for _, targetID := range plan.targetIDs {
-			if err := tx.Targets().Delete(ctx, targetID); err != nil && !errors.Is(err, ErrNotFound) {
-				return struct{}{}, fmt.Errorf("delete provisioned target %s: %w", targetID, err)
-			}
-		}
-		for _, inventoryID := range plan.inventoryIDs {
+		for _, inventoryID := range plan.InventoryIDs {
 			if err := tx.Inventory().Delete(ctx, inventoryID); err != nil && !errors.Is(err, ErrNotFound) {
 				return struct{}{}, fmt.Errorf("delete inventory item %s: %w", inventoryID, err)
 			}
 		}
+		for _, target := range plan.Targets {
+			if err := tx.Targets().Delete(ctx, target.ID()); err != nil && !errors.Is(err, ErrNotFound) {
+				return struct{}{}, fmt.Errorf("delete provisioned target %s: %w", target.ID(), err)
+			}
+		}
 
-		if err := tx.Deliveries().DeleteByFulfillment(ctx, id); err != nil {
+		if err := tx.Deliveries().DeleteByFulfillment(ctx, plan.FulfillmentID); err != nil {
 			return struct{}{}, fmt.Errorf("delete delivery records: %w", err)
 		}
 		return struct{}{}, tx.Commit()
@@ -671,6 +761,7 @@ func (s *OrchestrationWorkflowSpec) ProcessDeliveryOutputs() Activity[DeliveryOu
 
 		// TODO: revisit the "TargetRegistrar" thing – should we make that upsert instead? remove that?
 		now := s.now()
+		registered := make([]TargetInfo, 0, len(in.Result.ProvisionedTargets))
 		for _, pt := range in.Result.ProvisionedTargets {
 			props, _ := json.Marshal(pt.Properties)
 			invID := InventoryItemID("target:" + string(pt.ID))
@@ -687,7 +778,7 @@ func (s *OrchestrationWorkflowSpec) ProcessDeliveryOutputs() Activity[DeliveryOu
 				return struct{}{}, fmt.Errorf("upsert inventory item for target %q: %w", pt.ID, err)
 			}
 
-			if err := tx.Targets().CreateOrUpdate(ctx, NewTargetInfo(
+			target := NewTargetInfo(
 				pt.ID,
 				pt.Type,
 				pt.Name,
@@ -695,15 +786,21 @@ func (s *OrchestrationWorkflowSpec) ProcessDeliveryOutputs() Activity[DeliveryOu
 				pt.Labels,
 				pt.Properties,
 				pt.AcceptedManifestTypes,
-			)); err != nil {
+			)
+			if err := tx.Targets().CreateOrUpdate(ctx, target); err != nil {
 				probe.Error(err)
 				return struct{}{}, fmt.Errorf("upsert target %q: %w", pt.ID, err)
 			}
+			registered = append(registered, target)
 		}
 		probe.TargetsRegistered(len(in.Result.ProvisionedTargets))
 		if err := tx.Commit(); err != nil {
 			probe.Error(err)
 			return struct{}{}, err
+		}
+
+		for _, target := range registered {
+			s.targetOutputHooks().AfterTargetRegistered(ctx, target)
 		}
 		return struct{}{}, nil
 	})
@@ -752,6 +849,13 @@ func (s *OrchestrationWorkflowSpec) CheckGeneration() Activity[FulfillmentID, Ge
 
 func (s *OrchestrationWorkflowSpec) observer() FulfillmentObserver {
 	return s.Observer
+}
+
+func (s *OrchestrationWorkflowSpec) targetOutputHooks() TargetOutputHooks {
+	if s.TargetOutputHooks != nil {
+		return s.TargetOutputHooks
+	}
+	return NoOpTargetOutputHooks{}
 }
 
 // Run is the deterministic workflow body. Each execution does a single
@@ -803,7 +907,16 @@ func (s *OrchestrationWorkflowSpec) Run(record Record, fulfillmentID Fulfillment
 					}
 				}
 			} else {
-				if _, err := RunActivity(record, s.CleanupDeliveryData(), fulfillmentID); err != nil {
+				plan, err := RunActivity(record, s.PlanDeliveryOutputCleanup(), fulfillmentID)
+				if err != nil {
+					probe.Error(err)
+					return struct{}{}, s.releaseLockAndContinue(record, fulfillmentID, probe)
+				}
+				if _, err := RunActivity(record, s.CleanupTargetIndexedInventory(), TerminatingTargets{Targets: plan.Targets}); err != nil {
+					probe.Error(err)
+					return struct{}{}, s.releaseLockAndContinue(record, fulfillmentID, probe)
+				}
+				if _, err := RunActivity(record, s.CleanupDeliveryData(), plan); err != nil {
 					probe.Error(err)
 					return struct{}{}, s.releaseLockAndContinue(record, fulfillmentID, probe)
 				}

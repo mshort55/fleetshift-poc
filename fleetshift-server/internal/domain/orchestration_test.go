@@ -472,6 +472,32 @@ func (r *stubRegistry) SignalDeleteCleanupComplete(_ context.Context, _ domain.F
 }
 
 // ---------------------------------------------------------------------------
+// Target output hook fakes
+// ---------------------------------------------------------------------------
+
+// recordingTargetOutputHooks records every [domain.TargetInfo] passed to
+// [domain.TargetOutputHooks]'s methods, in call order.
+type recordingTargetOutputHooks struct {
+	mu          sync.Mutex
+	ready       []domain.TargetInfo
+	terminating []domain.TargetInfo
+	cleanupErr  error
+}
+
+func (l *recordingTargetOutputHooks) AfterTargetRegistered(_ context.Context, target domain.TargetInfo) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.ready = append(l.ready, target)
+}
+
+func (l *recordingTargetOutputHooks) BeforeTargetDeleted(_ context.Context, target domain.TargetInfo) error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.terminating = append(l.terminating, target)
+	return l.cleanupErr
+}
+
+// ---------------------------------------------------------------------------
 // Delivery agent fakes
 // ---------------------------------------------------------------------------
 
@@ -1448,6 +1474,91 @@ func TestOrchestration_DeletePipeline_CleansUpOwnedOutputsAndSecrets(t *testing.
 
 	if _, err := vault.Get(ctx, "targets/k8s-guest-cluster/sa-token"); !errors.Is(err, domain.ErrNotFound) {
 		t.Fatalf("expected owned vault secret to be deleted, got err=%v", err)
+	}
+}
+
+// TestOrchestration_DeletePipeline_MissingTargetRowForOwnedInventoryItem_SkipsNotFails
+// pins PlanDeliveryOutputCleanup's documented behavior: a delivery-owned
+// inventory item whose "target:{id}" points at a target row that is already
+// gone must be skipped, not treated as an error. The delivery-owned
+// inventory item itself is still deleted normally, since that deletion
+// does not depend on the target row's existence.
+func TestOrchestration_DeletePipeline_MissingTargetRowForOwnedInventoryItem_SkipsNotFails(t *testing.T) {
+	store, vault := setupStore(t)
+	seedFulfillmentAndDeployment(t, store, "deployments/d1", domain.FulfillmentSnapshot{
+		Generation:      2,
+		ResolvedTargets: []domain.TargetID{"gcphcp-provider"},
+		ManifestStrategy: domain.ManifestStrategySpec{
+			Type: domain.ManifestStrategyInline,
+			Manifests: []domain.Manifest{{
+				ManifestType: "api.gcphcp.cluster",
+				Raw:          json.RawMessage(`{"name":"guest-cluster"}`),
+			}},
+		},
+		PlacementStrategy: domain.PlacementStrategySpec{
+			Type:    domain.PlacementStrategyStatic,
+			Targets: []domain.TargetID{"gcphcp-provider"},
+		},
+		State: domain.FulfillmentStateDeleting,
+	})
+	seedTargets(t, store, domain.TargetInfoFromSnapshot(domain.TargetInfoSnapshot{ID: "gcphcp-provider", Name: "gcphcp-provider", Type: "gcphcp"}))
+
+	deliveryID := domain.DeliveryID("deployments/d1:gcphcp-provider")
+	seedDelivery(t, store, domain.DeliveryFromSnapshot(domain.DeliverySnapshot{
+		ID:            deliveryID,
+		FulfillmentID: domain.FulfillmentID("deployments/d1"),
+		TargetID:      "gcphcp-provider",
+		Manifests: []domain.Manifest{{
+			ManifestType: "api.gcphcp.cluster",
+			Raw:          json.RawMessage(`{"name":"guest-cluster"}`),
+		}},
+		State: domain.DeliveryStateDelivered,
+	}))
+
+	ctx := testContext(t)
+	tx, err := store.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin tx: %v", err)
+	}
+	defer tx.Rollback()
+	// Deliberately no corresponding tx.Targets().Create call: this
+	// inventory item's target row is already gone through some other path.
+	if err := tx.Inventory().Create(ctx, domain.InventoryItemFromSnapshot(domain.InventoryItemSnapshot{
+		ID:               "target:ghost-target",
+		Type:             "gcphcp",
+		Name:             "ghost",
+		SourceDeliveryID: &deliveryID,
+	})); err != nil {
+		t.Fatalf("seed inventory item: %v", err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("commit seeded output: %v", err)
+	}
+
+	events := make(chan domain.FulfillmentEvent, 16)
+	wf := newTestWorkflow(store, noopDelivery{events: events}, events, func(wf *domain.OrchestrationWorkflowSpec) {
+		wf.Vault = vault
+	})
+
+	rec := &simpleRecord{ctx: ctx, events: events}
+	if _, err := wf.Run(rec, domain.FulfillmentID("deployments/d1")); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	readTx, err := store.BeginReadOnly(ctx)
+	if err != nil {
+		t.Fatalf("begin read tx: %v", err)
+	}
+	defer readTx.Rollback()
+	if _, err := readTx.Inventory().Get(ctx, "target:ghost-target"); !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("expected ghost inventory item to be deleted, got err=%v", err)
+	}
+	f, err := readTx.Fulfillments().Get(ctx, domain.FulfillmentID("deployments/d1"))
+	if err != nil {
+		t.Fatalf("expected fulfillment to still exist, got: %v", err)
+	}
+	if f.State() != domain.FulfillmentStateDeleting {
+		t.Errorf("fulfillment state = %q, want deleting", f.State())
 	}
 }
 
@@ -2830,6 +2941,288 @@ func TestOrchestration_DeletedFulfillment_StopsCleanly(t *testing.T) {
 	_, err := wf.Run(rec, domain.FulfillmentID("nonexistent"))
 	if err != nil {
 		t.Fatalf("Run should return nil for deleted fulfillment, got: %v", err)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Target output hook tests
+// ---------------------------------------------------------------------------
+
+func TestOrchestration_DeliveryOutputs_SendsReadyNotificationAfterCommit(t *testing.T) {
+	store, vault := setupStore(t)
+	seedFulfillmentAndDeployment(t, store, "deployments/d1", domain.FulfillmentSnapshot{
+		Generation:        1,
+		ManifestStrategy:  domain.ManifestStrategySpec{Type: domain.ManifestStrategyInline, Manifests: []domain.Manifest{{Raw: json.RawMessage(`{"name":"new-cluster"}`)}}},
+		PlacementStrategy: domain.PlacementStrategySpec{Type: domain.PlacementStrategyStatic, Targets: []domain.TargetID{"provisioner"}},
+		State:             domain.FulfillmentStateCreating,
+	})
+	seedTargets(t, store, domain.TargetInfoFromSnapshot(domain.TargetInfoSnapshot{ID: "provisioner", Name: "provisioner", Type: "test"}))
+
+	events := make(chan domain.FulfillmentEvent, 16)
+	targetOutputHooks := &recordingTargetOutputHooks{}
+	wf := newTestWorkflow(store, &outputProducingDelivery{
+		events: events,
+		targets: []domain.ProvisionedTarget{{
+			ID: "k8s-new-cluster", Type: "kubernetes", Name: "new-cluster",
+			Properties: map[string]string{"kubeconfig_ref": "targets/k8s-new-cluster/kubeconfig"},
+		}},
+		secrets: []domain.ProducedSecret{{
+			Ref: "targets/k8s-new-cluster/kubeconfig", Value: []byte("fake-kubeconfig-data"),
+		}},
+	}, events, func(wf *domain.OrchestrationWorkflowSpec) {
+		wf.Vault = vault
+		wf.TargetOutputHooks = targetOutputHooks
+	})
+
+	rec := &simpleRecord{ctx: testContext(t), events: events}
+	if _, err := wf.Run(rec, domain.FulfillmentID("deployments/d1")); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	if len(targetOutputHooks.ready) != 1 {
+		t.Fatalf("expected 1 ready notification, got %d", len(targetOutputHooks.ready))
+	}
+	if targetOutputHooks.ready[0].ID() != "k8s-new-cluster" {
+		t.Errorf("ready target ID = %q, want k8s-new-cluster", targetOutputHooks.ready[0].ID())
+	}
+	if len(targetOutputHooks.terminating) != 0 {
+		t.Errorf("expected 0 terminating notifications, got %d", len(targetOutputHooks.terminating))
+	}
+}
+
+func TestOrchestration_DeletePipeline_SendsTerminatingNotificationBeforeCleanup(t *testing.T) {
+	store, vault := setupStore(t)
+	seedFulfillmentAndDeployment(t, store, "deployments/d1", domain.FulfillmentSnapshot{
+		Generation:        2,
+		ResolvedTargets:   []domain.TargetID{"gcphcp-provider"},
+		ManifestStrategy:  domain.ManifestStrategySpec{Type: domain.ManifestStrategyInline, Manifests: []domain.Manifest{{ManifestType: "api.gcphcp.cluster", Raw: json.RawMessage(`{"name":"guest-cluster"}`)}}},
+		PlacementStrategy: domain.PlacementStrategySpec{Type: domain.PlacementStrategyStatic, Targets: []domain.TargetID{"gcphcp-provider"}},
+		State:             domain.FulfillmentStateDeleting,
+	})
+	seedTargets(t, store, domain.TargetInfoFromSnapshot(domain.TargetInfoSnapshot{ID: "gcphcp-provider", Name: "gcphcp-provider", Type: "gcphcp"}))
+	seedDelivery(t, store, domain.DeliveryFromSnapshot(domain.DeliverySnapshot{
+		ID: "deployments/d1:gcphcp-provider", FulfillmentID: domain.FulfillmentID("deployments/d1"), TargetID: "gcphcp-provider",
+		Manifests: []domain.Manifest{{ManifestType: "api.gcphcp.cluster", Raw: json.RawMessage(`{"name":"guest-cluster"}`)}},
+		State:     domain.DeliveryStateDelivered,
+	}))
+	seedTargets(t, store, domain.TargetInfoFromSnapshot(domain.TargetInfoSnapshot{ID: "kubernetes-target", Name: "guest-cluster", Type: "kubernetes"}))
+
+	ctx := testContext(t)
+	deliveryID := domain.DeliveryID("deployments/d1:gcphcp-provider")
+	tx, err := store.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin tx: %v", err)
+	}
+	defer tx.Rollback()
+	if err := tx.Inventory().Create(ctx, domain.InventoryItemFromSnapshot(domain.InventoryItemSnapshot{
+		ID: "target:kubernetes-target", Type: "kubernetes", Name: "guest-cluster",
+		SourceDeliveryID: &deliveryID,
+	})); err != nil {
+		t.Fatalf("seed inventory item: %v", err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("commit seeded output: %v", err)
+	}
+
+	events := make(chan domain.FulfillmentEvent, 16)
+	targetOutputHooks := &recordingTargetOutputHooks{}
+	wf := newTestWorkflow(store, noopDelivery{events: events}, events, func(wf *domain.OrchestrationWorkflowSpec) {
+		wf.Vault = vault
+		wf.TargetOutputHooks = targetOutputHooks
+	})
+
+	rec := &simpleRecord{ctx: ctx, events: events}
+	if _, err := wf.Run(rec, domain.FulfillmentID("deployments/d1")); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	if len(targetOutputHooks.terminating) != 1 {
+		t.Fatalf("expected 1 terminating notification, got %d", len(targetOutputHooks.terminating))
+	}
+	if targetOutputHooks.terminating[0].ID() != "kubernetes-target" {
+		t.Errorf("terminating target ID = %q, want kubernetes-target", targetOutputHooks.terminating[0].ID())
+	}
+	if len(targetOutputHooks.ready) != 0 {
+		t.Errorf("expected 0 ready notifications, got %d", len(targetOutputHooks.ready))
+	}
+}
+
+func TestOrchestration_CleanupTargetIndexedInventory_NoTargetOutputHooksConfigured_DeletesTarget(t *testing.T) {
+	store, vault := setupStore(t)
+	seedFulfillmentAndDeployment(t, store, "deployments/d1", domain.FulfillmentSnapshot{
+		Generation:        2,
+		ResolvedTargets:   []domain.TargetID{"gcphcp-provider"},
+		ManifestStrategy:  domain.ManifestStrategySpec{Type: domain.ManifestStrategyInline, Manifests: []domain.Manifest{{ManifestType: "api.gcphcp.cluster", Raw: json.RawMessage(`{"name":"guest-cluster"}`)}}},
+		PlacementStrategy: domain.PlacementStrategySpec{Type: domain.PlacementStrategyStatic, Targets: []domain.TargetID{"gcphcp-provider"}},
+		State:             domain.FulfillmentStateDeleting,
+	})
+	seedTargets(t, store,
+		domain.TargetInfoFromSnapshot(domain.TargetInfoSnapshot{ID: "gcphcp-provider", Name: "gcphcp-provider", Type: "gcphcp"}),
+		domain.TargetInfoFromSnapshot(domain.TargetInfoSnapshot{ID: "unmanaged-target", Name: "guest-cluster", Type: "unmanaged"}),
+	)
+	deliveryID := domain.DeliveryID("deployments/d1:gcphcp-provider")
+	seedDelivery(t, store, domain.DeliveryFromSnapshot(domain.DeliverySnapshot{
+		ID: deliveryID, FulfillmentID: domain.FulfillmentID("deployments/d1"), TargetID: "gcphcp-provider",
+		Manifests: []domain.Manifest{{ManifestType: "api.gcphcp.cluster", Raw: json.RawMessage(`{"name":"guest-cluster"}`)}},
+		State:     domain.DeliveryStateDelivered,
+	}))
+
+	ctx := testContext(t)
+	tx, err := store.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin tx: %v", err)
+	}
+	defer tx.Rollback()
+	if err := tx.Inventory().Create(ctx, domain.InventoryItemFromSnapshot(domain.InventoryItemSnapshot{
+		ID: "target:unmanaged-target", Type: "unmanaged", Name: "guest-cluster",
+		SourceDeliveryID: &deliveryID,
+	})); err != nil {
+		t.Fatalf("seed inventory item: %v", err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("commit seeded output: %v", err)
+	}
+
+	events := make(chan domain.FulfillmentEvent, 16)
+	wf := newTestWorkflow(store, noopDelivery{events: events}, events, func(wf *domain.OrchestrationWorkflowSpec) {
+		wf.Vault = vault
+	})
+
+	rec := &simpleRecord{ctx: ctx, events: events}
+	if _, err := wf.Run(rec, domain.FulfillmentID("deployments/d1")); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	readTx, err := store.BeginReadOnly(ctx)
+	if err != nil {
+		t.Fatalf("begin read tx: %v", err)
+	}
+	defer readTx.Rollback()
+	if _, err := readTx.Targets().Get(ctx, "unmanaged-target"); !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("expected unmanaged target to be deleted, got err=%v", err)
+	}
+}
+
+func TestOrchestration_CleanupTargetIndexedInventory_TargetOutputHookFailure_BlocksTargetDeletion(t *testing.T) {
+	store, vault := setupStore(t)
+	seedFulfillmentAndDeployment(t, store, "deployments/d1", domain.FulfillmentSnapshot{
+		Generation:        2,
+		ResolvedTargets:   []domain.TargetID{"gcphcp-provider"},
+		ManifestStrategy:  domain.ManifestStrategySpec{Type: domain.ManifestStrategyInline, Manifests: []domain.Manifest{{ManifestType: "api.gcphcp.cluster", Raw: json.RawMessage(`{"name":"guest-cluster"}`)}}},
+		PlacementStrategy: domain.PlacementStrategySpec{Type: domain.PlacementStrategyStatic, Targets: []domain.TargetID{"gcphcp-provider"}},
+		State:             domain.FulfillmentStateDeleting,
+	})
+	seedTargets(t, store,
+		domain.TargetInfoFromSnapshot(domain.TargetInfoSnapshot{ID: "gcphcp-provider", Name: "gcphcp-provider", Type: "gcphcp"}),
+		domain.TargetInfoFromSnapshot(domain.TargetInfoSnapshot{ID: "kubernetes-target", Name: "guest-cluster", Type: "kubernetes"}),
+	)
+	deliveryID := domain.DeliveryID("deployments/d1:gcphcp-provider")
+	seedDelivery(t, store, domain.DeliveryFromSnapshot(domain.DeliverySnapshot{
+		ID: deliveryID, FulfillmentID: domain.FulfillmentID("deployments/d1"), TargetID: "gcphcp-provider",
+		Manifests: []domain.Manifest{{ManifestType: "api.gcphcp.cluster", Raw: json.RawMessage(`{"name":"guest-cluster"}`)}},
+		State:     domain.DeliveryStateDelivered,
+	}))
+
+	ctx := testContext(t)
+	tx, err := store.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin tx: %v", err)
+	}
+	defer tx.Rollback()
+	if err := tx.Inventory().Create(ctx, domain.InventoryItemFromSnapshot(domain.InventoryItemSnapshot{
+		ID: "target:kubernetes-target", Type: "kubernetes", Name: "guest-cluster",
+		SourceDeliveryID: &deliveryID,
+	})); err != nil {
+		t.Fatalf("seed inventory item: %v", err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("commit seeded output: %v", err)
+	}
+
+	events := make(chan domain.FulfillmentEvent, 16)
+	targetOutputHooks := &recordingTargetOutputHooks{cleanupErr: domain.ErrInvalidArgument}
+	wf := newTestWorkflow(store, noopDelivery{events: events}, events, func(wf *domain.OrchestrationWorkflowSpec) {
+		wf.Vault = vault
+		wf.TargetOutputHooks = targetOutputHooks
+	})
+
+	rec := &simpleRecord{ctx: ctx, events: events}
+	if _, err := wf.Run(rec, domain.FulfillmentID("deployments/d1")); err == nil {
+		t.Fatal("expected error from target output pre-delete hook")
+	}
+
+	readTx, err := store.BeginReadOnly(ctx)
+	if err != nil {
+		t.Fatalf("begin read tx: %v", err)
+	}
+	defer readTx.Rollback()
+	if _, err := readTx.Targets().Get(ctx, "kubernetes-target"); err != nil {
+		t.Fatalf("expected kubernetes-target to still exist, got err=%v", err)
+	}
+	if _, err := readTx.Inventory().Get(ctx, "target:kubernetes-target"); err != nil {
+		t.Fatalf("expected inventory item to still exist, got err=%v", err)
+	}
+}
+
+func TestOrchestration_CleanupTargetIndexedInventory_CallsTargetOutputPreDeleteHook(t *testing.T) {
+	store, vault := setupStore(t)
+	seedFulfillmentAndDeployment(t, store, "deployments/d1", domain.FulfillmentSnapshot{
+		Generation:        2,
+		ResolvedTargets:   []domain.TargetID{"gcphcp-provider"},
+		ManifestStrategy:  domain.ManifestStrategySpec{Type: domain.ManifestStrategyInline, Manifests: []domain.Manifest{{ManifestType: "api.gcphcp.cluster", Raw: json.RawMessage(`{"name":"guest-cluster"}`)}}},
+		PlacementStrategy: domain.PlacementStrategySpec{Type: domain.PlacementStrategyStatic, Targets: []domain.TargetID{"gcphcp-provider"}},
+		State:             domain.FulfillmentStateDeleting,
+	})
+	seedTargets(t, store,
+		domain.TargetInfoFromSnapshot(domain.TargetInfoSnapshot{ID: "gcphcp-provider", Name: "gcphcp-provider", Type: "gcphcp"}),
+		domain.TargetInfoFromSnapshot(domain.TargetInfoSnapshot{ID: "kubernetes-target", Name: "guest-cluster", Type: "kubernetes"}),
+	)
+	deliveryID := domain.DeliveryID("deployments/d1:gcphcp-provider")
+	seedDelivery(t, store, domain.DeliveryFromSnapshot(domain.DeliverySnapshot{
+		ID: deliveryID, FulfillmentID: domain.FulfillmentID("deployments/d1"), TargetID: "gcphcp-provider",
+		Manifests: []domain.Manifest{{ManifestType: "api.gcphcp.cluster", Raw: json.RawMessage(`{"name":"guest-cluster"}`)}},
+		State:     domain.DeliveryStateDelivered,
+	}))
+
+	ctx := testContext(t)
+	tx, err := store.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin tx: %v", err)
+	}
+	defer tx.Rollback()
+	if err := tx.Inventory().Create(ctx, domain.InventoryItemFromSnapshot(domain.InventoryItemSnapshot{
+		ID: "target:kubernetes-target", Type: "kubernetes", Name: "guest-cluster",
+		SourceDeliveryID: &deliveryID,
+	})); err != nil {
+		t.Fatalf("seed inventory item: %v", err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("commit seeded output: %v", err)
+	}
+
+	events := make(chan domain.FulfillmentEvent, 16)
+	targetOutputHooks := &recordingTargetOutputHooks{}
+	wf := newTestWorkflow(store, noopDelivery{events: events}, events, func(wf *domain.OrchestrationWorkflowSpec) {
+		wf.Vault = vault
+		wf.TargetOutputHooks = targetOutputHooks
+	})
+
+	rec := &simpleRecord{ctx: ctx, events: events}
+	if _, err := wf.Run(rec, domain.FulfillmentID("deployments/d1")); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	if len(targetOutputHooks.terminating) != 1 || targetOutputHooks.terminating[0].ID() != "kubernetes-target" {
+		t.Fatalf("target output pre-delete hook calls = %v, want one call for kubernetes-target", targetOutputHooks.terminating)
+	}
+
+	readTx, err := store.BeginReadOnly(ctx)
+	if err != nil {
+		t.Fatalf("begin read tx: %v", err)
+	}
+	defer readTx.Rollback()
+	if _, err := readTx.Targets().Get(ctx, "kubernetes-target"); !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("expected kubernetes-target to be deleted, got err=%v", err)
 	}
 }
 
