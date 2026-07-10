@@ -14,6 +14,8 @@ import (
 // satisfied by *application.TargetInventoryCleanupService without
 // either package needing to know about the other.
 type InventorySubtreeCleaner interface {
+	// DeleteOwnedInventorySubtree deletes every extension resource under
+	// ref after validating that ownerAddonID owns ref.ResourceType.
 	DeleteOwnedInventorySubtree(ctx context.Context, ownerAddonID domain.AddonID, ref domain.InventorySubtreeRef) error
 }
 
@@ -23,7 +25,7 @@ type InventorySubtreeCleaner interface {
 // terminating target's Kubernetes object subtree directly from the
 // extension-resource store and never calls the Kubernetes API, so
 // cleanup succeeds even with the Kubernetes addon disconnected, the
-// target cluster gone, or no local watcher running for the target.
+// target cluster gone, or no in-process watcher running for the target.
 type KubernetesTargetIndexedInventoryCleaner struct {
 	subtrees InventorySubtreeCleaner
 }

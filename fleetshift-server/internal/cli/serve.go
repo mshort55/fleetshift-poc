@@ -260,10 +260,22 @@ func runServe(ctx context.Context, f *serveFlags) error {
 		}
 	}
 
+	// --- kubernetes in-process index controller ---
+	//
+	// Constructed before orchestration registration so target lifecycle
+	// hooks can wake/stop the controller. Startup recovery is the
+	// controller's own initial reconcile.
+	var targetOutputHooks domain.TargetOutputHooks = domain.NoOpTargetOutputHooks{}
+	var kubeIndexController *kubernetesaddon.InProcessIndexController
+	if enabledAddons["kubernetes"] {
+		targetOutputHooks, kubeIndexController = newKubernetesInProcessIndexing(ctx, store, vault, logger)
+	}
+
 	orchSpec := domain.NewOrchestrationWorkflowSpec(
 		store, router, domain.StrategyFactory{Store: store}, reg,
 		domain.WithFulfillmentObserver(observability.NewFulfillmentObserver(logger)),
 		domain.WithVault(vault),
+		domain.WithTargetOutputHooks(targetOutputHooks),
 	)
 	orchWf, err := reg.RegisterOrchestration(orchSpec)
 	if err != nil {
@@ -672,9 +684,14 @@ func runServe(ctx context.Context, f *serveFlags) error {
 
 	if enabledAddons["kubernetes"] {
 		if err := addonMgr.Connect(ctx, kubernetesaddon.Descriptor().ID, application.ConnectInput{
-			Agent: kubeAgent,
+			Agent:   kubeAgent,
+			Schemas: []domain.ExtensionResourceSchema{kubernetesaddon.Schema()},
 		}); err != nil {
 			return fmt.Errorf("connect kubernetes addon: %w", err)
+		}
+		if kubeIndexController != nil {
+			go kubeIndexController.Run(ctx)
+			logger.Info("kubernetes in-process index controller started")
 		}
 	}
 

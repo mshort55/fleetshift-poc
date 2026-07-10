@@ -13,7 +13,7 @@ import (
 )
 
 // recordingInventoryReportBackend records every InventoryReportBackend
-// call so LocalInventoryReporter mapping can be asserted without a
+// call so DirectInventoryReporter mapping can be asserted without a
 // real InventoryReportService, informer, or store.
 type recordingInventoryReportBackend struct {
 	replaceBatchCalls      []replaceBatchCall
@@ -77,9 +77,9 @@ func (r *recordingInventoryReportBackend) DeleteSubtree(_ context.Context, ref d
 	return r.deleteSubtreeErr
 }
 
-func TestLocalInventoryReporter_ApplyDelta_EmptyIsNoop(t *testing.T) {
+func TestDirectInventoryReporter_ApplyDelta_EmptyIsNoop(t *testing.T) {
 	fake := &recordingInventoryReportBackend{}
-	reporter := kubernetes.NewLocalInventoryReporter(fake)
+	reporter := kubernetes.NewDirectInventoryReporter(fake)
 
 	if err := reporter.ApplyDelta(context.Background(), kubernetes.InventoryDeltaReport{}); err != nil {
 		t.Fatalf("ApplyDelta(empty): %v", err)
@@ -90,9 +90,9 @@ func TestLocalInventoryReporter_ApplyDelta_EmptyIsNoop(t *testing.T) {
 	}
 }
 
-func TestLocalInventoryReporter_ApplyDelta_MapsUpsertsAndDeletes(t *testing.T) {
+func TestDirectInventoryReporter_ApplyDelta_MapsUpsertsAndDeletes(t *testing.T) {
 	fake := &recordingInventoryReportBackend{}
-	reporter := kubernetes.NewLocalInventoryReporter(fake)
+	reporter := kubernetes.NewDirectInventoryReporter(fake)
 	now := time.Unix(1700000000, 0).UTC()
 	obs := json.RawMessage(`{"kind":"Pod"}`)
 	name := domain.ResourceName("clusters/prod/apiResources/core~v1~pods/objects/uid-1")
@@ -146,9 +146,9 @@ func TestLocalInventoryReporter_ApplyDelta_MapsUpsertsAndDeletes(t *testing.T) {
 	}
 }
 
-func TestLocalInventoryReporter_ApplyDelta_UpsertsOnly(t *testing.T) {
+func TestDirectInventoryReporter_ApplyDelta_UpsertsOnly(t *testing.T) {
 	fake := &recordingInventoryReportBackend{}
-	reporter := kubernetes.NewLocalInventoryReporter(fake)
+	reporter := kubernetes.NewDirectInventoryReporter(fake)
 	name := domain.ResourceName("clusters/prod/apiResources/apps~v1~deployments/objects/uid-d1")
 
 	err := reporter.ApplyDelta(context.Background(), kubernetes.InventoryDeltaReport{
@@ -165,9 +165,9 @@ func TestLocalInventoryReporter_ApplyDelta_UpsertsOnly(t *testing.T) {
 	}
 }
 
-func TestLocalInventoryReporter_ApplyDelta_DeletesOnly(t *testing.T) {
+func TestDirectInventoryReporter_ApplyDelta_DeletesOnly(t *testing.T) {
 	fake := &recordingInventoryReportBackend{}
-	reporter := kubernetes.NewLocalInventoryReporter(fake)
+	reporter := kubernetes.NewDirectInventoryReporter(fake)
 	refs := []domain.InventoryResourceRef{{
 		ResourceType: kubernetes.ObjectResourceType,
 		Name:         "clusters/prod/apiResources/core~v1~pods/objects/uid-x",
@@ -185,10 +185,10 @@ func TestLocalInventoryReporter_ApplyDelta_DeletesOnly(t *testing.T) {
 	}
 }
 
-func TestLocalInventoryReporter_ApplyDelta_PropagatesReplaceBatchError(t *testing.T) {
+func TestDirectInventoryReporter_ApplyDelta_PropagatesReplaceBatchError(t *testing.T) {
 	wantErr := errors.New("replace failed")
 	fake := &recordingInventoryReportBackend{replaceBatchErr: wantErr}
-	reporter := kubernetes.NewLocalInventoryReporter(fake)
+	reporter := kubernetes.NewDirectInventoryReporter(fake)
 
 	err := reporter.ApplyDelta(context.Background(), kubernetes.InventoryDeltaReport{
 		Upserts: []kubernetes.InventoryObjectReport{{Name: "clusters/prod/apiResources/core~v1~pods/objects/uid-1"}},
@@ -201,10 +201,10 @@ func TestLocalInventoryReporter_ApplyDelta_PropagatesReplaceBatchError(t *testin
 	}
 }
 
-func TestLocalInventoryReporter_ApplyDelta_PropagatesDeleteBatchError(t *testing.T) {
+func TestDirectInventoryReporter_ApplyDelta_PropagatesDeleteBatchError(t *testing.T) {
 	wantErr := errors.New("delete failed")
 	fake := &recordingInventoryReportBackend{deleteBatchErr: wantErr}
-	reporter := kubernetes.NewLocalInventoryReporter(fake)
+	reporter := kubernetes.NewDirectInventoryReporter(fake)
 
 	err := reporter.ApplyDelta(context.Background(), kubernetes.InventoryDeltaReport{
 		Deletes: []domain.InventoryResourceRef{{
@@ -217,9 +217,9 @@ func TestLocalInventoryReporter_ApplyDelta_PropagatesDeleteBatchError(t *testing
 	}
 }
 
-func TestLocalInventoryReporter_ReplaceCollection_MapsToBackend(t *testing.T) {
+func TestDirectInventoryReporter_ReplaceCollection_MapsToBackend(t *testing.T) {
 	fake := &recordingInventoryReportBackend{}
-	reporter := kubernetes.NewLocalInventoryReporter(fake)
+	reporter := kubernetes.NewDirectInventoryReporter(fake)
 	collection := domain.CollectionName("clusters/prod/apiResources/core~v1~pods/objects")
 	reports := []kubernetes.InventoryObjectReport{
 		{Name: "clusters/prod/apiResources/core~v1~pods/objects/uid-1"},
@@ -248,11 +248,11 @@ func TestLocalInventoryReporter_ReplaceCollection_MapsToBackend(t *testing.T) {
 	}
 }
 
-func TestLocalInventoryReporter_ReplaceCollection_EmptyReportsStillCallsBackend(t *testing.T) {
+func TestDirectInventoryReporter_ReplaceCollection_EmptyReportsStillCallsBackend(t *testing.T) {
 	// Empty snapshot is a valid prune-everything resync; the reporter
 	// must still forward it so InventoryReportService can prune.
 	fake := &recordingInventoryReportBackend{}
-	reporter := kubernetes.NewLocalInventoryReporter(fake)
+	reporter := kubernetes.NewDirectInventoryReporter(fake)
 	collection := domain.CollectionName("clusters/prod/apiResources/apps~v1~deployments/objects")
 
 	err := reporter.ReplaceCollection(context.Background(), kubernetes.InventoryCollectionSnapshot{
@@ -269,10 +269,10 @@ func TestLocalInventoryReporter_ReplaceCollection_EmptyReportsStillCallsBackend(
 	}
 }
 
-func TestLocalInventoryReporter_ReplaceCollection_PropagatesError(t *testing.T) {
+func TestDirectInventoryReporter_ReplaceCollection_PropagatesError(t *testing.T) {
 	wantErr := errors.New("replace collection failed")
 	fake := &recordingInventoryReportBackend{replaceCollectionErr: wantErr}
-	reporter := kubernetes.NewLocalInventoryReporter(fake)
+	reporter := kubernetes.NewDirectInventoryReporter(fake)
 
 	err := reporter.ReplaceCollection(context.Background(), kubernetes.InventoryCollectionSnapshot{
 		Collection: "clusters/prod/apiResources/core~v1~pods/objects",
@@ -282,9 +282,9 @@ func TestLocalInventoryReporter_ReplaceCollection_PropagatesError(t *testing.T) 
 	}
 }
 
-func TestLocalInventoryReporter_DeleteResources_MapsToDeleteBatch(t *testing.T) {
+func TestDirectInventoryReporter_DeleteResources_MapsToDeleteBatch(t *testing.T) {
 	fake := &recordingInventoryReportBackend{}
-	reporter := kubernetes.NewLocalInventoryReporter(fake)
+	reporter := kubernetes.NewDirectInventoryReporter(fake)
 	refs := []domain.InventoryResourceRef{
 		{ResourceType: kubernetes.ObjectResourceType, Name: "clusters/prod/apiResources/core~v1~pods/objects/uid-1"},
 		{ResourceType: kubernetes.ObjectResourceType, Name: "clusters/prod/apiResources/core~v1~pods/objects/uid-2"},
@@ -299,9 +299,9 @@ func TestLocalInventoryReporter_DeleteResources_MapsToDeleteBatch(t *testing.T) 
 	}
 }
 
-func TestLocalInventoryReporter_DeleteResources_EmptyIsNoop(t *testing.T) {
+func TestDirectInventoryReporter_DeleteResources_EmptyIsNoop(t *testing.T) {
 	fake := &recordingInventoryReportBackend{}
-	reporter := kubernetes.NewLocalInventoryReporter(fake)
+	reporter := kubernetes.NewDirectInventoryReporter(fake)
 
 	if err := reporter.DeleteResources(context.Background(), nil); err != nil {
 		t.Fatalf("DeleteResources(nil): %v", err)
@@ -311,10 +311,10 @@ func TestLocalInventoryReporter_DeleteResources_EmptyIsNoop(t *testing.T) {
 	}
 }
 
-func TestLocalInventoryReporter_DeleteResources_PropagatesError(t *testing.T) {
+func TestDirectInventoryReporter_DeleteResources_PropagatesError(t *testing.T) {
 	wantErr := errors.New("delete resources failed")
 	fake := &recordingInventoryReportBackend{deleteBatchErr: wantErr}
-	reporter := kubernetes.NewLocalInventoryReporter(fake)
+	reporter := kubernetes.NewDirectInventoryReporter(fake)
 
 	err := reporter.DeleteResources(context.Background(), []domain.InventoryResourceRef{{
 		ResourceType: kubernetes.ObjectResourceType,
@@ -325,9 +325,9 @@ func TestLocalInventoryReporter_DeleteResources_PropagatesError(t *testing.T) {
 	}
 }
 
-func TestLocalInventoryReporter_DeleteCollection_MapsToBackend(t *testing.T) {
+func TestDirectInventoryReporter_DeleteCollection_MapsToBackend(t *testing.T) {
 	fake := &recordingInventoryReportBackend{}
-	reporter := kubernetes.NewLocalInventoryReporter(fake)
+	reporter := kubernetes.NewDirectInventoryReporter(fake)
 	ref := domain.InventoryCollectionRef{
 		ResourceType: kubernetes.ObjectResourceType,
 		Collection:   "clusters/prod/apiResources/core~v1~services/objects",
@@ -346,10 +346,10 @@ func TestLocalInventoryReporter_DeleteCollection_MapsToBackend(t *testing.T) {
 	}
 }
 
-func TestLocalInventoryReporter_DeleteCollection_PropagatesError(t *testing.T) {
+func TestDirectInventoryReporter_DeleteCollection_PropagatesError(t *testing.T) {
 	wantErr := errors.New("delete collection failed")
 	fake := &recordingInventoryReportBackend{deleteCollectionErr: wantErr}
-	reporter := kubernetes.NewLocalInventoryReporter(fake)
+	reporter := kubernetes.NewDirectInventoryReporter(fake)
 
 	err := reporter.DeleteCollection(context.Background(), domain.InventoryCollectionRef{
 		ResourceType: kubernetes.ObjectResourceType,
@@ -360,9 +360,9 @@ func TestLocalInventoryReporter_DeleteCollection_PropagatesError(t *testing.T) {
 	}
 }
 
-func TestLocalInventoryReporter_DeleteSubtree_MapsToBackend(t *testing.T) {
+func TestDirectInventoryReporter_DeleteSubtree_MapsToBackend(t *testing.T) {
 	fake := &recordingInventoryReportBackend{}
-	reporter := kubernetes.NewLocalInventoryReporter(fake)
+	reporter := kubernetes.NewDirectInventoryReporter(fake)
 	ref := domain.InventorySubtreeRef{
 		ResourceType: kubernetes.ObjectResourceType,
 		Parent:       "clusters/prod",
@@ -377,10 +377,10 @@ func TestLocalInventoryReporter_DeleteSubtree_MapsToBackend(t *testing.T) {
 	}
 }
 
-func TestLocalInventoryReporter_DeleteSubtree_PropagatesError(t *testing.T) {
+func TestDirectInventoryReporter_DeleteSubtree_PropagatesError(t *testing.T) {
 	wantErr := errors.New("subtree delete failed")
 	fake := &recordingInventoryReportBackend{deleteSubtreeErr: wantErr}
-	reporter := kubernetes.NewLocalInventoryReporter(fake)
+	reporter := kubernetes.NewDirectInventoryReporter(fake)
 
 	err := reporter.DeleteSubtree(context.Background(), domain.InventorySubtreeRef{
 		ResourceType: kubernetes.ObjectResourceType,

@@ -130,7 +130,7 @@ func seedKubernetesObjectType(t *testing.T, store domain.Store) {
 // composition will. No Kubernetes client, informer, or addon
 // connection is constructed anywhere in this test, which is what
 // proves cleanup works with the Kubernetes addon disconnected, with
-// no live target cluster, and with no running local watcher.
+// no live target cluster, and with no running in-process watcher.
 func TestKubernetesTargetIndexedInventoryCleaner_ComposedWithTargetOutputHookService(t *testing.T) {
 	store := &sqlite.Store{DB: sqlite.OpenTestDB(t)}
 	seedKubernetesObjectType(t, store)
