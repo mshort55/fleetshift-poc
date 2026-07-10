@@ -281,8 +281,9 @@ func (t *listFailTx) SignerEnrollments() domain.SignerEnrollmentRepository {
 func (t *listFailTx) ResourceIdentities() domain.ResourceIdentityRepository {
 	panic("ResourceIdentities unused")
 }
-func (t *listFailTx) Commit() error   { return nil }
-func (t *listFailTx) Rollback() error { return nil }
+func (t *listFailTx) Queries() domain.QueryRepository { panic("Queries unused") }
+func (t *listFailTx) Commit() error                   { return nil }
+func (t *listFailTx) Rollback() error                 { return nil }
 
 type listFailTargets struct{ err error }
 
