@@ -151,6 +151,7 @@ func Test_ClusterBootstrap(t *testing.T) {
 			continue
 		}
 		foundNode = true
+		assertObjectIdentity(t, obj, f.targetID)
 		extracted := parseExtracted(t, inv)
 		if _, ok := extracted["kubeletVersion"]; !ok {
 			t.Error("node missing extracted.kubeletVersion")
@@ -610,6 +611,7 @@ func Test_LabelIndexing(t *testing.T) {
 		}
 		if inv.Labels()["k8s.kind"] == "Pod" && strings.HasPrefix(inv.Labels()["k8s.name"], "e2e-labels-") {
 			foundPod = true
+			assertObjectIdentity(t, obj, f.targetID)
 			if inv.Labels()["k8s.name"] == "" {
 				t.Fatal("pod missing k8s.name identity label")
 			}
@@ -637,6 +639,127 @@ func Test_LabelIndexing(t *testing.T) {
 			break
 		}
 	}
+}
+
+// Test_ControllerIndexesRegisteredTarget wires the serve-style
+// controller + hooks against the kind cluster and asserts
+// AfterTargetRegistered starts indexing Node inventory under the
+// canonical ObjectResourceName shape.
+func Test_ControllerIndexesRegisteredTarget(t *testing.T) {
+	if fixture == nil {
+		t.Fatal("kind fixture not initialized")
+	}
+
+	store := &sqlite.Store{DB: sqlite.OpenTestDB(t)}
+	seedKubernetesObjectType(t, store)
+
+	runCtx, cancelRun := context.WithCancel(context.Background())
+	defer cancelRun()
+
+	reports := application.NewInventoryReportService(store)
+	subtrees := application.NewTargetInventoryCleanupService(store)
+	reporter := kubeaddon.NewDirectInventoryReporter(newE2EInventoryBackend(reports, subtrees))
+	host := kubeaddon.NewKubernetesInProcessIndexHost(
+		runCtx,
+		nil,
+		reporter,
+		slog.Default(),
+		kubeaddon.WithInProcessIndexHostIndexConfig(func(domain.TargetInfo) kubeaddon.IndexConfig {
+			return kubeaddon.IndexConfig{
+				Schema:        kubeaddon.DefaultKubernetesSchema(),
+				BatchInterval: 200 * time.Millisecond,
+			}
+		}),
+	)
+
+	targetID := domain.TargetID("k8s-controller-e2e")
+	target := domain.TargetInfoFromSnapshot(domain.TargetInfoSnapshot{
+		ID:    targetID,
+		Type:  kubeaddon.TargetType,
+		Name:  "Controller E2E",
+		State: domain.TargetStateReady,
+		Properties: map[string]string{
+			kubeaddon.PropAPIServer:           fixture.apiServer,
+			kubeaddon.PropCACert:              fixture.caCert,
+			kubeaddon.PropServiceAccountToken: fixture.saToken,
+		},
+	})
+
+	tx, err := store.Begin(context.Background())
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	if err := tx.Targets().Create(context.Background(), target); err != nil {
+		t.Fatalf("create target: %v", err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+
+	lister := storeTargetLister{store: store}
+	controller := kubeaddon.NewInProcessIndexController(
+		lister,
+		host,
+		kubeaddon.DefaultInProcessIndexPolicy{},
+		slog.Default(),
+		kubeaddon.WithReconcileInterval(200*time.Millisecond),
+	)
+	cleaner := kubeaddon.NewKubernetesTargetIndexedInventoryCleaner(subtrees)
+	hooks := application.NewTargetOutputHookService(
+		application.WithTargetRuntimeNotifier(controller),
+		application.WithTargetIndexedInventoryCleaner(kubeaddon.TargetType, cleaner),
+	)
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		controller.Run(runCtx)
+	}()
+	t.Cleanup(func() {
+		cancelRun()
+		<-done
+	})
+
+	hooks.AfterTargetRegistered(context.Background(), target)
+
+	objs := awaitInventoryMatch(t, store, func(objs []*domain.ExtensionResource) bool {
+		for _, obj := range objs {
+			inv := obj.Inventory()
+			if inv != nil && inv.Labels()["k8s.kind"] == "Node" && inv.Labels()["fleetshift.target.id"] == string(targetID) {
+				return true
+			}
+		}
+		return false
+	}, 60*time.Second)
+
+	var found bool
+	for _, obj := range objs {
+		inv := obj.Inventory()
+		if inv != nil && inv.Labels()["k8s.kind"] == "Node" && inv.Labels()["fleetshift.target.id"] == string(targetID) {
+			found = true
+			assertObjectIdentity(t, obj, targetID)
+		}
+	}
+	if !found {
+		t.Fatal("expected Node inventory after controller ready notification")
+	}
+	if !host.HasIndexer(targetID) {
+		t.Fatal("expected running indexer after AfterTargetRegistered")
+	}
+}
+
+// storeTargetLister mirrors the serve composition adapter for kind e2e.
+type storeTargetLister struct {
+	store domain.Store
+}
+
+func (l storeTargetLister) ListTargets(ctx context.Context) ([]domain.TargetInfo, error) {
+	tx, err := l.store.BeginReadOnly(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+	return tx.Targets().List(ctx)
 }
 
 // ── Fixtures & setup ────────────────────────────────────────────────────
@@ -902,9 +1025,43 @@ type objectSpec struct {
 	Name string
 }
 
+func assertObjectIdentity(t *testing.T, obj *domain.ExtensionResource, targetID domain.TargetID) {
+	t.Helper()
+	inv := obj.Inventory()
+	if inv == nil {
+		t.Fatalf("object %s missing inventory", obj.Name())
+	}
+	labels := inv.Labels()
+	gvr := schema.GroupVersionResource{
+		Group:    labels["k8s.group"],
+		Version:  labels["k8s.version"],
+		Resource: labels["k8s.resource"],
+	}
+	want, err := kubeaddon.ObjectResourceName(kubeaddon.KubernetesObjectIdentity{
+		TargetID:  targetID,
+		GVR:       gvr,
+		Kind:      labels["k8s.kind"],
+		Namespace: labels["k8s.namespace"],
+		Name:      labels["k8s.name"],
+		UID:       labels["k8s.uid"],
+	})
+	if err != nil {
+		t.Fatalf("ObjectResourceName: %v", err)
+	}
+	if obj.Name() != want {
+		t.Fatalf("resource name = %q, want %q", obj.Name(), want)
+	}
+	if obj.Name().Collection() != want.Collection() {
+		t.Fatalf("collection = %q, want %q", obj.Name().Collection(), want.Collection())
+	}
+	if labels["fleetshift.target.id"] != string(targetID) {
+		t.Fatalf("fleetshift.target.id = %q, want %q", labels["fleetshift.target.id"], targetID)
+	}
+}
+
 func (f *e2eFixture) awaitObjects(t *testing.T, specs ...objectSpec) []*domain.ExtensionResource {
 	t.Helper()
-	return awaitInventoryMatch(t, f.store, func(objs []*domain.ExtensionResource) bool {
+	objs := awaitInventoryMatch(t, f.store, func(objs []*domain.ExtensionResource) bool {
 		for _, spec := range specs {
 			found := false
 			for _, obj := range objs {
@@ -923,6 +1080,18 @@ func (f *e2eFixture) awaitObjects(t *testing.T, specs ...objectSpec) []*domain.E
 		}
 		return true
 	}, 90*time.Second)
+	for _, spec := range specs {
+		for _, obj := range objs {
+			inv := obj.Inventory()
+			if inv == nil {
+				continue
+			}
+			if inv.Labels()["k8s.kind"] == spec.Kind && inv.Labels()["k8s.name"] == spec.Name {
+				assertObjectIdentity(t, obj, f.targetID)
+			}
+		}
+	}
+	return objs
 }
 
 func (f *e2eFixture) awaitRunningPod(t *testing.T, namePrefix string) []*domain.ExtensionResource {

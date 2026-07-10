@@ -1,0 +1,660 @@
+package kubernetes
+
+import (
+	"context"
+	"log/slog"
+	"testing"
+	"time"
+
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/client-go/discovery"
+	"k8s.io/client-go/dynamic"
+	"k8s.io/client-go/rest"
+
+	"github.com/fleetshift/fleetshift-poc/fleetshift-server/internal/application"
+	"github.com/fleetshift/fleetshift-poc/fleetshift-server/internal/domain"
+	"github.com/fleetshift/fleetshift-poc/fleetshift-server/internal/infrastructure/sqlite"
+)
+
+// Composition tests exercise the in-process host, controller, hooks, and
+// writer against a real SQLite extension-resource store with fake
+// Kubernetes clients. They close gaps that unit tests (recording
+// reporters) and kind e2e (host-only, label presence) leave open.
+
+func configmapsGVR() schema.GroupVersionResource {
+	return schema.GroupVersionResource{Group: "", Version: "v1", Resource: "configmaps"}
+}
+
+func makeConfigMap(uid, name, namespace, rv string) *unstructured.Unstructured {
+	return &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": "v1",
+		"kind":       "ConfigMap",
+		"metadata": map[string]any{
+			"uid":             uid,
+			"name":            name,
+			"namespace":       namespace,
+			"resourceVersion": rv,
+		},
+		"data": map[string]any{"k": "v"},
+	}}
+}
+
+func seedObjectType(t *testing.T, store domain.Store) {
+	t.Helper()
+	ctx := context.Background()
+	tx, err := store.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	defer tx.Rollback()
+	sch := InventorySchema()
+	def := domain.NewExtensionResourceType(sch.ResourceType, domain.APIVersion(sch.Version), domain.CollectionID(sch.CollectionID), time.Now(), domain.WithInventory())
+	if err := tx.ExtensionResources().CreateType(ctx, def); err != nil {
+		t.Fatalf("CreateType: %v", err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+}
+
+type storeReportBackend struct {
+	reports  *application.InventoryReportService
+	subtrees *application.TargetInventoryCleanupService
+}
+
+func (b *storeReportBackend) ReplaceBatch(ctx context.Context, resourceType domain.ResourceType, reports []InventoryObjectReport) error {
+	in := application.InventoryReplacementBatchInput{
+		Reports: make([]application.InventoryReplacementInput, len(reports)),
+	}
+	for i, report := range reports {
+		name := report.Name
+		in.Reports[i] = application.InventoryReplacementInput{
+			ResourceType: resourceType,
+			Name:         &name,
+			Labels:       report.Labels,
+			Observation:  report.Observation,
+			Conditions:   report.Conditions,
+			ObservedAt:   report.ObservedAt,
+		}
+	}
+	return b.reports.ReplaceBatch(ctx, in)
+}
+
+func (b *storeReportBackend) DeleteBatch(ctx context.Context, resources []domain.InventoryResourceRef) error {
+	in := application.InventoryDeleteBatchInput{
+		Resources: make([]application.InventoryDeleteInput, len(resources)),
+	}
+	for i, ref := range resources {
+		in.Resources[i] = application.InventoryDeleteInput{
+			ResourceType: ref.ResourceType,
+			Name:         ref.Name,
+		}
+	}
+	return b.reports.DeleteBatch(ctx, in)
+}
+
+func (b *storeReportBackend) ReplaceCollection(ctx context.Context, resourceType domain.ResourceType, collection domain.CollectionName, reports []InventoryObjectReport) error {
+	in := application.InventoryCollectionReplacementInput{
+		ResourceType: resourceType,
+		Collection:   collection,
+		Reports:      make([]application.InventoryReplacementInput, len(reports)),
+	}
+	for i, report := range reports {
+		name := report.Name
+		in.Reports[i] = application.InventoryReplacementInput{
+			ResourceType: resourceType,
+			Name:         &name,
+			Labels:       report.Labels,
+			Observation:  report.Observation,
+			Conditions:   report.Conditions,
+			ObservedAt:   report.ObservedAt,
+		}
+	}
+	return b.reports.ReplaceCollection(ctx, in)
+}
+
+func (b *storeReportBackend) DeleteCollection(ctx context.Context, resourceType domain.ResourceType, collection domain.CollectionName) error {
+	return b.reports.DeleteCollection(ctx, application.InventoryCollectionDeleteInput{
+		ResourceType: resourceType,
+		Collection:   collection,
+	})
+}
+
+func (b *storeReportBackend) DeleteSubtree(ctx context.Context, ref domain.InventorySubtreeRef) error {
+	return b.subtrees.DeleteOwnedInventorySubtree(ctx, AddonID, ref)
+}
+
+func newStoreBackedReporter(store domain.Store) InventoryReporter {
+	reports := application.NewInventoryReportService(store)
+	subtrees := application.NewTargetInventoryCleanupService(store)
+	return NewDirectInventoryReporter(&storeReportBackend{reports: reports, subtrees: subtrees})
+}
+
+func listObjectInventory(t *testing.T, store domain.Store) []*domain.ExtensionResource {
+	t.Helper()
+	tx, err := store.BeginReadOnly(context.Background())
+	if err != nil {
+		t.Fatalf("BeginReadOnly: %v", err)
+	}
+	defer tx.Rollback()
+	objs, err := tx.ExtensionResources().ListByResourceType(context.Background(), ObjectResourceType)
+	if err != nil {
+		t.Fatalf("ListByResourceType: %v", err)
+	}
+	return objs
+}
+
+func objectsForTarget(objs []*domain.ExtensionResource, targetID domain.TargetID) []*domain.ExtensionResource {
+	var out []*domain.ExtensionResource
+	for _, obj := range objs {
+		inv := obj.Inventory()
+		if inv != nil && inv.Labels()["fleetshift.target.id"] == string(targetID) {
+			out = append(out, obj)
+		}
+	}
+	return out
+}
+
+func awaitStoreObjects(t *testing.T, store domain.Store, timeout time.Duration, pred func([]*domain.ExtensionResource) bool) []*domain.ExtensionResource {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for {
+		objs := listObjectInventory(t, store)
+		if pred(objs) {
+			return objs
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for store inventory (%d objects)", len(objs))
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+func mustNamedObjectName(t *testing.T, targetID domain.TargetID, gvr schema.GroupVersionResource, namespace, name, uid string) domain.ResourceName {
+	t.Helper()
+	rn, err := ObjectResourceName(KubernetesObjectIdentity{
+		TargetID: targetID, GVR: gvr, Namespace: namespace, Name: name, UID: uid,
+	})
+	if err != nil {
+		t.Fatalf("ObjectResourceName: %v", err)
+	}
+	return rn
+}
+
+func assertResourceName(t *testing.T, obj *domain.ExtensionResource, want domain.ResourceName) {
+	t.Helper()
+	if obj.Name() != want {
+		t.Fatalf("resource name = %q, want %q", obj.Name(), want)
+	}
+	if obj.Name().Collection() != want.Collection() {
+		t.Fatalf("collection = %q, want %q", obj.Name().Collection(), want.Collection())
+	}
+}
+
+func compositionTarget(id domain.TargetID, mode InventoryMode) domain.TargetInfo {
+	props := map[string]string{
+		PropAPIServer:           "https://composition.example",
+		PropCACert:              "unused",
+		PropServiceAccountToken: "unused",
+	}
+	if mode != "" {
+		props[PropInventoryMode] = string(mode)
+	}
+	return domain.TargetInfoFromSnapshot(domain.TargetInfoSnapshot{
+		ID:         id,
+		Type:       TargetType,
+		Name:       string(id),
+		State:      domain.TargetStateReady,
+		Properties: props,
+	})
+}
+
+func fakeClientsForPodsAndConfigMaps(t *testing.T) (dynamic.Interface, discovery.DiscoveryInterface) {
+	t.Helper()
+	pods := podsGVR()
+	cms := configmapsGVR()
+	disc := newFakeDiscovery([]*metav1.APIResourceList{{
+		GroupVersion: "v1",
+		APIResources: []metav1.APIResource{
+			{Name: "pods", Kind: "Pod", Namespaced: true, Verbs: metav1.Verbs{"get", "list", "watch"}},
+			{Name: "configmaps", Kind: "ConfigMap", Namespaced: true, Verbs: metav1.Verbs{"get", "list", "watch"}},
+		},
+	}})
+	dyn := newFakeDynamicClient(pods, cms, crdGVR)
+	return dyn, disc
+}
+
+func createPod(t *testing.T, dyn dynamic.Interface, uid, name string) {
+	t.Helper()
+	pod := makePod(uid, name, "default", "1")
+	if _, err := dyn.Resource(podsGVR()).Namespace("default").Create(context.Background(), pod, metav1.CreateOptions{}); err != nil {
+		t.Fatalf("create pod %s: %v", name, err)
+	}
+}
+
+func newCompositionHost(
+	ctx context.Context,
+	store domain.Store,
+	dyn dynamic.Interface,
+	disc discovery.DiscoveryInterface,
+	indexCfg IndexConfig,
+) *KubernetesInProcessIndexHost {
+	reporter := newStoreBackedReporter(store)
+	return NewKubernetesInProcessIndexHost(
+		ctx,
+		nil,
+		reporter,
+		slog.New(slog.DiscardHandler),
+		WithInProcessIndexHostRESTConfigFactory(func(context.Context, domain.TargetInfo) (*rest.Config, error) {
+			return &rest.Config{Host: "https://composition.example"}, nil
+		}),
+		WithInProcessIndexHostDynamicClientFactory(func(*rest.Config) (dynamic.Interface, error) {
+			return dyn, nil
+		}),
+		WithInProcessIndexHostDiscoveryClientFactory(func(*rest.Config) (discovery.DiscoveryInterface, error) {
+			return disc, nil
+		}),
+		WithInProcessIndexHostIndexConfig(func(domain.TargetInfo) IndexConfig {
+			return indexCfg
+		}),
+	)
+}
+
+type mutableTargetLister struct {
+	targets []domain.TargetInfo
+}
+
+func (l *mutableTargetLister) ListTargets(context.Context) ([]domain.TargetInfo, error) {
+	out := make([]domain.TargetInfo, len(l.targets))
+	copy(out, l.targets)
+	return out, nil
+}
+
+// storeTargetListerForTest mirrors cli.storeTargetLister without importing cli.
+type storeTargetListerForTest struct {
+	store domain.Store
+}
+
+func (l storeTargetListerForTest) ListTargets(ctx context.Context) ([]domain.TargetInfo, error) {
+	tx, err := l.store.BeginReadOnly(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+	return tx.Targets().List(ctx)
+}
+
+// TestStopBeforeCleanup_NoRecreateAfterSubtreeDelete proves the
+// terminating-hint → bounded stop → subtree delete ordering: with the
+// API still listing objects, inventory must stay empty after
+// BeforeTargetDeleted (the stopped indexer must not re-report).
+func TestStopBeforeCleanup_NoRecreateAfterSubtreeDelete(t *testing.T) {
+	store := &sqlite.Store{DB: sqlite.OpenTestDB(t)}
+	seedObjectType(t, store)
+
+	pods := podsGVR()
+	dyn, disc := fakeClientsForPodsAndConfigMaps(t)
+	createPod(t, dyn, "uid-web", "web")
+
+	runCtx, cancelRun := context.WithCancel(context.Background())
+	defer cancelRun()
+
+	cfg := IndexConfig{
+		Schema: IndexSchema{Entries: map[schema.GroupVersionResource]SchemaEntry{
+			pods: {GVR: pods, Kind: "Pod"},
+		}},
+		AllowList:     []Resource{{ApiGroups: []string{""}, Resources: []string{"pods"}}},
+		BatchInterval: 50 * time.Millisecond,
+	}
+	host := newCompositionHost(runCtx, store, dyn, disc, cfg)
+	controller := NewInProcessIndexController(
+		&mutableTargetLister{},
+		host,
+		DefaultInProcessIndexPolicy{},
+		slog.New(slog.DiscardHandler),
+		WithStopTimeout(2*time.Second),
+	)
+	cleaner := NewKubernetesTargetIndexedInventoryCleaner(application.NewTargetInventoryCleanupService(store))
+	hooks := application.NewTargetOutputHookService(
+		application.WithTargetRuntimeNotifier(controller),
+		application.WithTargetIndexedInventoryCleaner(TargetType, cleaner),
+	)
+
+	target := compositionTarget("prod", InventoryModeInProcess)
+	if err := host.StartIndexer(context.Background(), target); err != nil {
+		t.Fatalf("StartIndexer: %v", err)
+	}
+	wantName := mustNamedObjectName(t, "prod", pods, "default", "web", "uid-web")
+	awaitStoreObjects(t, store, 5*time.Second, func(objs []*domain.ExtensionResource) bool {
+		for _, obj := range objectsForTarget(objs, "prod") {
+			if obj.Name() == wantName {
+				return true
+			}
+		}
+		return false
+	})
+
+	// Do not pre-stop the indexer: BeforeTargetDeleted must stop it, then
+	// delete the subtree, while the fake API still has the pod.
+	if err := hooks.BeforeTargetDeleted(context.Background(), target); err != nil {
+		t.Fatalf("BeforeTargetDeleted: %v", err)
+	}
+	if host.HasIndexer("prod") {
+		t.Fatal("indexer should be stopped after terminating hint")
+	}
+	if got := objectsForTarget(listObjectInventory(t, store), "prod"); len(got) != 0 {
+		t.Fatalf("expected empty inventory after cleanup, got %d objects", len(got))
+	}
+
+	// API still has the object; a still-running indexer would re-report it.
+	time.Sleep(300 * time.Millisecond)
+	if got := objectsForTarget(listObjectInventory(t, store), "prod"); len(got) != 0 {
+		t.Fatalf("inventory recreated after cleanup (%d objects); indexer was not stopped in time", len(got))
+	}
+}
+
+// TestInventoryMode_ControllerStartsOnlyLocalTargets verifies external
+// and disabled modes never host an indexer, and flipping to local starts
+// indexing into the store.
+func TestInventoryMode_ControllerStartsOnlyLocalTargets(t *testing.T) {
+	store := &sqlite.Store{DB: sqlite.OpenTestDB(t)}
+	seedObjectType(t, store)
+
+	pods := podsGVR()
+	dyn, disc := fakeClientsForPodsAndConfigMaps(t)
+	createPod(t, dyn, "uid-a", "pod-a")
+
+	runCtx, cancelRun := context.WithCancel(context.Background())
+	defer cancelRun()
+
+	cfg := IndexConfig{
+		Schema: IndexSchema{Entries: map[schema.GroupVersionResource]SchemaEntry{
+			pods: {GVR: pods, Kind: "Pod"},
+		}},
+		AllowList:     []Resource{{ApiGroups: []string{""}, Resources: []string{"pods"}}},
+		BatchInterval: 50 * time.Millisecond,
+	}
+	host := newCompositionHost(runCtx, store, dyn, disc, cfg)
+
+	external := compositionTarget("ext", InventoryModeExternal)
+	disabled := compositionTarget("off", InventoryModeDisabled)
+	local := compositionTarget("local", InventoryModeInProcess)
+
+	lister := &mutableTargetLister{targets: []domain.TargetInfo{external, disabled, local}}
+	controller := NewInProcessIndexController(
+		lister,
+		host,
+		DefaultInProcessIndexPolicy{},
+		slog.New(slog.DiscardHandler),
+		WithReconcileInterval(50*time.Millisecond),
+	)
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		controller.Run(runCtx)
+	}()
+	defer func() {
+		cancelRun()
+		<-done
+	}()
+
+	controller.NotifyTargetReady(context.Background(), local)
+	deadline := time.Now().Add(3 * time.Second)
+	for !host.HasIndexer("local") {
+		if time.Now().After(deadline) {
+			t.Fatal("timed out waiting for local indexer")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if host.HasIndexer("ext") || host.HasIndexer("off") {
+		t.Fatalf("external/disabled must not run indexers (ext=%v off=%v)", host.HasIndexer("ext"), host.HasIndexer("off"))
+	}
+
+	wantLocal := mustNamedObjectName(t, "local", pods, "default", "pod-a", "uid-a")
+	awaitStoreObjects(t, store, 5*time.Second, func(objs []*domain.ExtensionResource) bool {
+		for _, obj := range objectsForTarget(objs, "local") {
+			if obj.Name() == wantLocal {
+				return true
+			}
+		}
+		return false
+	})
+	if got := objectsForTarget(listObjectInventory(t, store), "ext"); len(got) != 0 {
+		t.Fatalf("external target must not have inventory, got %d", len(got))
+	}
+	if got := objectsForTarget(listObjectInventory(t, store), "off"); len(got) != 0 {
+		t.Fatalf("disabled target must not have inventory, got %d", len(got))
+	}
+
+	flipped := compositionTarget("ext", InventoryModeInProcess)
+	lister.targets = []domain.TargetInfo{flipped, disabled, local}
+	controller.NotifyTargetReady(context.Background(), flipped)
+	deadline = time.Now().Add(3 * time.Second)
+	for !host.HasIndexer("ext") {
+		if time.Now().After(deadline) {
+			t.Fatal("timed out waiting for flipped external→local indexer")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	wantExt := mustNamedObjectName(t, "ext", pods, "default", "pod-a", "uid-a")
+	awaitStoreObjects(t, store, 5*time.Second, func(objs []*domain.ExtensionResource) bool {
+		for _, obj := range objectsForTarget(objs, "ext") {
+			if obj.Name() == wantExt {
+				return true
+			}
+		}
+		return false
+	})
+}
+
+// TestRemoveGVR_DeletesCollectionFromStore verifies GVR removal issues
+// DeleteCollection against the real extension-resource store while
+// leaving sibling GVR collections intact.
+func TestRemoveGVR_DeletesCollectionFromStore(t *testing.T) {
+	store := &sqlite.Store{DB: sqlite.OpenTestDB(t)}
+	seedObjectType(t, store)
+
+	pods := podsGVR()
+	cms := configmapsGVR()
+	reporter := newStoreBackedReporter(store)
+	schema := IndexSchema{Entries: map[schema.GroupVersionResource]SchemaEntry{
+		pods: {GVR: pods, Kind: "Pod"},
+		cms:  {GVR: cms, Kind: "ConfigMap"},
+	}}
+	w := NewWriter("prod", reporter, NoopEdgeSink{}, schema.Entries, time.Hour, slog.New(slog.DiscardHandler))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go w.Run(ctx)
+
+	pod := makePod("uid-pod", "web", "default", "1")
+	cm := makeConfigMap("uid-cm", "cfg", "default", "1")
+	w.ResyncCh() <- ResyncEvent{GVR: pods, Resources: []*unstructured.Unstructured{pod}}
+	w.ResyncCh() <- ResyncEvent{GVR: cms, Resources: []*unstructured.Unstructured{cm}}
+
+	wantPod := mustNamedObjectName(t, "prod", pods, "default", "web", "uid-pod")
+	wantCM := mustNamedObjectName(t, "prod", cms, "default", "cfg", "uid-cm")
+	awaitStoreObjects(t, store, 3*time.Second, func(objs []*domain.ExtensionResource) bool {
+		havePod, haveCM := false, false
+		for _, obj := range objs {
+			switch obj.Name() {
+			case wantPod:
+				havePod = true
+			case wantCM:
+				haveCM = true
+			}
+		}
+		return havePod && haveCM
+	})
+
+	w.RemoveCh() <- RemoveGVREvent{GVR: cms}
+	awaitStoreObjects(t, store, 3*time.Second, func(objs []*domain.ExtensionResource) bool {
+		for _, obj := range objs {
+			if obj.Name() == wantCM {
+				return false
+			}
+		}
+		return true
+	})
+
+	objs := listObjectInventory(t, store)
+	var foundPod bool
+	for _, obj := range objs {
+		if obj.Name() == wantCM {
+			t.Fatalf("configmap collection row still present: %s", obj.Name())
+		}
+		if obj.Name() == wantPod {
+			foundPod = true
+			assertResourceName(t, obj, wantPod)
+		}
+	}
+	if !foundPod {
+		t.Fatal("pod collection must survive configmap GVR removal")
+	}
+}
+
+// TestResyncPrune_RemovesAbsentObjectsFromStore verifies LIST/resync
+// prune deletes store rows for objects absent from the snapshot without
+// requiring a watch DELETE event.
+func TestResyncPrune_RemovesAbsentObjectsFromStore(t *testing.T) {
+	store := &sqlite.Store{DB: sqlite.OpenTestDB(t)}
+	seedObjectType(t, store)
+
+	pods := podsGVR()
+	reporter := newStoreBackedReporter(store)
+	schema := IndexSchema{Entries: map[schema.GroupVersionResource]SchemaEntry{
+		pods: {GVR: pods, Kind: "Pod"},
+	}}
+	w := NewWriter("prod", reporter, NoopEdgeSink{}, schema.Entries, time.Hour, slog.New(slog.DiscardHandler))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go w.Run(ctx)
+
+	pod1 := makePod("uid-1", "keep", "default", "1")
+	pod2 := makePod("uid-2", "drop", "default", "1")
+	w.ResyncCh() <- ResyncEvent{GVR: pods, Resources: []*unstructured.Unstructured{pod1, pod2}}
+
+	wantKeep := mustNamedObjectName(t, "prod", pods, "default", "keep", "uid-1")
+	wantDrop := mustNamedObjectName(t, "prod", pods, "default", "drop", "uid-2")
+	awaitStoreObjects(t, store, 3*time.Second, func(objs []*domain.ExtensionResource) bool {
+		haveKeep, haveDrop := false, false
+		for _, obj := range objs {
+			switch obj.Name() {
+			case wantKeep:
+				haveKeep = true
+			case wantDrop:
+				haveDrop = true
+			}
+		}
+		return haveKeep && haveDrop
+	})
+
+	w.ResyncCh() <- ResyncEvent{GVR: pods, Resources: []*unstructured.Unstructured{pod1}}
+	awaitStoreObjects(t, store, 3*time.Second, func(objs []*domain.ExtensionResource) bool {
+		for _, obj := range objs {
+			if obj.Name() == wantDrop {
+				return false
+			}
+		}
+		return true
+	})
+
+	objs := listObjectInventory(t, store)
+	var foundKeep bool
+	for _, obj := range objs {
+		if obj.Name() == wantDrop {
+			t.Fatalf("pruned object still present: %s", obj.Name())
+		}
+		if obj.Name() == wantKeep {
+			foundKeep = true
+			assertResourceName(t, obj, wantKeep)
+		}
+	}
+	if !foundKeep {
+		t.Fatal("sibling object must survive resync prune")
+	}
+}
+
+// TestServeStyleComposition_ControllerIndexesRegisteredTarget mirrors
+// serve wiring (lister + host + controller + hooks) and asserts the
+// controller starts indexing after AfterTargetRegistered, writing
+// ObjectResourceName-shaped rows.
+func TestServeStyleComposition_ControllerIndexesRegisteredTarget(t *testing.T) {
+	store := &sqlite.Store{DB: sqlite.OpenTestDB(t)}
+	seedObjectType(t, store)
+
+	pods := podsGVR()
+	dyn, disc := fakeClientsForPodsAndConfigMaps(t)
+	createPod(t, dyn, "uid-node-standin", "web")
+
+	runCtx, cancelRun := context.WithCancel(context.Background())
+	defer cancelRun()
+
+	cfg := IndexConfig{
+		Schema: IndexSchema{Entries: map[schema.GroupVersionResource]SchemaEntry{
+			pods: {GVR: pods, Kind: "Pod"},
+		}},
+		AllowList:     []Resource{{ApiGroups: []string{""}, Resources: []string{"pods"}}},
+		BatchInterval: 50 * time.Millisecond,
+	}
+	host := newCompositionHost(runCtx, store, dyn, disc, cfg)
+
+	target := compositionTarget("serve-smoke", "")
+	tx, err := store.Begin(context.Background())
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	if err := tx.Targets().Create(context.Background(), target); err != nil {
+		t.Fatalf("create target: %v", err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+
+	controller := NewInProcessIndexController(
+		storeTargetListerForTest{store: store},
+		host,
+		DefaultInProcessIndexPolicy{},
+		slog.New(slog.DiscardHandler),
+		WithReconcileInterval(50*time.Millisecond),
+	)
+	cleaner := NewKubernetesTargetIndexedInventoryCleaner(application.NewTargetInventoryCleanupService(store))
+	hooks := application.NewTargetOutputHookService(
+		application.WithTargetRuntimeNotifier(controller),
+		application.WithTargetIndexedInventoryCleaner(TargetType, cleaner),
+	)
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		controller.Run(runCtx)
+	}()
+	defer func() {
+		cancelRun()
+		<-done
+	}()
+
+	hooks.AfterTargetRegistered(context.Background(), target)
+
+	want := mustNamedObjectName(t, "serve-smoke", pods, "default", "web", "uid-node-standin")
+	objs := awaitStoreObjects(t, store, 5*time.Second, func(objs []*domain.ExtensionResource) bool {
+		for _, obj := range objectsForTarget(objs, "serve-smoke") {
+			if obj.Name() == want {
+				return true
+			}
+		}
+		return false
+	})
+	for _, obj := range objectsForTarget(objs, "serve-smoke") {
+		if obj.Name() == want {
+			assertResourceName(t, obj, want)
+		}
+	}
+	if !host.HasIndexer("serve-smoke") {
+		t.Fatal("expected controller to start indexer after AfterTargetRegistered")
+	}
+}
