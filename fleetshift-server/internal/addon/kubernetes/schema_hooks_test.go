@@ -1,6 +1,7 @@
 package kubernetes
 
 import (
+	"encoding/json"
 	"testing"
 
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -162,6 +163,252 @@ func TestComputePodStatus(t *testing.T) {
 				},
 			},
 			expected: "Running",
+		},
+		{
+			name: "Init exit code without reason",
+			pod: &unstructured.Unstructured{
+				Object: map[string]any{
+					"status": map[string]any{
+						"phase": "Pending",
+						"initContainerStatuses": []any{
+							map[string]any{
+								"state": map[string]any{
+									"terminated": map[string]any{
+										"exitCode": int64(2),
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+			expected: "Init:ExitCode:2",
+		},
+		{
+			name: "Init signal with reason",
+			pod: &unstructured.Unstructured{
+				Object: map[string]any{
+					"status": map[string]any{
+						"phase": "Pending",
+						"initContainerStatuses": []any{
+							map[string]any{
+								"state": map[string]any{
+									"terminated": map[string]any{
+										"signal": int64(9),
+										"reason": "Killed",
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+			expected: "Init:Killed",
+		},
+		{
+			name: "Init signal without reason",
+			pod: &unstructured.Unstructured{
+				Object: map[string]any{
+					"status": map[string]any{
+						"phase": "Pending",
+						"initContainerStatuses": []any{
+							map[string]any{
+								"state": map[string]any{
+									"terminated": map[string]any{
+										"signal": int64(15),
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+			expected: "Init:Signal:15",
+		},
+		{
+			name: "Init waiting reason",
+			pod: &unstructured.Unstructured{
+				Object: map[string]any{
+					"status": map[string]any{
+						"phase": "Pending",
+						"initContainerStatuses": []any{
+							map[string]any{
+								"state": map[string]any{
+									"waiting": map[string]any{
+										"reason": "PodInitializing",
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+			expected: "Init:PodInitializing",
+		},
+		{
+			name: "Container terminated with reason",
+			pod: &unstructured.Unstructured{
+				Object: map[string]any{
+					"status": map[string]any{
+						"phase": "Failed",
+						"containerStatuses": []any{
+							map[string]any{
+								"state": map[string]any{
+									"terminated": map[string]any{
+										"reason":   "OOMKilled",
+										"exitCode": int64(137),
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+			expected: "OOMKilled",
+		},
+		{
+			name: "Malformed status entries are skipped",
+			pod: &unstructured.Unstructured{
+				Object: map[string]any{
+					"status": map[string]any{
+						"phase": "Running",
+						"initContainerStatuses": []any{
+							"not-a-map",
+						},
+						"containerStatuses": []any{
+							map[string]any{
+								"state": map[string]any{
+									"waiting": map[string]any{
+										"reason": "CrashLoopBackOff",
+									},
+								},
+							},
+							"not-a-map", // reverse scan hits this first and must skip it
+						},
+					},
+				},
+			},
+			expected: "CrashLoopBackOff",
+		},
+		{
+			name: "Completed with malformed then running container",
+			pod: &unstructured.Unstructured{
+				Object: map[string]any{
+					"status": map[string]any{
+						"phase": "Completed",
+						"containerStatuses": []any{
+							"not-a-map",
+							map[string]any{
+								"state": map[string]any{
+									"running": map[string]any{
+										"startedAt": "2025-01-01T00:00:00Z",
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+			expected: "Running",
+		},
+		{
+			name: "Status reason overrides phase",
+			pod: &unstructured.Unstructured{
+				Object: map[string]any{
+					"status": map[string]any{
+						"phase":  "Running",
+						"reason": "Evicted",
+					},
+				},
+			},
+			expected: "Evicted",
+		},
+		{
+			name: "Init exit code zero does not override phase",
+			pod: &unstructured.Unstructured{
+				Object: map[string]any{
+					"status": map[string]any{
+						"phase": "Running",
+						"initContainerStatuses": []any{
+							map[string]any{
+								"state": map[string]any{
+									"terminated": map[string]any{
+										"exitCode": int64(0),
+										"reason":   "Completed",
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+			expected: "Running",
+		},
+		{
+			name: "Waiting without reason leaves phase",
+			pod: &unstructured.Unstructured{
+				Object: map[string]any{
+					"status": map[string]any{
+						"phase": "Pending",
+						"containerStatuses": []any{
+							map[string]any{
+								"state": map[string]any{
+									"waiting": map[string]any{},
+								},
+							},
+						},
+					},
+				},
+			},
+			expected: "Pending",
+		},
+		{
+			name: "Completed without running containers stays Completed",
+			pod: &unstructured.Unstructured{
+				Object: map[string]any{
+					"status": map[string]any{
+						"phase": "Completed",
+						"containerStatuses": []any{
+							map[string]any{
+								"state": map[string]any{
+									"terminated": map[string]any{
+										"exitCode": int64(0),
+										"reason":   "Completed",
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+			expected: "Completed",
+		},
+		{
+			name: "Last failing container wins in reverse scan",
+			pod: &unstructured.Unstructured{
+				Object: map[string]any{
+					"status": map[string]any{
+						"phase": "Running",
+						"containerStatuses": []any{
+							map[string]any{
+								"state": map[string]any{
+									"waiting": map[string]any{
+										"reason": "ImagePullBackOff",
+									},
+								},
+							},
+							map[string]any{
+								"state": map[string]any{
+									"waiting": map[string]any{
+										"reason": "CrashLoopBackOff",
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+			expected: "CrashLoopBackOff",
 		},
 	}
 
@@ -328,6 +575,85 @@ func TestBuildPodEdges(t *testing.T) {
 	}
 }
 
+func TestBuildPodEdges_SkipsMalformedEntries(t *testing.T) {
+	pod := &unstructured.Unstructured{
+		Object: map[string]any{
+			"metadata": map[string]any{
+				"namespace": "default",
+				"uid":       "pod-1",
+			},
+			"spec": map[string]any{
+				"nodeName": "node-1",
+				"volumes": []any{
+					"not-a-map",
+					map[string]any{
+						"secret": map[string]any{
+							"secretName": "secret-1",
+						},
+					},
+				},
+				"containers": []any{
+					"not-a-map",
+					map[string]any{
+						"env": []any{
+							"not-a-map",
+							map[string]any{
+								"valueFrom": map[string]any{
+									"secretKeyRef": map[string]any{
+										"name": "secret-2",
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	edgeFunc := buildPodEdges(pod, "pod-1")
+	ns := buildNodeStore(map[string]inventoryNode{
+		"node-1": {
+			UID: "node-1", Kind: "Node", Name: "node-1",
+		},
+		"secret-1": {
+			UID: "secret-1", Kind: "Secret", Name: "secret-1", Namespace: "default",
+		},
+		"secret-2": {
+			UID: "secret-2", Kind: "Secret", Name: "secret-2", Namespace: "default",
+		},
+	})
+
+	edges := edgeFunc(ns)
+	if len(edges) != 3 {
+		t.Fatalf("expected 3 edges (runsOn + 2 secrets), got %d", len(edges))
+	}
+}
+
+func TestBuildPodEdges_MissingRefsProduceNoEdges(t *testing.T) {
+	pod := &unstructured.Unstructured{
+		Object: map[string]any{
+			"metadata": map[string]any{
+				"namespace": "default",
+				"uid":       "pod-1",
+			},
+			"spec": map[string]any{
+				"nodeName": "missing-node",
+				"volumes": []any{
+					map[string]any{
+						"secret": map[string]any{"secretName": "missing-secret"},
+					},
+				},
+			},
+		},
+	}
+
+	edges := buildPodEdges(pod, "pod-1")(buildNodeStore(map[string]inventoryNode{}))
+	if len(edges) != 0 {
+		t.Fatalf("expected 0 edges when referenced objects are absent, got %d", len(edges))
+	}
+}
+
 func TestBuildServiceEdges(t *testing.T) {
 	service := &unstructured.Unstructured{
 		Object: map[string]any{
@@ -446,6 +772,133 @@ func TestBuildPVCEdges_NoVolumeName(t *testing.T) {
 	}
 }
 
+func TestBuildPVCEdges_MissingPV(t *testing.T) {
+	pvc := &unstructured.Unstructured{
+		Object: map[string]any{
+			"spec": map[string]any{
+				"volumeName": "pv-missing",
+			},
+		},
+	}
+
+	edges := buildPVCEdges(pvc, "pvc-1")(buildNodeStore(map[string]inventoryNode{}))
+	if len(edges) != 0 {
+		t.Fatalf("expected 0 edges when PV is absent from NodeStore, got %d", len(edges))
+	}
+}
+
+func TestBuildServiceEdges_EmptySelectorAndMissingPods(t *testing.T) {
+	t.Run("EmptySelector", func(t *testing.T) {
+		svc := &unstructured.Unstructured{
+			Object: map[string]any{
+				"metadata": map[string]any{"namespace": "default"},
+				"spec":     map[string]any{},
+			},
+		}
+		ns := buildNodeStore(map[string]inventoryNode{
+			"pod-1": {
+				UID: "pod-1", Kind: "Pod", Name: "pod-1", Namespace: "default",
+				Labels: map[string]string{"app": "web"},
+			},
+		})
+		edges := buildServiceEdges(svc, "svc-1")(ns)
+		if len(edges) != 0 {
+			t.Fatalf("expected 0 edges for empty selector, got %d", len(edges))
+		}
+	})
+
+	t.Run("NoPodsInNamespace", func(t *testing.T) {
+		svc := &unstructured.Unstructured{
+			Object: map[string]any{
+				"metadata": map[string]any{"namespace": "default"},
+				"spec": map[string]any{
+					"selector": map[string]any{"app": "web"},
+				},
+			},
+		}
+		edges := buildServiceEdges(svc, "svc-1")(buildNodeStore(map[string]inventoryNode{}))
+		if len(edges) != 0 {
+			t.Fatalf("expected 0 edges when no pods exist, got %d", len(edges))
+		}
+	})
+
+	t.Run("PodWithNilLabels", func(t *testing.T) {
+		svc := &unstructured.Unstructured{
+			Object: map[string]any{
+				"metadata": map[string]any{"namespace": "default"},
+				"spec": map[string]any{
+					"selector": map[string]any{"app": "web"},
+				},
+			},
+		}
+		ns := buildNodeStore(map[string]inventoryNode{
+			"pod-1": {UID: "pod-1", Kind: "Pod", Name: "pod-1", Namespace: "default"},
+		})
+		edges := buildServiceEdges(svc, "svc-1")(ns)
+		if len(edges) != 0 {
+			t.Fatalf("expected 0 edges for pod with nil labels, got %d", len(edges))
+		}
+	})
+}
+
+func TestBuildPodEdges_EmptyNodeNameAndEmptyRefNames(t *testing.T) {
+	t.Run("EmptyNodeName", func(t *testing.T) {
+		pod := &unstructured.Unstructured{
+			Object: map[string]any{
+				"metadata": map[string]any{"namespace": "default", "uid": "pod-1"},
+				"spec":     map[string]any{},
+			},
+		}
+		ns := buildNodeStore(map[string]inventoryNode{
+			"node-1": {UID: "node-1", Kind: "Node", Name: "node-1"},
+		})
+		edges := buildPodEdges(pod, "pod-1")(ns)
+		if len(edges) != 0 {
+			t.Fatalf("expected 0 edges when nodeName is empty, got %d", len(edges))
+		}
+	})
+
+	t.Run("EmptySecretAndConfigMapNamesIgnored", func(t *testing.T) {
+		pod := &unstructured.Unstructured{
+			Object: map[string]any{
+				"metadata": map[string]any{"namespace": "default", "uid": "pod-1"},
+				"spec": map[string]any{
+					"volumes": []any{
+						map[string]any{"secret": map[string]any{"secretName": ""}},
+						map[string]any{"configMap": map[string]any{"name": ""}},
+						map[string]any{"persistentVolumeClaim": map[string]any{"claimName": ""}},
+					},
+					"containers": []any{
+						map[string]any{
+							"env": []any{
+								map[string]any{
+									"valueFrom": map[string]any{
+										"secretKeyRef": map[string]any{"name": ""},
+									},
+								},
+								map[string]any{
+									"valueFrom": map[string]any{
+										"configMapKeyRef": map[string]any{"name": ""},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		}
+		ns := buildNodeStore(map[string]inventoryNode{
+			"secret-1": {UID: "secret-1", Kind: "Secret", Name: "secret-1", Namespace: "default"},
+			"cm-1":     {UID: "cm-1", Kind: "ConfigMap", Name: "cm-1", Namespace: "default"},
+			"pvc-1":    {UID: "pvc-1", Kind: "PersistentVolumeClaim", Name: "pvc-1", Namespace: "default"},
+		})
+		edges := buildPodEdges(pod, "pod-1")(ns)
+		if len(edges) != 0 {
+			t.Fatalf("expected 0 edges when all ref names are empty, got %d", len(edges))
+		}
+	})
+}
+
 func TestComputeNodeRoles(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -499,6 +952,41 @@ func TestComputeNodeRoles(t *testing.T) {
 					"metadata": map[string]any{
 						"labels": map[string]any{
 							"kubernetes.io/hostname": "node-1",
+						},
+					},
+				},
+			},
+			expected: "worker",
+		},
+		{
+			name: "No labels at all defaults to worker",
+			node: &unstructured.Unstructured{
+				Object: map[string]any{
+					"metadata": map[string]any{},
+				},
+			},
+			expected: "worker",
+		},
+		{
+			name: "Non-empty role label value is ignored",
+			node: &unstructured.Unstructured{
+				Object: map[string]any{
+					"metadata": map[string]any{
+						"labels": map[string]any{
+							"node-role.kubernetes.io/control-plane": "true",
+						},
+					},
+				},
+			},
+			expected: "worker",
+		},
+		{
+			name: "Bare role prefix key is ignored",
+			node: &unstructured.Unstructured{
+				Object: map[string]any{
+					"metadata": map[string]any{
+						"labels": map[string]any{
+							"node-role.kubernetes.io/": "",
 						},
 					},
 				},
@@ -628,9 +1116,18 @@ func TestServiceEdges_ThroughExtraction(t *testing.T) {
 		},
 	}}
 
-	_, svcNode := ExtractObservedResource(svc, schemaEntries[svcGVR], "t1")
-	_, podNode1 := ExtractObservedResource(matchingPod, schemaEntries[podGVR], "t1")
-	_, podNode2 := ExtractObservedResource(nonMatchingPod, schemaEntries[podGVR], "t1")
+	_, svcNode, err := ExtractObservedResource(svc, schemaEntries[svcGVR], "t1")
+	if err != nil {
+		t.Fatalf("extract service: %v", err)
+	}
+	_, podNode1, err := ExtractObservedResource(matchingPod, schemaEntries[podGVR], "t1")
+	if err != nil {
+		t.Fatalf("extract matching pod: %v", err)
+	}
+	_, podNode2, err := ExtractObservedResource(nonMatchingPod, schemaEntries[podGVR], "t1")
+	if err != nil {
+		t.Fatalf("extract non-matching pod: %v", err)
+	}
 
 	ns := buildNodeStore(map[string]inventoryNode{
 		svcNode.UID:  svcNode,
@@ -684,8 +1181,14 @@ func TestServiceEdges_ThroughExtraction_NoMatch(t *testing.T) {
 		},
 	}}
 
-	_, svcNode := ExtractObservedResource(svc, schemaEntries[svcGVR], "t1")
-	_, podNode := ExtractObservedResource(pod, schemaEntries[podGVR], "t1")
+	_, svcNode, err := ExtractObservedResource(svc, schemaEntries[svcGVR], "t1")
+	if err != nil {
+		t.Fatalf("extract service: %v", err)
+	}
+	_, podNode, err := ExtractObservedResource(pod, schemaEntries[podGVR], "t1")
+	if err != nil {
+		t.Fatalf("extract pod: %v", err)
+	}
 
 	ns := buildNodeStore(map[string]inventoryNode{
 		svcNode.UID: svcNode,
@@ -746,6 +1249,193 @@ func TestDefaultSchemaWithHooks(t *testing.T) {
 	if !foundIPField {
 		t.Error("Node schema missing ipAddress field")
 	}
+}
+
+func TestDefaultKubernetesSchema_AllEntries(t *testing.T) {
+	indexSchema := DefaultKubernetesSchema()
+
+	want := []schema.GroupVersionResource{
+		{Group: "", Version: "v1", Resource: "pods"},
+		{Group: "", Version: "v1", Resource: "services"},
+		{Group: "", Version: "v1", Resource: "namespaces"},
+		{Group: "", Version: "v1", Resource: "nodes"},
+		{Group: "", Version: "v1", Resource: "persistentvolumeclaims"},
+		{Group: "", Version: "v1", Resource: "persistentvolumes"},
+		{Group: "apps", Version: "v1", Resource: "deployments"},
+		{Group: "apps", Version: "v1", Resource: "statefulsets"},
+		{Group: "apps", Version: "v1", Resource: "daemonsets"},
+		{Group: "apps", Version: "v1", Resource: "replicasets"},
+		{Group: "batch", Version: "v1", Resource: "jobs"},
+		{Group: "batch", Version: "v1", Resource: "cronjobs"},
+		{Group: "", Version: "v1", Resource: "configmaps"},
+		{Group: "", Version: "v1", Resource: "secrets"},
+	}
+	if len(indexSchema.Entries) != len(want) {
+		t.Fatalf("Entries len = %d, want %d", len(indexSchema.Entries), len(want))
+	}
+	for _, gvr := range want {
+		entry, ok := indexSchema.Entries[gvr]
+		if !ok {
+			t.Errorf("missing schema entry for %v", gvr)
+			continue
+		}
+		if entry.GVR != gvr {
+			t.Errorf("entry GVR = %v, want %v", entry.GVR, gvr)
+		}
+		if entry.Kind == "" {
+			t.Errorf("entry for %v has empty Kind", gvr)
+		}
+	}
+
+	gvrs := indexSchema.GVRs()
+	if len(gvrs) != len(want) {
+		t.Fatalf("GVRs() len = %d, want %d", len(gvrs), len(want))
+	}
+}
+
+func TestDefaultKubernetesSchema_HooksThroughExtraction(t *testing.T) {
+	indexSchema := DefaultKubernetesSchema()
+
+	t.Run("PodComputeExtraAndFields", func(t *testing.T) {
+		pod := &unstructured.Unstructured{Object: map[string]any{
+			"apiVersion": "v1", "kind": "Pod",
+			"metadata": map[string]any{
+				"uid": "pod-uid", "name": "web", "namespace": "default",
+				"creationTimestamp": "2025-01-01T00:00:00Z",
+				"labels":            map[string]any{"app": "web"},
+			},
+			"spec": map[string]any{
+				"nodeName": "node-1",
+			},
+			"status": map[string]any{
+				"phase": "Running",
+				"podIP": "10.0.0.1",
+				"containerStatuses": []any{
+					map[string]any{
+						"image":        "nginx:1.25",
+						"restartCount": int64(2),
+						"state": map[string]any{
+							"waiting": map[string]any{"reason": "CrashLoopBackOff"},
+						},
+					},
+				},
+			},
+		}}
+		report, node, err := ExtractObservedResource(pod, indexSchema.Entries[podGVR()], "t1")
+		if err != nil {
+			t.Fatalf("extract pod: %v", err)
+		}
+		if node.Labels["app"] != "web" {
+			t.Errorf("node.Labels[app] = %q, want web", node.Labels["app"])
+		}
+		extracted, ok := mustExtracted(t, report)["status"]
+		if !ok || extracted != "CrashLoopBackOff" {
+			t.Errorf("extracted status = %v, want CrashLoopBackOff from ComputeExtra", extracted)
+		}
+		if mustExtracted(t, report)["phase"] != "Running" {
+			t.Errorf("extracted phase = %v, want Running", mustExtracted(t, report)["phase"])
+		}
+		if mustExtracted(t, report)["nodeName"] != "node-1" {
+			t.Errorf("extracted nodeName = %v, want node-1", mustExtracted(t, report)["nodeName"])
+		}
+	})
+
+	t.Run("NodeComputeExtra", func(t *testing.T) {
+		nodeObj := &unstructured.Unstructured{Object: map[string]any{
+			"apiVersion": "v1", "kind": "Node",
+			"metadata": map[string]any{
+				"uid": "node-uid", "name": "worker-1",
+				"creationTimestamp": "2025-01-01T00:00:00Z",
+				"labels": map[string]any{
+					"node-role.kubernetes.io/worker": "",
+				},
+			},
+			"status": map[string]any{
+				"nodeInfo": map[string]any{"kubeletVersion": "v1.29.0"},
+			},
+		}}
+		report, _, err := ExtractObservedResource(nodeObj, indexSchema.Entries[nodeGVR()], "t1")
+		if err != nil {
+			t.Fatalf("extract node: %v", err)
+		}
+		if mustExtracted(t, report)["role"] != "worker" {
+			t.Errorf("extracted role = %v, want worker", mustExtracted(t, report)["role"])
+		}
+	})
+
+	t.Run("ServiceBuildEdgesFromDefaultSchema", func(t *testing.T) {
+		svc := &unstructured.Unstructured{Object: map[string]any{
+			"apiVersion": "v1", "kind": "Service",
+			"metadata": map[string]any{
+				"uid": "svc-uid", "name": "web", "namespace": "default",
+				"creationTimestamp": "2025-01-01T00:00:00Z",
+			},
+			"spec": map[string]any{
+				"selector": map[string]any{"app": "web"},
+				"type":     "ClusterIP",
+			},
+		}}
+		pod := &unstructured.Unstructured{Object: map[string]any{
+			"apiVersion": "v1", "kind": "Pod",
+			"metadata": map[string]any{
+				"uid": "pod-uid", "name": "web-pod", "namespace": "default",
+				"creationTimestamp": "2025-01-01T00:00:00Z",
+				"labels":            map[string]any{"app": "web"},
+			},
+		}}
+		_, svcNode, err := ExtractObservedResource(svc, indexSchema.Entries[serviceGVR()], "t1")
+		if err != nil {
+			t.Fatalf("extract service: %v", err)
+		}
+		_, podNode, err := ExtractObservedResource(pod, indexSchema.Entries[podGVR()], "t1")
+		if err != nil {
+			t.Fatalf("extract pod: %v", err)
+		}
+		ns := buildNodeStore(map[string]inventoryNode{
+			svcNode.UID: svcNode,
+			podNode.UID: podNode,
+		})
+		edges := indexSchema.Entries[serviceGVR()].BuildEdges(svc, svcNode.UID)(ns)
+		if len(edges) != 1 || edges[0].EdgeType != EdgeSelects || edges[0].DestUID != "pod-uid" {
+			t.Fatalf("edges = %#v, want one selects edge to pod-uid", edges)
+		}
+	})
+
+	t.Run("SecretHasNoExtractedFields", func(t *testing.T) {
+		secret := &unstructured.Unstructured{Object: map[string]any{
+			"apiVersion": "v1", "kind": "Secret",
+			"metadata": map[string]any{
+				"uid": "sec-uid", "name": "s", "namespace": "default",
+				"creationTimestamp": "2025-01-01T00:00:00Z",
+			},
+			"data": map[string]any{"password": "c2VjcmV0"},
+		}}
+		gvr := schema.GroupVersionResource{Group: "", Version: "v1", Resource: "secrets"}
+		report, _, err := ExtractObservedResource(secret, indexSchema.Entries[gvr], "t1")
+		if err != nil {
+			t.Fatalf("extract secret: %v", err)
+		}
+		if len(mustExtracted(t, report)) != 0 {
+			t.Errorf("secret extracted = %#v, want empty (no schema fields, no secret data)", mustExtracted(t, report))
+		}
+	})
+}
+
+// mustExtracted returns observation.extracted from a report.
+func mustExtracted(t *testing.T, report InventoryObjectReport) map[string]any {
+	t.Helper()
+	if report.Observation == nil {
+		t.Fatal("Observation is nil")
+	}
+	var obs map[string]any
+	if err := json.Unmarshal(*report.Observation, &obs); err != nil {
+		t.Fatalf("unmarshal observation: %v", err)
+	}
+	extracted, ok := obs["extracted"].(map[string]any)
+	if !ok {
+		t.Fatalf("extracted is not a map: %#v", obs["extracted"])
+	}
+	return extracted
 }
 
 // Helper functions to get GVRs
