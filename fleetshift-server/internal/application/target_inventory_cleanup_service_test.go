@@ -52,8 +52,8 @@ func TestTargetInventoryCleanupService_DeleteOwnedInventorySubtree_DeletesOwnedS
 	if err != nil {
 		t.Fatalf("begin tx: %v", err)
 	}
-	name := domain.ResourceName("clusters/prod/apiResources/core~v1~pods/objects/pod1")
-	sibling := domain.ResourceName("clusters/prod-old/apiResources/core~v1~pods/objects/pod2")
+	name := domain.ResourceName("targets/prod/apiResources/core~v1~pods/objects/pod1")
+	sibling := domain.ResourceName("targets/prod-old/apiResources/core~v1~pods/objects/pod2")
 	if err := tx.ExtensionResources().ReplaceInventory(ctx, []domain.InventoryReplacement{
 		{ResourceType: inventoryReportTestType, Name: name, CandidateUID: domain.NewExtensionResourceUID(), ObservedAt: now, ReceivedAt: now},
 		{ResourceType: inventoryReportTestType, Name: sibling, CandidateUID: domain.NewExtensionResourceUID(), ObservedAt: now, ReceivedAt: now},
@@ -67,7 +67,7 @@ func TestTargetInventoryCleanupService_DeleteOwnedInventorySubtree_DeletesOwnedS
 	svc := application.NewTargetInventoryCleanupService(store)
 	if err := svc.DeleteOwnedInventorySubtree(ctx, domain.AddonID("kind.fleetshift.io"), domain.InventorySubtreeRef{
 		ResourceType: inventoryReportTestType,
-		Parent:       "clusters/prod",
+		Parent:       "targets/prod",
 	}); err != nil {
 		t.Fatalf("DeleteOwnedInventorySubtree: %v", err)
 	}
@@ -92,7 +92,7 @@ func TestTargetInventoryCleanupService_DeleteOwnedInventorySubtree_RejectsWrongO
 	err := application.NewTargetInventoryCleanupService(store).DeleteOwnedInventorySubtree(
 		context.Background(), domain.AddonID("someone-else.fleetshift.io"), domain.InventorySubtreeRef{
 			ResourceType: inventoryReportTestType,
-			Parent:       "clusters/prod",
+			Parent:       "targets/prod",
 		})
 	if !errors.Is(err, domain.ErrInvalidArgument) {
 		t.Fatalf("DeleteOwnedInventorySubtree error = %v, want ErrInvalidArgument", err)
@@ -105,7 +105,7 @@ func TestTargetInventoryCleanupService_DeleteOwnedInventorySubtree_RejectsMissin
 	err := application.NewTargetInventoryCleanupService(store).DeleteOwnedInventorySubtree(
 		context.Background(), domain.AddonID("kind.fleetshift.io"), domain.InventorySubtreeRef{
 			ResourceType: "kind.fleetshift.io/DoesNotExist",
-			Parent:       "clusters/prod",
+			Parent:       "targets/prod",
 		})
 	if err == nil {
 		t.Fatal("expected error for nonexistent resource type")
@@ -120,7 +120,7 @@ func TestTargetInventoryCleanupService_DeleteOwnedInventorySubtree_RejectsTypeWi
 	err := application.NewTargetInventoryCleanupService(store).DeleteOwnedInventorySubtree(
 		context.Background(), domain.AddonID("kind.fleetshift.io"), domain.InventorySubtreeRef{
 			ResourceType: managedOnly,
-			Parent:       "clusters/prod",
+			Parent:       "targets/prod",
 		})
 	if !errors.Is(err, domain.ErrInvalidArgument) {
 		t.Fatalf("DeleteOwnedInventorySubtree error = %v, want ErrInvalidArgument", err)
@@ -135,7 +135,7 @@ func TestTargetInventoryCleanupService_DeleteOwnedInventorySubtree_RejectsManage
 	err := application.NewTargetInventoryCleanupService(store).DeleteOwnedInventorySubtree(
 		context.Background(), domain.AddonID("kind.fleetshift.io"), domain.InventorySubtreeRef{
 			ResourceType: shared,
-			Parent:       "clusters/prod",
+			Parent:       "targets/prod",
 		})
 	if !errors.Is(err, domain.ErrInvalidArgument) {
 		t.Fatalf("DeleteOwnedInventorySubtree error = %v, want ErrInvalidArgument", err)
@@ -149,7 +149,7 @@ func TestTargetInventoryCleanupService_DeleteOwnedInventorySubtree_NoMatchIsNoop
 	err := application.NewTargetInventoryCleanupService(store).DeleteOwnedInventorySubtree(
 		context.Background(), domain.AddonID("kind.fleetshift.io"), domain.InventorySubtreeRef{
 			ResourceType: inventoryReportTestType,
-			Parent:       "clusters/never-existed",
+			Parent:       "targets/never-existed",
 		})
 	if err != nil {
 		t.Fatalf("DeleteOwnedInventorySubtree on empty subtree: %v", err)

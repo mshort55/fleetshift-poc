@@ -2952,7 +2952,7 @@ func TestOrchestration_DeliveryOutputs_SendsReadyNotificationAfterCommit(t *test
 	store, vault := setupStore(t)
 	seedFulfillmentAndDeployment(t, store, "deployments/d1", domain.FulfillmentSnapshot{
 		Generation:        1,
-		ManifestStrategy:  domain.ManifestStrategySpec{Type: domain.ManifestStrategyInline, Manifests: []domain.Manifest{{Raw: json.RawMessage(`{"name":"new-cluster"}`)}}},
+		ManifestStrategy:  domain.ManifestStrategySpec{Type: domain.ManifestStrategyInline, Manifests: []domain.Manifest{{Raw: json.RawMessage(`{"name":"new-instance"}`)}}},
 		PlacementStrategy: domain.PlacementStrategySpec{Type: domain.PlacementStrategyStatic, Targets: []domain.TargetID{"provisioner"}},
 		State:             domain.FulfillmentStateCreating,
 	})
@@ -2963,11 +2963,11 @@ func TestOrchestration_DeliveryOutputs_SendsReadyNotificationAfterCommit(t *test
 	wf := newTestWorkflow(store, &outputProducingDelivery{
 		events: events,
 		targets: []domain.ProvisionedTarget{{
-			ID: "k8s-new-cluster", Type: "kubernetes", Name: "new-cluster",
-			Properties: map[string]string{"kubeconfig_ref": "targets/k8s-new-cluster/kubeconfig"},
+			ID: "vm-new-instance", Type: "vm", Name: "new-instance",
+			Properties: map[string]string{"config_ref": "targets/vm-new-instance/config"},
 		}},
 		secrets: []domain.ProducedSecret{{
-			Ref: "targets/k8s-new-cluster/kubeconfig", Value: []byte("fake-kubeconfig-data"),
+			Ref: "targets/vm-new-instance/config", Value: []byte("fake-config-data"),
 		}},
 	}, events, func(wf *domain.OrchestrationWorkflowSpec) {
 		wf.Vault = vault
@@ -2982,8 +2982,8 @@ func TestOrchestration_DeliveryOutputs_SendsReadyNotificationAfterCommit(t *test
 	if len(targetOutputHooks.ready) != 1 {
 		t.Fatalf("expected 1 ready notification, got %d", len(targetOutputHooks.ready))
 	}
-	if targetOutputHooks.ready[0].ID() != "k8s-new-cluster" {
-		t.Errorf("ready target ID = %q, want k8s-new-cluster", targetOutputHooks.ready[0].ID())
+	if targetOutputHooks.ready[0].ID() != "vm-new-instance" {
+		t.Errorf("ready target ID = %q, want vm-new-instance", targetOutputHooks.ready[0].ID())
 	}
 	if len(targetOutputHooks.terminating) != 0 {
 		t.Errorf("expected 0 terminating notifications, got %d", len(targetOutputHooks.terminating))
@@ -3005,7 +3005,7 @@ func TestOrchestration_DeletePipeline_SendsTerminatingNotificationBeforeCleanup(
 		Manifests: []domain.Manifest{{ManifestType: "api.gcphcp.cluster", Raw: json.RawMessage(`{"name":"guest-cluster"}`)}},
 		State:     domain.DeliveryStateDelivered,
 	}))
-	seedTargets(t, store, domain.TargetInfoFromSnapshot(domain.TargetInfoSnapshot{ID: "kubernetes-target", Name: "guest-cluster", Type: "kubernetes"}))
+	seedTargets(t, store, domain.TargetInfoFromSnapshot(domain.TargetInfoSnapshot{ID: "discovered-target", Name: "guest-cluster", Type: "vm"}))
 
 	ctx := testContext(t)
 	deliveryID := domain.DeliveryID("deployments/d1:gcphcp-provider")
@@ -3015,7 +3015,7 @@ func TestOrchestration_DeletePipeline_SendsTerminatingNotificationBeforeCleanup(
 	}
 	defer tx.Rollback()
 	if err := tx.Inventory().Create(ctx, domain.InventoryItemFromSnapshot(domain.InventoryItemSnapshot{
-		ID: "target:kubernetes-target", Type: "kubernetes", Name: "guest-cluster",
+		ID: "target:discovered-target", Type: "vm", Name: "guest-cluster",
 		SourceDeliveryID: &deliveryID,
 	})); err != nil {
 		t.Fatalf("seed inventory item: %v", err)
@@ -3039,8 +3039,8 @@ func TestOrchestration_DeletePipeline_SendsTerminatingNotificationBeforeCleanup(
 	if len(targetOutputHooks.terminating) != 1 {
 		t.Fatalf("expected 1 terminating notification, got %d", len(targetOutputHooks.terminating))
 	}
-	if targetOutputHooks.terminating[0].ID() != "kubernetes-target" {
-		t.Errorf("terminating target ID = %q, want kubernetes-target", targetOutputHooks.terminating[0].ID())
+	if targetOutputHooks.terminating[0].ID() != "discovered-target" {
+		t.Errorf("terminating target ID = %q, want discovered-target", targetOutputHooks.terminating[0].ID())
 	}
 	if len(targetOutputHooks.ready) != 0 {
 		t.Errorf("expected 0 ready notifications, got %d", len(targetOutputHooks.ready))
@@ -3114,7 +3114,7 @@ func TestOrchestration_CleanupTargetIndexedInventory_TargetOutputHookFailure_Blo
 	})
 	seedTargets(t, store,
 		domain.TargetInfoFromSnapshot(domain.TargetInfoSnapshot{ID: "gcphcp-provider", Name: "gcphcp-provider", Type: "gcphcp"}),
-		domain.TargetInfoFromSnapshot(domain.TargetInfoSnapshot{ID: "kubernetes-target", Name: "guest-cluster", Type: "kubernetes"}),
+		domain.TargetInfoFromSnapshot(domain.TargetInfoSnapshot{ID: "discovered-target", Name: "guest-cluster", Type: "vm"}),
 	)
 	deliveryID := domain.DeliveryID("deployments/d1:gcphcp-provider")
 	seedDelivery(t, store, domain.DeliveryFromSnapshot(domain.DeliverySnapshot{
@@ -3130,7 +3130,7 @@ func TestOrchestration_CleanupTargetIndexedInventory_TargetOutputHookFailure_Blo
 	}
 	defer tx.Rollback()
 	if err := tx.Inventory().Create(ctx, domain.InventoryItemFromSnapshot(domain.InventoryItemSnapshot{
-		ID: "target:kubernetes-target", Type: "kubernetes", Name: "guest-cluster",
+		ID: "target:discovered-target", Type: "vm", Name: "guest-cluster",
 		SourceDeliveryID: &deliveryID,
 	})); err != nil {
 		t.Fatalf("seed inventory item: %v", err)
@@ -3156,10 +3156,10 @@ func TestOrchestration_CleanupTargetIndexedInventory_TargetOutputHookFailure_Blo
 		t.Fatalf("begin read tx: %v", err)
 	}
 	defer readTx.Rollback()
-	if _, err := readTx.Targets().Get(ctx, "kubernetes-target"); err != nil {
-		t.Fatalf("expected kubernetes-target to still exist, got err=%v", err)
+	if _, err := readTx.Targets().Get(ctx, "discovered-target"); err != nil {
+		t.Fatalf("expected discovered-target to still exist, got err=%v", err)
 	}
-	if _, err := readTx.Inventory().Get(ctx, "target:kubernetes-target"); err != nil {
+	if _, err := readTx.Inventory().Get(ctx, "target:discovered-target"); err != nil {
 		t.Fatalf("expected inventory item to still exist, got err=%v", err)
 	}
 }
@@ -3175,7 +3175,7 @@ func TestOrchestration_CleanupTargetIndexedInventory_CallsTargetOutputPreDeleteH
 	})
 	seedTargets(t, store,
 		domain.TargetInfoFromSnapshot(domain.TargetInfoSnapshot{ID: "gcphcp-provider", Name: "gcphcp-provider", Type: "gcphcp"}),
-		domain.TargetInfoFromSnapshot(domain.TargetInfoSnapshot{ID: "kubernetes-target", Name: "guest-cluster", Type: "kubernetes"}),
+		domain.TargetInfoFromSnapshot(domain.TargetInfoSnapshot{ID: "discovered-target", Name: "guest-cluster", Type: "vm"}),
 	)
 	deliveryID := domain.DeliveryID("deployments/d1:gcphcp-provider")
 	seedDelivery(t, store, domain.DeliveryFromSnapshot(domain.DeliverySnapshot{
@@ -3191,7 +3191,7 @@ func TestOrchestration_CleanupTargetIndexedInventory_CallsTargetOutputPreDeleteH
 	}
 	defer tx.Rollback()
 	if err := tx.Inventory().Create(ctx, domain.InventoryItemFromSnapshot(domain.InventoryItemSnapshot{
-		ID: "target:kubernetes-target", Type: "kubernetes", Name: "guest-cluster",
+		ID: "target:discovered-target", Type: "vm", Name: "guest-cluster",
 		SourceDeliveryID: &deliveryID,
 	})); err != nil {
 		t.Fatalf("seed inventory item: %v", err)
@@ -3212,8 +3212,8 @@ func TestOrchestration_CleanupTargetIndexedInventory_CallsTargetOutputPreDeleteH
 		t.Fatalf("Run: %v", err)
 	}
 
-	if len(targetOutputHooks.terminating) != 1 || targetOutputHooks.terminating[0].ID() != "kubernetes-target" {
-		t.Fatalf("target output pre-delete hook calls = %v, want one call for kubernetes-target", targetOutputHooks.terminating)
+	if len(targetOutputHooks.terminating) != 1 || targetOutputHooks.terminating[0].ID() != "discovered-target" {
+		t.Fatalf("target output pre-delete hook calls = %v, want one call for discovered-target", targetOutputHooks.terminating)
 	}
 
 	readTx, err := store.BeginReadOnly(ctx)
@@ -3221,8 +3221,8 @@ func TestOrchestration_CleanupTargetIndexedInventory_CallsTargetOutputPreDeleteH
 		t.Fatalf("begin read tx: %v", err)
 	}
 	defer readTx.Rollback()
-	if _, err := readTx.Targets().Get(ctx, "kubernetes-target"); !errors.Is(err, domain.ErrNotFound) {
-		t.Fatalf("expected kubernetes-target to be deleted, got err=%v", err)
+	if _, err := readTx.Targets().Get(ctx, "discovered-target"); !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("expected discovered-target to be deleted, got err=%v", err)
 	}
 }
 

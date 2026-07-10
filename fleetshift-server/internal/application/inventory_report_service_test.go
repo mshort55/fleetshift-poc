@@ -1299,7 +1299,7 @@ func TestInventoryReportService_DeleteBatch_DeletesPreviouslyReplacedResource(t 
 	svc := application.NewInventoryReportService(store)
 	ctx := context.Background()
 
-	name := domain.ResourceName("clusters/c1")
+	name := domain.ResourceName("targets/c1")
 	if err := svc.ReplaceBatch(ctx, application.InventoryReplacementBatchInput{
 		Reports: []application.InventoryReplacementInput{{
 			ResourceType: inventoryReportTestType, Name: &name, ObservedAt: time.Now(),
@@ -1342,7 +1342,7 @@ func TestInventoryReportService_DeleteBatch_MissingResourceIsSuccess(t *testing.
 	ctx := context.Background()
 
 	if err := svc.DeleteBatch(ctx, application.InventoryDeleteBatchInput{
-		Resources: []application.InventoryDeleteInput{{ResourceType: inventoryReportTestType, Name: "clusters/ghost"}},
+		Resources: []application.InventoryDeleteInput{{ResourceType: inventoryReportTestType, Name: "targets/ghost"}},
 	}); err != nil {
 		t.Fatalf("DeleteBatch (missing resource): %v", err)
 	}
@@ -1354,7 +1354,7 @@ func TestInventoryReportService_DeleteBatch_RejectsDuplicateEntry(t *testing.T) 
 	svc := application.NewInventoryReportService(store)
 	ctx := context.Background()
 
-	name := domain.ResourceName("clusters/dup1")
+	name := domain.ResourceName("targets/dup1")
 	if err := svc.ReplaceBatch(ctx, application.InventoryReplacementBatchInput{
 		Reports: []application.InventoryReplacementInput{{
 			ResourceType: inventoryReportTestType, Name: &name, ObservedAt: time.Now(),
@@ -1398,8 +1398,8 @@ func TestInventoryReportService_ReplaceCollection_WritesAndPrunesExactCollection
 	svc := application.NewInventoryReportService(store)
 	ctx := context.Background()
 
-	keep := domain.ResourceName("clusters/keep1")
-	gone := domain.ResourceName("clusters/gone1")
+	keep := domain.ResourceName("targets/keep1")
+	gone := domain.ResourceName("targets/gone1")
 
 	// Seed both resources via a plain ReplaceBatch so gone1 pre-exists
 	// before the exact-collection resync below.
@@ -1414,7 +1414,7 @@ func TestInventoryReportService_ReplaceCollection_WritesAndPrunesExactCollection
 
 	if err := svc.ReplaceCollection(ctx, application.InventoryCollectionReplacementInput{
 		ResourceType: inventoryReportTestType,
-		Collection:   "clusters",
+		Collection:   "targets",
 		Reports: []application.InventoryReplacementInput{
 			{ResourceType: inventoryReportTestType, Name: &keep, Observation: rawMsg(`{"v":2}`), ObservedAt: time.Now()},
 		},
@@ -1449,7 +1449,7 @@ func TestInventoryReportService_ReplaceCollection_EmptyReportsPrunesEverything(t
 	svc := application.NewInventoryReportService(store)
 	ctx := context.Background()
 
-	name := domain.ResourceName("clusters/only1")
+	name := domain.ResourceName("targets/only1")
 	if err := svc.ReplaceBatch(ctx, application.InventoryReplacementBatchInput{
 		Reports: []application.InventoryReplacementInput{{
 			ResourceType: inventoryReportTestType, Name: &name, ObservedAt: time.Now(),
@@ -1460,7 +1460,7 @@ func TestInventoryReportService_ReplaceCollection_EmptyReportsPrunesEverything(t
 
 	if err := svc.ReplaceCollection(ctx, application.InventoryCollectionReplacementInput{
 		ResourceType: inventoryReportTestType,
-		Collection:   "clusters",
+		Collection:   "targets",
 	}); err != nil {
 		t.Fatalf("ReplaceCollection (empty Reports): %v", err)
 	}
@@ -1484,7 +1484,7 @@ func TestInventoryReportService_ReplaceCollection_RejectsNameOutsideCollection(t
 	outside := domain.ResourceName("other/outside1")
 	err := svc.ReplaceCollection(ctx, application.InventoryCollectionReplacementInput{
 		ResourceType: inventoryReportTestType,
-		Collection:   "clusters",
+		Collection:   "targets",
 		Reports: []application.InventoryReplacementInput{
 			{ResourceType: inventoryReportTestType, Name: &outside, ObservedAt: time.Now()},
 		},
@@ -1506,7 +1506,7 @@ func TestInventoryReportService_ReplaceCollection_RejectsAliasOnlyReport(t *test
 	}
 	err = svc.ReplaceCollection(ctx, application.InventoryCollectionReplacementInput{
 		ResourceType: inventoryReportTestType,
-		Collection:   "clusters",
+		Collection:   "targets",
 		Reports: []application.InventoryReplacementInput{
 			{ResourceType: inventoryReportTestType, Aliases: aliasSet(alias), ObservedAt: time.Now()},
 		},
@@ -1522,8 +1522,8 @@ func TestInventoryReportService_DeleteCollection_RemovesEverythingInCollectionOn
 	svc := application.NewInventoryReportService(store)
 	ctx := context.Background()
 
-	inCollection := domain.ResourceName("clusters/c1")
-	otherCollection := domain.ResourceName("other-clusters/c1")
+	inCollection := domain.ResourceName("targets/c1")
+	otherCollection := domain.ResourceName("other-targets/c1")
 	if err := svc.ReplaceBatch(ctx, application.InventoryReplacementBatchInput{
 		Reports: []application.InventoryReplacementInput{
 			{ResourceType: inventoryReportTestType, Name: &inCollection, ObservedAt: time.Now()},
@@ -1535,7 +1535,7 @@ func TestInventoryReportService_DeleteCollection_RemovesEverythingInCollectionOn
 
 	if err := svc.DeleteCollection(ctx, application.InventoryCollectionDeleteInput{
 		ResourceType: inventoryReportTestType,
-		Collection:   "clusters",
+		Collection:   "targets",
 	}); err != nil {
 		t.Fatalf("DeleteCollection: %v", err)
 	}

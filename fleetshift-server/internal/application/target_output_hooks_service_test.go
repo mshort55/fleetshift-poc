@@ -57,7 +57,7 @@ func TestTargetOutputHookService_AfterTargetRegistered_NotifiesRuntime(t *testin
 		application.WithTargetRuntimeNotifier(notifier),
 	)
 
-	svc.AfterTargetRegistered(context.Background(), testOutputHookTarget("kubernetes"))
+	svc.AfterTargetRegistered(context.Background(), testOutputHookTarget("vm"))
 
 	if len(notifier.ready) != 1 || notifier.ready[0].ID() != "target-1" {
 		t.Fatalf("ready calls = %v, want one call for target-1", notifier.ready)
@@ -73,10 +73,10 @@ func TestTargetOutputHookService_BeforeTargetDeleted_NotifiesRuntimeBeforeCleane
 	cleaner := &recordingIndexedInventoryCleaner{order: &order}
 	svc := application.NewTargetOutputHookService(
 		application.WithTargetRuntimeNotifier(notifier),
-		application.WithTargetIndexedInventoryCleaner("kubernetes", cleaner),
+		application.WithTargetIndexedInventoryCleaner("vm", cleaner),
 	)
 
-	err := svc.BeforeTargetDeleted(context.Background(), testOutputHookTarget("kubernetes"))
+	err := svc.BeforeTargetDeleted(context.Background(), testOutputHookTarget("vm"))
 	if err != nil {
 		t.Fatalf("BeforeTargetDeleted: %v", err)
 	}
@@ -103,7 +103,7 @@ func TestTargetOutputHookService_BeforeTargetDeleted_UndeclaredTypeSkipsCleaner(
 	cleaner := &recordingIndexedInventoryCleaner{}
 	svc := application.NewTargetOutputHookService(
 		application.WithTargetRuntimeNotifier(notifier),
-		application.WithTargetIndexedInventoryCleaner("kubernetes", cleaner),
+		application.WithTargetIndexedInventoryCleaner("vm", cleaner),
 	)
 
 	err := svc.BeforeTargetDeleted(context.Background(), testOutputHookTarget("unmanaged"))
@@ -123,10 +123,10 @@ func TestTargetOutputHookService_BeforeTargetDeleted_NilCleanerFails(t *testing.
 	notifier := &recordingTargetRuntimeNotifier{}
 	svc := application.NewTargetOutputHookService(
 		application.WithTargetRuntimeNotifier(notifier),
-		application.WithTargetIndexedInventoryCleaner("kubernetes", nil),
+		application.WithTargetIndexedInventoryCleaner("vm", nil),
 	)
 
-	err := svc.BeforeTargetDeleted(context.Background(), testOutputHookTarget("kubernetes"))
+	err := svc.BeforeTargetDeleted(context.Background(), testOutputHookTarget("vm"))
 	if !errors.Is(err, domain.ErrInvalidArgument) {
 		t.Fatalf("BeforeTargetDeleted error = %v, want ErrInvalidArgument", err)
 	}
@@ -138,10 +138,10 @@ func TestTargetOutputHookService_BeforeTargetDeleted_NilCleanerFails(t *testing.
 func TestTargetOutputHookService_BeforeTargetDeleted_CleanerErrorFails(t *testing.T) {
 	cleanerErr := errors.New("cleanup failed")
 	svc := application.NewTargetOutputHookService(
-		application.WithTargetIndexedInventoryCleaner("kubernetes", &recordingIndexedInventoryCleaner{err: cleanerErr}),
+		application.WithTargetIndexedInventoryCleaner("vm", &recordingIndexedInventoryCleaner{err: cleanerErr}),
 	)
 
-	err := svc.BeforeTargetDeleted(context.Background(), testOutputHookTarget("kubernetes"))
+	err := svc.BeforeTargetDeleted(context.Background(), testOutputHookTarget("vm"))
 	if !errors.Is(err, cleanerErr) {
 		t.Fatalf("BeforeTargetDeleted error = %v, want wrapped cleaner error", err)
 	}

@@ -468,7 +468,7 @@ func (s *InventoryReportService) ReplaceCollection(ctx context.Context, in Inven
 // InventoryCollectionDeleteInput is the input for
 // [InventoryReportService.DeleteCollection]: the address of one exact
 // inventory collection to remove entirely, e.g. because indexing of a
-// Kubernetes target+GVR stopped.
+// target+resource-type pair stopped.
 type InventoryCollectionDeleteInput struct {
 	ResourceType domain.ResourceType
 	Collection   domain.CollectionName

@@ -139,11 +139,12 @@ type ExtensionResourceRepository interface {
 	// orphaned resource_alias_claims rows the same way [Delete] does.
 	// Unlike [Delete], a name with no matching row -- and an empty
 	// refs slice -- is a no-op, not [ErrNotFound]: this method exists
-	// for source-driven delete events (e.g. a Kubernetes watch
-	// delete), where a duplicate delete or a delete racing a resync
-	// must not fail. Deletes are exact-name addressed; refs is never
-	// resolved through aliases -- see [InventoryReplacement.Aliases]'s
-	// doc for why reported aliases aren't trusted for resolution.
+	// for source-driven delete events (e.g. a watch delete from an
+	// addon's live source), where a duplicate delete or a delete
+	// racing a resync must not fail. Deletes are exact-name addressed;
+	// refs is never resolved through aliases -- see
+	// [InventoryReplacement.Aliases]'s doc for why reported aliases
+	// aren't trusted for resolution.
 	DeleteInventoryResources(ctx context.Context, refs []InventoryResourceRef) error
 
 	// PruneInventoryCollection deletes every extension resource of
@@ -165,11 +166,11 @@ type ExtensionResourceRepository interface {
 
 	// DeleteInventorySubtree deletes every extension resource of
 	// ref.ResourceType whose collection lies under the resource-name
-	// subtree rooted at ref.Parent -- for example, every Kubernetes
-	// object collection under "clusters/{target}" when a target is
+	// subtree rooted at ref.Parent -- for example, every object
+	// collection reported under "targets/{target}" when a target is
 	// torn down. Matching uses resource-name segment boundaries: a
-	// parent of "clusters/prod" must not match a sibling collection
-	// under "clusters/prod-old". A subtree with no matching rows is a
+	// parent of "targets/prod" must not match a sibling collection
+	// under "targets/prod-old". A subtree with no matching rows is a
 	// no-op.
 	DeleteInventorySubtree(ctx context.Context, ref InventorySubtreeRef) error
 
@@ -365,7 +366,7 @@ type InventoryResourceRef struct {
 // InventoryCollectionRef identifies one exact inventory collection for
 // one resource type, for
 // [ExtensionResourceRepository.PruneInventoryCollection]. Collection is
-// a full collection path (e.g. "clusters/prod/apiResources/core~v1~pods/objects"),
+// a full collection path (e.g. "targets/prod/resourceTypes/widgets/objects"),
 // not a prefix.
 type InventoryCollectionRef struct {
 	ResourceType ResourceType
@@ -376,7 +377,7 @@ type InventoryCollectionRef struct {
 // resource type whose collection lies below a parent resource-name
 // subtree, for
 // [ExtensionResourceRepository.DeleteInventorySubtree]. Parent is a
-// parsed [ResourceName] such as "clusters/prod", not a raw string
+// parsed [ResourceName] such as "targets/prod", not a raw string
 // prefix.
 type InventorySubtreeRef struct {
 	ResourceType ResourceType

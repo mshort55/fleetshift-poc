@@ -10,8 +10,9 @@ import (
 // TargetInventoryCleanupService exposes owner-validated,
 // resource-type-scoped subtree cleanup for target-scoped indexed
 // inventory. Concrete [TargetIndexedInventoryCleaner] implementations
-// (e.g. the Kubernetes cleaner) depend on this service instead of
-// calling [domain.ExtensionResourceRepository.DeleteInventorySubtree]
+// (e.g. a per-target-type addon cleaner) depend on this service
+// instead of calling
+// [domain.ExtensionResourceRepository.DeleteInventorySubtree]
 // directly, so cleanup authority is always checked rather than
 // assumed by the caller.
 type TargetInventoryCleanupService struct {
