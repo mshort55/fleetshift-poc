@@ -413,31 +413,3 @@ func TestInventoryReporter_DTOsHaveNoEdgeFields(t *testing.T) {
 		}
 	}
 }
-
-func TestNoopEdgeSink_ApplyEdgeDeltaIsNoop(t *testing.T) {
-	var sink kubernetes.EdgeSink = kubernetes.NoopEdgeSink{}
-	err := sink.ApplyEdgeDelta(context.Background(), "prod", kubernetes.EdgeDelta{
-		Adds: []kubernetes.Edge{{
-			EdgeType:   kubernetes.EdgeOwnedBy,
-			SourceUID:  "pod-1",
-			DestUID:    "rs-1",
-			SourceKind: "Pod",
-			DestKind:   "ReplicaSet",
-		}},
-		Deletes: []kubernetes.Edge{{
-			EdgeType:  kubernetes.EdgeRunsOn,
-			SourceUID: "pod-1",
-			DestUID:   "node-1",
-		}},
-	})
-	if err != nil {
-		t.Fatalf("NoopEdgeSink.ApplyEdgeDelta: %v", err)
-	}
-}
-
-func TestNoopEdgeSink_EmptyDeltaIsNoop(t *testing.T) {
-	var sink kubernetes.NoopEdgeSink
-	if err := sink.ApplyEdgeDelta(context.Background(), "prod", kubernetes.EdgeDelta{}); err != nil {
-		t.Fatalf("NoopEdgeSink.ApplyEdgeDelta(empty): %v", err)
-	}
-}

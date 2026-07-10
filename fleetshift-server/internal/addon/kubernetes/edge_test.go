@@ -1,6 +1,7 @@
 package kubernetes
 
 import (
+	"context"
 	"testing"
 )
 
@@ -139,6 +140,34 @@ func TestCommonEdges(t *testing.T) {
 			sourceID: "pod-1",
 			want:     0,
 		},
+		{
+			name: "self-loop owner",
+			nodes: map[string]inventoryNode{
+				"pod-1": {
+					UID:      "pod-1",
+					Kind:     "Pod",
+					OwnerUID: "pod-1",
+				},
+			},
+			sourceID: "pod-1",
+			want:     0,
+		},
+		{
+			name: "cycle via already-seen owner",
+			nodes: map[string]inventoryNode{
+				"a": {UID: "a", Kind: "A", OwnerUID: "b"},
+				"b": {UID: "b", Kind: "B", OwnerUID: "c"},
+				"c": {UID: "c", Kind: "C", OwnerUID: "b"}, // back edge to already-seen b
+			},
+			sourceID: "a",
+			want:     2, // a->b, a->c (stop when b is seen again)
+		},
+		{
+			name:     "missing source",
+			nodes:    map[string]inventoryNode{},
+			sourceID: "missing",
+			want:     0,
+		},
 	}
 
 	for _, tt := range tests {
@@ -204,5 +233,50 @@ func TestCommonEdgesDetailedChain(t *testing.T) {
 	}
 	if edges[1].SourceKind != "Pod" || edges[1].DestKind != "Deployment" {
 		t.Errorf("second edge kinds: want Pod->Deployment, got %s->%s", edges[1].SourceKind, edges[1].DestKind)
+	}
+}
+
+func TestNoopEdgeSink_ApplyEdgeDeltaIsNoop(t *testing.T) {
+	var sink EdgeSink = NoopEdgeSink{}
+	err := sink.ApplyEdgeDelta(context.Background(), "prod", EdgeDelta{
+		Adds: []Edge{{
+			EdgeType:   EdgeOwnedBy,
+			SourceUID:  "pod-1",
+			DestUID:    "rs-1",
+			SourceKind: "Pod",
+			DestKind:   "ReplicaSet",
+		}},
+		Deletes: []Edge{{
+			EdgeType:  EdgeRunsOn,
+			SourceUID: "pod-1",
+			DestUID:   "node-1",
+		}},
+	})
+	if err != nil {
+		t.Fatalf("NoopEdgeSink.ApplyEdgeDelta: %v", err)
+	}
+}
+
+func TestNoopEdgeSink_EmptyDeltaIsNoop(t *testing.T) {
+	var sink NoopEdgeSink
+	if err := sink.ApplyEdgeDelta(context.Background(), "prod", EdgeDelta{}); err != nil {
+		t.Fatalf("NoopEdgeSink.ApplyEdgeDelta(empty): %v", err)
+	}
+}
+
+func TestEdgeTypeConstants(t *testing.T) {
+	cases := []struct {
+		got  EdgeType
+		want string
+	}{
+		{EdgeOwnedBy, "ownedBy"},
+		{EdgeRunsOn, "runsOn"},
+		{EdgeAttachedTo, "attachedTo"},
+		{EdgeSelects, "selects"},
+	}
+	for _, tc := range cases {
+		if string(tc.got) != tc.want {
+			t.Errorf("EdgeType %q = %q, want %q", tc.want, tc.got, tc.want)
+		}
 	}
 }

@@ -1,12 +1,16 @@
 package kubernetes
 
 import (
+	"context"
 	"slices"
 
 	"k8s.io/apimachinery/pkg/runtime/schema"
+
+	"github.com/fleetshift/fleetshift-poc/fleetshift-server/internal/domain"
 )
 
-// EdgeType identifies the kind of relationship between two resources.
+// EdgeType identifies the kind of relationship between two Kubernetes
+// resources.
 type EdgeType string
 
 const (
@@ -16,11 +20,35 @@ const (
 	EdgeSelects    EdgeType = "selects"
 )
 
-// Edge represents a directed relationship between two resources.
+// Edge is a directed topology relationship between two Kubernetes
+// objects, keyed by UID. Edges are computed in memory by the writer;
+// they are not persisted in the first main integration.
 type Edge struct {
 	EdgeType
 	SourceUID, DestUID   string
 	SourceKind, DestKind string
+}
+
+// EdgeDelta is one flush of topology edge adds and deletes.
+type EdgeDelta struct {
+	Adds    []Edge
+	Deletes []Edge
+}
+
+// EdgeSink receives computed topology edge deltas. The first main
+// integration wires [NoopEdgeSink]; inventory reporting never carries
+// edge fields.
+type EdgeSink interface {
+	ApplyEdgeDelta(ctx context.Context, targetID domain.TargetID, delta EdgeDelta) error
+}
+
+// NoopEdgeSink discards edge deltas. It cannot fail: edge persistence
+// is disabled until the platform edge model is selected.
+type NoopEdgeSink struct{}
+
+// ApplyEdgeDelta implements [EdgeSink] as a no-op.
+func (NoopEdgeSink) ApplyEdgeDelta(context.Context, domain.TargetID, EdgeDelta) error {
+	return nil
 }
 
 // inventoryNode represents a resource stored in the NodeStore.
@@ -88,10 +116,6 @@ func commonEdges(uid string, ns NodeStore) []Edge {
 	walk = func(ownerUID string) {
 		// Cycle detection
 		if slices.Contains(seen, ownerUID) {
-				return
-			}
-
-		if ownerUID == "" {
 			return
 		}
 

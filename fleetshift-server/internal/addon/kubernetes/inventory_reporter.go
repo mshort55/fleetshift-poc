@@ -16,9 +16,6 @@ import (
 // delete/resync/replace surface and use the Kubernetes object identity
 // helpers (ResourceType ObjectResourceType, names under
 // {TargetCollectionID}/{target}/{APIResourceCollectionID}/{gvr}/{ObjectCollectionID}/{uid}).
-//
-// Edge deltas are intentionally not part of this interface -- see
-// [EdgeSink].
 type InventoryReporter interface {
 	ApplyDelta(ctx context.Context, delta InventoryDeltaReport) error
 	ReplaceCollection(ctx context.Context, snapshot InventoryCollectionSnapshot) error
@@ -143,50 +140,5 @@ func (r *LocalInventoryReporter) DeleteSubtree(ctx context.Context, ref domain.I
 	if err := r.backend.DeleteSubtree(ctx, ref); err != nil {
 		return fmt.Errorf("local inventory reporter delete subtree %q: %w", ref.Parent, err)
 	}
-	return nil
-}
-
-// EdgeType identifies the kind of relationship between two Kubernetes
-// resources. Defined here with [Edge] / [EdgeDelta] / [EdgeSink] so the
-// no-op edge boundary can exist before the rest of edge computation
-// (NodeStore, commonEdges, etc.) lands. Later edge.go ports should not
-// redeclare these symbols.
-type EdgeType string
-
-const (
-	EdgeOwnedBy    EdgeType = "ownedBy"
-	EdgeRunsOn     EdgeType = "runsOn"
-	EdgeAttachedTo EdgeType = "attachedTo"
-	EdgeSelects    EdgeType = "selects"
-)
-
-// Edge is a directed topology relationship between two Kubernetes
-// objects, keyed by UID. Edges are computed in memory by the writer;
-// they are not persisted in the first main integration.
-type Edge struct {
-	EdgeType
-	SourceUID, DestUID   string
-	SourceKind, DestKind string
-}
-
-// EdgeDelta is one flush of topology edge adds and deletes.
-type EdgeDelta struct {
-	Adds    []Edge
-	Deletes []Edge
-}
-
-// EdgeSink receives computed topology edge deltas. The first main
-// integration wires [NoopEdgeSink]; inventory reporting never carries
-// edge fields.
-type EdgeSink interface {
-	ApplyEdgeDelta(ctx context.Context, targetID domain.TargetID, delta EdgeDelta) error
-}
-
-// NoopEdgeSink discards edge deltas. It cannot fail: edge persistence
-// is disabled until the platform edge model is selected.
-type NoopEdgeSink struct{}
-
-// ApplyEdgeDelta implements [EdgeSink] as a no-op.
-func (NoopEdgeSink) ApplyEdgeDelta(context.Context, domain.TargetID, EdgeDelta) error {
 	return nil
 }

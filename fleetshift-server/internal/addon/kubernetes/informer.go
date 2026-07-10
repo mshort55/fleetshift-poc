@@ -14,6 +14,29 @@ import (
 	"k8s.io/client-go/dynamic"
 )
 
+// EventOp represents the type of informer event.
+type EventOp int
+
+const (
+	EventAdd EventOp = iota
+	EventUpdate
+	EventDelete
+)
+
+// ResourceEvent is a single informer event for a Kubernetes resource.
+type ResourceEvent struct {
+	Op       EventOp
+	Resource *unstructured.Unstructured
+	GVR      schema.GroupVersionResource
+}
+
+// ResyncEvent carries the full resource set for a GVR after an informer
+// completes its initial LIST.
+type ResyncEvent struct {
+	GVR       schema.GroupVersionResource
+	Resources []*unstructured.Unstructured
+}
+
 // GenericInformer performs LIST+WATCH for a single GVR and sends events to
 // channels. It tracks only UID -> resourceVersion for minimal memory usage.
 type GenericInformer struct {
@@ -383,6 +406,10 @@ var crdGVR = schema.GroupVersionResource{
 // informer that triggers throttled re-reconciliation whenever CRDs change.
 // It blocks until ctx is cancelled.
 func (m *InformerManager) RunContinuous(ctx context.Context, denyList, allowList []Resource) {
+	m.runContinuous(ctx, denyList, allowList, 10*time.Second)
+}
+
+func (m *InformerManager) runContinuous(ctx context.Context, denyList, allowList []Resource, minReconcileInterval time.Duration) {
 	// Initial discovery and reconcile.
 	m.discoverAndReconcile(ctx, denyList, allowList)
 
@@ -396,16 +423,13 @@ func (m *InformerManager) RunContinuous(ctx context.Context, denyList, allowList
 	go crdInformer.Run(crdCtx)
 	crdInformer.WaitUntilInitialized(ctx, 10*time.Second)
 
-	// Throttled re-reconciliation: minimum 10s between cycles.
-	const minReconcileInterval = 10 * time.Second
 	lastReconcile := time.Now()
 	pending := false
 
-	// Timer for throttled reconcile — initially stopped.
+	// Timer for throttled reconcile. Create already-fired and drain so later
+	// Reset calls are safe without a Stop race on startup.
 	reconcileTimer := time.NewTimer(0)
-	if !reconcileTimer.Stop() {
-		<-reconcileTimer.C
-	}
+	<-reconcileTimer.C
 
 	for {
 		select {
