@@ -1,126 +1,100 @@
 package kubernetes
 
 import (
-	"maps"
-	"encoding/json"
 	"fmt"
+	"maps"
 	"reflect"
 	"strconv"
 	"strings"
 	"time"
 
-	"github.com/fleetshift/fleetshift-poc/fleetshift-server/internal/domain"
 	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/client-go/util/jsonpath"
+
+	"github.com/fleetshift/fleetshift-poc/fleetshift-server/internal/domain"
 )
 
-
-// ExtractObservedResource converts an unstructured k8s resource and its schema
-// entry into a domain InventoryItem and an inventoryNode.
-func ExtractObservedResource(r *unstructured.Unstructured, entry SchemaEntry, targetID string) (domain.InventoryItem, inventoryNode) {
+// ExtractObservedResource converts an unstructured Kubernetes object
+// and its schema entry into an [InventoryObjectReport] plus an
+// [inventoryNode] for in-memory edge computation.
+//
+// The report always uses [ObjectResourceType] identity: ResourceName,
+// FleetShift labels, and observation come from [ObjectResourceName],
+// [ObjectLabels], and [ObjectObservation]. Schema-defined fields,
+// optional size-capped annotations, and [SchemaEntry.ComputeExtra]
+// land in observation.extracted. Kubernetes object labels stay on the
+// inventory node (for selector matching), not on the report.
+func ExtractObservedResource(r *unstructured.Unstructured, entry SchemaEntry, targetID string) (InventoryObjectReport, inventoryNode, error) {
 	uid := string(r.GetUID())
+	observedAt := time.Now()
 
-	// Build inventory type from apiVersion and kind.
-	var invType domain.InventoryType
-	parts := strings.SplitN(r.GetAPIVersion(), "/", 2)
-	if len(parts) == 2 {
-		invType = domain.InventoryType(parts[0] + "/" + parts[1] + "/" + r.GetKind())
-	} else {
-		invType = domain.InventoryType(parts[0] + "/" + r.GetKind())
+	id := KubernetesObjectIdentity{
+		TargetID:  domain.TargetID(targetID),
+		GVR:       entry.GVR,
+		Kind:      r.GetKind(),
+		Namespace: r.GetNamespace(),
+		Name:      r.GetName(),
+		UID:       uid,
 	}
 
-	// Labels.
-	var labels map[string]string
-	if l := r.GetLabels(); len(l) > 0 {
-		labels = l
+	name, err := ObjectResourceName(id)
+	if err != nil {
+		return InventoryObjectReport{}, inventoryNode{}, fmt.Errorf("extract observed resource: %w", err)
 	}
 
-	// Schema-defined observed fields plus base metadata fields.
-	fields := make(map[string]any)
-
-	// Conditions.
-	conditions := extractConditions(r)
-
-	// Extract schema-defined fields first
-	if len(entry.Fields) > 0 {
-		for _, f := range entry.Fields {
-			v := extractSingleField(r, f)
-			if v != nil {
-				fields[f.Name] = v
-			}
-		}
-	}
-
-	// ownerReferences — extract controlling owner's UID
+	// ownerReferences — controlling owner's UID for edge computation.
 	ownerUID := ""
 	if ownerRefs, found, _ := unstructured.NestedSlice(r.Object, "metadata", "ownerReferences"); found {
 		for _, ref := range ownerRefs {
 			if m, ok := ref.(map[string]any); ok {
 				if ctrl, _ := m["controller"].(bool); ctrl {
-					if uid, ok := m["uid"].(string); ok {
-						ownerUID = uid
+					if u, ok := m["uid"].(string); ok {
+						ownerUID = u
 					}
 				}
 			}
 		}
 	}
 
-	// namespace
-	if ns := r.GetNamespace(); ns != "" {
-		fields["namespace"] = ns
+	// Schema-defined extracted fields (plus optional filtered
+	// annotations and ComputeExtra). Base identity/metadata such as
+	// namespace, generation, deletionTimestamp, and ownerReferences
+	// live in [ObjectObservation]'s metadata, not here.
+	extracted := make(map[string]any)
+
+	for _, f := range entry.Fields {
+		v := extractSingleField(r, f)
+		if v != nil {
+			extracted[f.Name] = v
+		}
 	}
 
-	// controllingOwnerUID
-	if ownerUID != "" {
-		fields["controllingOwnerUID"] = ownerUID
-	}
-
-	// generation
-	if gen, found, _ := unstructured.NestedInt64(r.Object, "metadata", "generation"); found {
-		fields["generation"] = gen
-	}
-
-	// deletionTimestamp
-	if dt, found, _ := unstructured.NestedString(r.Object, "metadata", "deletionTimestamp"); found && dt != "" {
-		fields["deletionTimestamp"] = dt
-	}
-
-	// annotations
 	if entry.ExtractAnnotations {
 		if annotations := extractAnnotations(r, entry.AnnotationSizeCap); annotations != nil {
-			fields["annotations"] = annotations
+			extracted["annotations"] = annotations
 		}
 	}
 
-	// ComputeExtra hook invocation
 	if entry.ComputeExtra != nil {
-		entry.ComputeExtra(r, fields)
+		entry.ComputeExtra(r, extracted)
 	}
 
-	// Marshal observed fields to JSON
-	var observed json.RawMessage
-	if len(fields) > 0 {
-		data, err := json.Marshal(fields)
-		if err == nil {
-			observed = data
-		}
+	obs := ObjectObservation(id, r, extracted)
+	conditions := ObjectConditions(extractRawConditions(r), observedAt)
+
+	var k8sLabels map[string]string
+	if l := r.GetLabels(); len(l) > 0 {
+		k8sLabels = l
 	}
 
-	id := domain.InventoryItemID(targetID + "/" + uid)
-
-	createdAt := r.GetCreationTimestamp().Time
-	if createdAt.IsZero() {
-		createdAt = time.Now()
+	report := InventoryObjectReport{
+		Name:        name,
+		Labels:      ObjectLabels(id),
+		Observation: &obs,
+		Conditions:  conditions,
+		ObservedAt:  observedAt,
 	}
-
-	item := domain.NewObservedInventoryItem(
-		id, invType, r.GetName(),
-		nil, // properties — not used by k8s extraction
-		labels,
-		domain.TargetID(targetID), observed,
-		conditions, createdAt, time.Now(),
-	)
 
 	node := inventoryNode{
 		UID:        uid,
@@ -128,12 +102,12 @@ func ExtractObservedResource(r *unstructured.Unstructured, entry SchemaEntry, ta
 		Name:       r.GetName(),
 		Namespace:  r.GetNamespace(),
 		OwnerUID:   ownerUID,
-		Labels:     labels,
-		Properties: fields,
+		Labels:     k8sLabels,
+		Properties: extracted,
 		GVR:        entry.GVR,
 	}
 
-	return item, node
+	return report, node, nil
 }
 
 // extractAnnotations copies annotations from the resource, excluding
@@ -170,32 +144,27 @@ func extractAnnotations(r *unstructured.Unstructured, sizeCap int) map[string]st
 	return annotations
 }
 
-// extractConditions reads .status.conditions from the unstructured object and
-// returns domain InventoryCondition values.
-func extractConditions(r *unstructured.Unstructured) []domain.InventoryCondition {
+// extractRawConditions reads .status.conditions from the unstructured
+// object as [RawCondition] values for [ObjectConditions] projection.
+func extractRawConditions(r *unstructured.Unstructured) []RawCondition {
 	raw, found, err := unstructured.NestedSlice(r.Object, "status", "conditions")
 	if err != nil || !found {
 		return nil
 	}
 
-	out := make([]domain.InventoryCondition, 0, len(raw))
+	out := make([]RawCondition, 0, len(raw))
 	for _, item := range raw {
 		m, ok := item.(map[string]any)
 		if !ok {
 			continue
 		}
-		c := domain.InventoryCondition{
-			Type:    stringFromMap(m, "type"),
-			Status:  stringFromMap(m, "status"),
-			Reason:  stringFromMap(m, "reason"),
-			Message: stringFromMap(m, "message"),
-		}
-		if ltt := stringFromMap(m, "lastTransitionTime"); ltt != "" {
-			if t, err := time.Parse(time.RFC3339, ltt); err == nil {
-				c.LastTransitionTime = &t
-			}
-		}
-		out = append(out, c)
+		out = append(out, RawCondition{
+			Type:               stringFromMap(m, "type"),
+			Status:             stringFromMap(m, "status"),
+			Reason:             stringFromMap(m, "reason"),
+			Message:            stringFromMap(m, "message"),
+			LastTransitionTime: stringFromMap(m, "lastTransitionTime"),
+		})
 	}
 	return out
 }
@@ -218,7 +187,13 @@ func extractSingleField(r *unstructured.Unstructured, f FieldExtraction) any {
 
 	// DataTypeSlice: collect all results into a list.
 	if f.DataType == DataTypeSlice {
-		return collectSlice(results)
+		// collectSlice returns []any; a typed-nil slice must not
+		// escape as a non-nil any, or callers treating nil as
+		// "skip this field" would incorrectly keep it.
+		if items := collectSlice(results); items != nil {
+			return items
+		}
+		return nil
 	}
 
 	val := results[0][0].Interface()
@@ -239,7 +214,13 @@ func extractSingleField(r *unstructured.Unstructured, f FieldExtraction) any {
 		return coerceNumber(val)
 
 	case DataTypeMapString:
-		return coerceMapString(val)
+		// Same typed-nil concern as DataTypeSlice: coerceMapString
+		// returns map[string]any, so a nil map must be converted to
+		// a true nil any before returning.
+		if m := coerceMapString(val); m != nil {
+			return m
+		}
+		return nil
 
 	default:
 		// Default / DataTypeString: return the value as-is.
