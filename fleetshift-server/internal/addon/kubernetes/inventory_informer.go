@@ -3,6 +3,7 @@ package kubernetes
 import (
 	"context"
 	"log/slog"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -155,10 +156,12 @@ func (i *GenericInformer) listAndResync(ctx context.Context) error {
 			rv := item.GetResourceVersion()
 
 			i.logger.Debug("listed resource", "uid", uid, "rv", rv)
-			i.eventCh <- ResourceEvent{
+			if !i.sendEvent(ctx, ResourceEvent{
 				Op:       EventAdd,
 				Resource: item,
 				GVR:      i.gvr,
+			}) {
+				return ctx.Err()
 			}
 			newResourceIndex[uid] = rv
 			allResources = append(allResources, item)
@@ -189,9 +192,11 @@ func (i *GenericInformer) listAndResync(ctx context.Context) error {
 	i.resourceIndex = newResourceIndex
 
 	// Send resync with full resource set after list completes.
-	i.resyncCh <- ResyncEvent{
+	if !i.sendResync(ctx, ResyncEvent{
 		GVR:       i.gvr,
 		Resources: allResources,
+	}) {
+		return ctx.Err()
 	}
 
 	return nil
@@ -235,10 +240,12 @@ func (i *GenericInformer) watch(ctx context.Context) {
 				if i.nsFilter != nil && !i.nsFilter.IsNamespaceAllowed(obj.GetNamespace()) {
 					continue
 				}
-				i.eventCh <- ResourceEvent{
+				if !i.sendEvent(ctx, ResourceEvent{
 					Op:       EventAdd,
 					Resource: obj,
 					GVR:      i.gvr,
+				}) {
+					return
 				}
 				i.resourceIndex[string(obj.GetUID())] = obj.GetResourceVersion()
 
@@ -251,10 +258,12 @@ func (i *GenericInformer) watch(ctx context.Context) {
 				if i.nsFilter != nil && !i.nsFilter.IsNamespaceAllowed(obj.GetNamespace()) {
 					continue
 				}
-				i.eventCh <- ResourceEvent{
+				if !i.sendEvent(ctx, ResourceEvent{
 					Op:       EventUpdate,
 					Resource: obj,
 					GVR:      i.gvr,
+				}) {
+					return
 				}
 				i.resourceIndex[string(obj.GetUID())] = obj.GetResourceVersion()
 
@@ -267,10 +276,12 @@ func (i *GenericInformer) watch(ctx context.Context) {
 				if i.nsFilter != nil && !i.nsFilter.IsNamespaceAllowed(obj.GetNamespace()) {
 					continue
 				}
-				i.eventCh <- ResourceEvent{
+				if !i.sendEvent(ctx, ResourceEvent{
 					Op:       EventDelete,
 					Resource: obj,
 					GVR:      i.gvr,
+				}) {
+					return
 				}
 				delete(i.resourceIndex, string(obj.GetUID()))
 
@@ -283,6 +294,26 @@ func (i *GenericInformer) watch(ctx context.Context) {
 				return
 			}
 		}
+	}
+}
+
+// sendEvent delivers an event or returns false when ctx is cancelled.
+func (i *GenericInformer) sendEvent(ctx context.Context, ev ResourceEvent) bool {
+	select {
+	case i.eventCh <- ev:
+		return true
+	case <-ctx.Done():
+		return false
+	}
+}
+
+// sendResync delivers a resync snapshot or returns false when ctx is cancelled.
+func (i *GenericInformer) sendResync(ctx context.Context, ev ResyncEvent) bool {
+	select {
+	case i.resyncCh <- ev:
+		return true
+	case <-ctx.Done():
+		return false
 	}
 }
 
@@ -315,6 +346,10 @@ type InformerManager struct {
 	nsFilter  *NamespaceFilter
 	stoppers  map[schema.GroupVersionResource]context.CancelFunc
 	logger    *slog.Logger
+
+	// informerWG tracks every ordinary and CRD informer goroutine so StopAll
+	// can await them after cancellation.
+	informerWG sync.WaitGroup
 }
 
 // NewInformerManager creates an InformerManager. If nsFilter is non-nil it is
@@ -384,7 +419,7 @@ func (m *InformerManager) Reconcile(ctx context.Context, desired []schema.GroupV
 		informer := NewInformer(m.client, gvr, m.eventCh, m.resyncCh, m.nsFilter, m.logger)
 		informerCtx, cancel := context.WithCancel(ctx)
 		m.stoppers[gvr] = cancel
-		go informer.Run(informerCtx)
+		m.startInformer(informer, informerCtx)
 		// Serialize startup to avoid memory spikes.
 		informer.WaitUntilInitialized(ctx, 10*time.Second)
 	}
@@ -392,12 +427,35 @@ func (m *InformerManager) Reconcile(ctx context.Context, desired []schema.GroupV
 	m.logger.Info("reconcile complete", "running", len(m.stoppers))
 }
 
-// StopAll cancels all running informers.
-func (m *InformerManager) StopAll() {
+func (m *InformerManager) startInformer(informer *GenericInformer, ctx context.Context) {
+	m.informerWG.Add(1)
+	go func() {
+		defer m.informerWG.Done()
+		informer.Run(ctx)
+	}()
+}
+
+// StopAll cancels all running ordinary informers and waits for every tracked
+// informer goroutine (ordinary and CRD) to exit, bounded by ctx.
+// It does not emit RemoveGVR events.
+func (m *InformerManager) StopAll(ctx context.Context) error {
 	for gvr, stopper := range m.stoppers {
 		m.logger.Info("stopping informer", "gvr", gvr.String())
 		stopper()
 		delete(m.stoppers, gvr)
+	}
+
+	done := make(chan struct{})
+	go func() {
+		m.informerWG.Wait()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
 	}
 }
 
@@ -426,7 +484,7 @@ func (m *InformerManager) runContinuous(ctx context.Context, denyList, allowList
 
 	crdCtx, crdCancel := context.WithCancel(ctx)
 	defer crdCancel()
-	go crdInformer.Run(crdCtx)
+	m.startInformer(crdInformer, crdCtx)
 	crdInformer.WaitUntilInitialized(ctx, 10*time.Second)
 
 	lastReconcile := time.Now()
@@ -480,6 +538,10 @@ func (m *InformerManager) runContinuous(ctx context.Context, denyList, allowList
 // discoverAndReconcile discovers all supported GVRs, filters them, and
 // reconciles the running informers.
 func (m *InformerManager) discoverAndReconcile(ctx context.Context, denyList, allowList []Resource) {
+	if ctx.Err() != nil {
+		return
+	}
+
 	supported, err := SupportedResources(m.discovery, m.logger)
 	if err != nil {
 		if ctx.Err() == nil {

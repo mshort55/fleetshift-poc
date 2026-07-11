@@ -1385,8 +1385,11 @@ func TestResync_PurgeOnlyAffectsResyncdGVR(t *testing.T) {
 	w := newTestWriter(mock, nil, extendedSchema, 100*time.Millisecond)
 
 	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	go w.Run(ctx)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		w.Run(ctx)
+	}()
 
 	deploy1 := makeResource("uid-deploy-1", "deploy-1", "100")
 	deploy2 := makeResource("uid-deploy-2", "deploy-2", "101")
@@ -1412,6 +1415,9 @@ func TestResync_PurgeOnlyAffectsResyncdGVR(t *testing.T) {
 	w.ResyncCh() <- ResyncEvent{GVR: testGVR, Resources: []*unstructured.Unstructured{deploy1}}
 	time.Sleep(100 * time.Millisecond)
 
+	cancel()
+	<-done
+
 	if _, ok := w.currentNodes["uid-deploy-2"]; ok {
 		t.Fatal("deploy-2 should have been purged by deployment resync")
 	}
@@ -1428,13 +1434,16 @@ func TestRemoveGVR_MapsToDeleteCollection(t *testing.T) {
 	w := newTestWriter(mock, nil, nil, 100*time.Millisecond)
 
 	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	go w.Run(ctx)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		w.Run(ctx)
+	}()
 
 	w.EventCh() <- ResourceEvent{Op: EventAdd, Resource: makeResource("uid-1", "deploy-1", "100"), GVR: testGVR}
 	time.Sleep(250 * time.Millisecond)
-	if _, ok := w.currentNodes["uid-1"]; !ok {
-		t.Fatal("precondition: uid-1 should be in currentNodes after flush")
+	if len(mock.getDeltas()) == 0 {
+		t.Fatal("precondition: expected flush before RemoveGVR")
 	}
 
 	w.RemoveCh() <- RemoveGVREvent{GVR: testGVR}
@@ -1451,6 +1460,9 @@ func TestRemoveGVR_MapsToDeleteCollection(t *testing.T) {
 	if calls[0].ref.Collection != wantCollection {
 		t.Errorf("Collection = %q, want %q", calls[0].ref.Collection, wantCollection)
 	}
+
+	cancel()
+	<-done
 	if _, ok := w.currentNodes["uid-1"]; ok {
 		t.Fatal("GVR removal should drop in-memory nodes for that GVR")
 	}
@@ -1654,14 +1666,21 @@ func TestFlush_SkipsExtractionFailureWithoutDroppingSibling(t *testing.T) {
 }
 
 func TestFlush_NilReporterIsNoop(t *testing.T) {
+	// Join Run before reading currentNodes to avoid a data race with flush.
 	w := NewWriter("target-1", nil, nil, testSchema, 100*time.Millisecond, discardLogger)
-
 	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	go w.Run(ctx)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		w.Run(ctx)
+	}()
 
 	w.EventCh() <- ResourceEvent{Op: EventAdd, Resource: makeResource("uid-1", "deploy-1", "100"), GVR: testGVR}
 	time.Sleep(250 * time.Millisecond)
+
+	cancel()
+	<-done
+
 	// No panic is success; currentNodes still advance for edge state.
 	if _, ok := w.currentNodes["uid-1"]; !ok {
 		t.Fatal("nil reporter should still track currentNodes after extract")
@@ -1821,14 +1840,23 @@ func TestResync_SkipsExtractionFailure(t *testing.T) {
 }
 
 func TestRemoveGVR_NilReporterIsNoop(t *testing.T) {
-	w := NewWriter("target-1", nil, nil, testSchema, 10*time.Second, discardLogger)
+	// Drive RemoveGVR through Run, then join before reading currentNodes.
+	w := NewWriter("target-1", nil, nil, testSchema, 50*time.Millisecond, discardLogger)
 	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	go w.Run(ctx)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		w.Run(ctx)
+	}()
 
-	w.currentNodes["uid-1"] = inventoryNode{UID: "uid-1", GVR: testGVR}
+	w.EventCh() <- ResourceEvent{Op: EventAdd, Resource: makeResource("uid-1", "deploy-1", "100"), GVR: testGVR}
+	time.Sleep(150 * time.Millisecond)
+
 	w.RemoveCh() <- RemoveGVREvent{GVR: testGVR}
 	time.Sleep(50 * time.Millisecond)
+
+	cancel()
+	<-done
 
 	if _, ok := w.currentNodes["uid-1"]; ok {
 		t.Fatal("removeGVR should drop in-memory nodes even when reporter is nil")

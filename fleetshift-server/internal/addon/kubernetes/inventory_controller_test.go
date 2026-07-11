@@ -1103,16 +1103,21 @@ func TestKubernetesInProcessIndexHost_StartIndexerClientErrors(t *testing.T) {
 type blockingDiscovery struct {
 	*fakeDiscoveryWithPreferred
 	unblock <-chan struct{}
+	onBlock func()
 }
 
 func (d *blockingDiscovery) ServerPreferredResources() ([]*metav1.APIResourceList, error) {
+	if d.onBlock != nil {
+		d.onBlock()
+	}
 	<-d.unblock
 	return d.fakeDiscoveryWithPreferred.ServerPreferredResources()
 }
 
-func newHostWithBlockingDiscovery(t *testing.T, unblock <-chan struct{}) *KubernetesInProcessIndexHost {
+func newHostWithBlockingDiscovery(t *testing.T, unblock <-chan struct{}) (*KubernetesInProcessIndexHost, *atomic.Bool) {
 	t.Helper()
-	return NewKubernetesInProcessIndexHost(
+	var blocked atomic.Bool
+	host := NewKubernetesInProcessIndexHost(
 		context.Background(),
 		nil,
 		&recordingReporter{},
@@ -1132,22 +1137,37 @@ func newHostWithBlockingDiscovery(t *testing.T, unblock <-chan struct{}) *Kubern
 					},
 				}}),
 				unblock: unblock,
+				onBlock: func() { blocked.Store(true) },
 			}, nil
 		}),
 		WithInProcessIndexHostIndexConfig(func(domain.TargetInfo) IndexConfig {
 			return IndexConfig{BatchInterval: time.Hour}
 		}),
 	)
+	return host, &blocked
+}
+
+func awaitDiscoveryBlocked(t *testing.T, blocked *atomic.Bool) {
+	t.Helper()
+	deadline := time.After(2 * time.Second)
+	for !blocked.Load() {
+		select {
+		case <-deadline:
+			t.Fatal("timed out waiting for discovery to block")
+		case <-time.After(5 * time.Millisecond):
+		}
+	}
 }
 
 func TestKubernetesInProcessIndexHost_StopIndexerTimeout(t *testing.T) {
 	unblock := make(chan struct{})
-	host := newHostWithBlockingDiscovery(t, unblock)
+	host, blocked := newHostWithBlockingDiscovery(t, unblock)
 	target := readyKubeTarget("host-timeout", nil)
 
 	if err := host.StartIndexer(context.Background(), target); err != nil {
 		t.Fatalf("StartIndexer: %v", err)
 	}
+	awaitDiscoveryBlocked(t, blocked)
 	if !host.Running("host-timeout") {
 		t.Fatal("expected indexer tracked while blocked in discovery")
 	}
@@ -1212,11 +1232,12 @@ func TestKubernetesInProcessIndexHost_StopAllIndexersWithRunningAndTimeout(t *te
 
 	t.Run("timeout leaves tracked until done", func(t *testing.T) {
 		unblock := make(chan struct{})
-		host := newHostWithBlockingDiscovery(t, unblock)
+		host, blocked := newHostWithBlockingDiscovery(t, unblock)
 		target := readyKubeTarget("host-all-timeout", nil)
 		if err := host.StartIndexer(context.Background(), target); err != nil {
 			t.Fatalf("StartIndexer: %v", err)
 		}
+		awaitDiscoveryBlocked(t, blocked)
 
 		stopCtx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
 		defer cancel()

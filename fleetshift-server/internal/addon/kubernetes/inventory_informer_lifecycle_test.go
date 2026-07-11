@@ -542,7 +542,9 @@ func TestDiscoverAndReconcile_StartsAllowedInformers(t *testing.T) {
 		if _, ok := mgr.stoppers[gvr]; !ok {
 			t.Fatalf("expected pods stopper, got %#v", mgr.stoppers)
 		}
-		mgr.StopAll()
+		if err := mgr.StopAll(context.Background()); err != nil {
+			t.Fatalf("StopAll: %v", err)
+		}
 		synctest.Wait()
 	})
 }

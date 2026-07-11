@@ -310,7 +310,9 @@ func TestInformerManager_StopAll_DoesNotSendRemoveGVREvent(t *testing.T) {
 	mgr.stoppers[schema.GroupVersionResource{Resource: "a"}] = func() {}
 	mgr.stoppers[schema.GroupVersionResource{Resource: "b"}] = func() {}
 
-	mgr.StopAll()
+	if err := mgr.StopAll(context.Background()); err != nil {
+		t.Fatalf("StopAll: %v", err)
+	}
 
 	select {
 	case got := <-removeCh:
@@ -331,7 +333,9 @@ func TestInformerManager_StopAll(t *testing.T) {
 	mgr.stoppers[schema.GroupVersionResource{Resource: "a"}] = func() { called++ }
 	mgr.stoppers[schema.GroupVersionResource{Resource: "b"}] = func() { called++ }
 
-	mgr.StopAll()
+	if err := mgr.StopAll(context.Background()); err != nil {
+		t.Fatalf("StopAll: %v", err)
+	}
 
 	if called != 2 {
 		t.Errorf("expected 2 stoppers called, got %d", called)

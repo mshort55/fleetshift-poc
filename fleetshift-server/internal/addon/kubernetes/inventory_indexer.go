@@ -65,6 +65,11 @@ func newIndexerDelegate(
 // start runs the informer manager and writer until ctx is cancelled.
 // It discovers all supported GVRs, filters them through deny/allow lists,
 // and uses RunContinuous to watch for CRD changes and re-reconcile.
+//
+// On shutdown, done closes only after ordinary and CRD informers have been
+// awaited and the writer has finished its final flush under a shared
+// shutdown deadline. That means no further inventory reporter / database
+// calls are made for this target after done closes.
 func (ic *indexerDelegate) start(ctx context.Context) {
 	defer close(ic.done)
 
@@ -87,7 +92,9 @@ func (ic *indexerDelegate) start(ctx context.Context) {
 		ic.logger,
 	)
 
-	writerCtx, writerCancel := context.WithCancel(ctx)
+	// Writer is not a child of ctx: ctx cancel must stop producers first,
+	// then stop the writer under the shared shutdown budget.
+	writerCtx, writerCancel := context.WithCancel(context.Background())
 	defer writerCancel()
 
 	writerDone := make(chan struct{})
@@ -100,10 +107,23 @@ func (ic *indexerDelegate) start(ctx context.Context) {
 	// reconciliation and re-reconciling when CRDs change.
 	mgr.RunContinuous(ctx, ic.cfg.DenyList, ic.cfg.AllowList)
 
-	// Context is done; clean up informers and writer. StopAll does not
-	// emit RemoveGVR events, so local cache eviction is not persisted
-	// as object or collection deletes.
-	mgr.StopAll()
-	writerCancel()
-	<-writerDone
+	// Context is done; clean up informers and writer under one budget.
+	// StopAll does not emit RemoveGVR events, so local cache eviction is
+	// not persisted as object or collection deletes.
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), defaultStopTimeout)
+	defer shutdownCancel()
+
+	if err := mgr.StopAll(shutdownCtx); err != nil {
+		ic.logger.Warn("stop informers on shutdown incomplete", "error", err)
+	}
+
+	// Prefer Stop so the final flush inherits shutdownCtx's deadline.
+	// Only cancel the run context if the shared budget expires first.
+	w.Stop(shutdownCtx)
+	select {
+	case <-writerDone:
+	case <-shutdownCtx.Done():
+		writerCancel()
+		<-writerDone
+	}
 }

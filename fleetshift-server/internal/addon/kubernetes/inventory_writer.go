@@ -38,7 +38,15 @@ type Writer struct {
 	edgeFuncs     map[string]func(NodeStore) []Edge
 	previousEdges map[edgeKey]Edge
 	logger        *slog.Logger
+
+	// stopCh requests a shutdown flush under a caller-provided context.
+	// Buffered so Stop does not block if Run has already exited.
+	stopCh chan context.Context
 }
+
+// defaultWriterShutdownFlushTimeout is used when Run's context is canceled
+// without an explicit [Writer.Stop] flush context (and without a deadline).
+const defaultWriterShutdownFlushTimeout = 5 * time.Second
 
 // NewWriter creates a Writer that batches events over batchInterval and
 // reports them via reporter. If edgeSink is nil, [NoopEdgeSink] is used.
@@ -69,6 +77,7 @@ func NewWriter(
 		edgeFuncs:     make(map[string]func(NodeStore) []Edge),
 		previousEdges: make(map[edgeKey]Edge),
 		logger:        logger,
+		stopCh:        make(chan context.Context, 1),
 	}
 }
 
@@ -82,10 +91,25 @@ func (w *Writer) ResyncCh() chan<- ResyncEvent { return w.resyncCh }
 // longer being indexed and its inventory collection should be deleted.
 func (w *Writer) RemoveCh() chan<- RemoveGVREvent { return w.removeCh }
 
-// Run starts the event loop. It blocks until ctx is cancelled, flushing any
-// remaining batch before returning. Informer shutdown flushes real pending
-// object events only; it does not turn local cache eviction into persisted
-// deletes, and it does not emit RemoveGVR / DeleteCollection commands.
+// Stop requests that Run perform a final flush under flushCtx and then
+// return. It is safe to call Stop more than once; only the first request
+// is delivered. Prefer Stop over canceling Run's context when a shared
+// shutdown deadline must govern the final flush.
+func (w *Writer) Stop(flushCtx context.Context) {
+	if flushCtx == nil {
+		flushCtx = context.Background()
+	}
+	select {
+	case w.stopCh <- flushCtx:
+	default:
+	}
+}
+
+// Run starts the event loop. It blocks until Stop is called or ctx is
+// cancelled, flushing any remaining batch before returning. Informer
+// shutdown flushes real pending object events only; it does not turn local
+// cache eviction into persisted deletes, and it does not emit RemoveGVR /
+// DeleteCollection commands.
 func (w *Writer) Run(ctx context.Context) {
 	batchTicker := time.NewTicker(w.batchInterval)
 	defer batchTicker.Stop()
@@ -98,12 +122,23 @@ func (w *Writer) Run(ctx context.Context) {
 	// Dedup: tracks UID -> last-sent resourceVersion.
 	sentVersions := make(map[string]string)
 
+	flushAndReturn := func(flushCtx context.Context) {
+		if flushCtx == nil {
+			flushCtx = context.Background()
+		}
+		w.flush(flushCtx, pendingUpserts, pendingUpsertGVR, pendingDeletes, sentVersions)
+	}
+
 	for {
 		select {
+		case flushCtx := <-w.stopCh:
+			flushAndReturn(flushCtx)
+			return
+
 		case <-ctx.Done():
-			shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
-			w.flush(shutdownCtx, pendingUpserts, pendingUpsertGVR, pendingDeletes, sentVersions)
-			shutdownCancel()
+			flushCtx, flushCancel := writerShutdownFlushContext(ctx)
+			flushAndReturn(flushCtx)
+			flushCancel()
 			return
 
 		case ev := <-w.eventCh:
@@ -159,6 +194,16 @@ func (w *Writer) Run(ctx context.Context) {
 			}
 		}
 	}
+}
+
+// writerShutdownFlushContext derives a flush context after Run's context is
+// canceled. Prefer any remaining deadline on ctx; otherwise use the default
+// shutdown flush timeout.
+func writerShutdownFlushContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	if dl, ok := ctx.Deadline(); ok {
+		return context.WithDeadline(context.Background(), dl)
+	}
+	return context.WithTimeout(context.Background(), defaultWriterShutdownFlushTimeout)
 }
 
 // flush sends the accumulated batch as a single ApplyDelta call. It applies

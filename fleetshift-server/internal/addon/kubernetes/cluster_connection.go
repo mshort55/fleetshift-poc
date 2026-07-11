@@ -3,6 +3,7 @@ package kubernetes
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"k8s.io/client-go/rest"
 
@@ -24,11 +25,18 @@ const (
 	PropServiceAccountTokenRef = "service_account_token_ref"
 )
 
+// defaultKubernetesClientTimeout bounds individual Kubernetes HTTP requests
+// (including discovery ServerPreferredResources, which has no context API).
+const defaultKubernetesClientTimeout = 30 * time.Second
+
 // BuildTargetRESTConfig constructs a [rest.Config] from the target's
 // properties and optional vault-backed service account token. The
 // bearer token is optional: when neither PropServiceAccountToken nor
 // PropServiceAccountTokenRef is set, BearerToken is left empty. Used by
 // in-process indexing, which may start before credentials are present.
+//
+// Timeout is set so discovery and list/watch requests cannot hang forever
+// when the API server is unresponsive.
 func BuildTargetRESTConfig(ctx context.Context, vault domain.Vault, target domain.TargetInfo) (*rest.Config, error) {
 	props := target.Properties()
 	host := props[PropAPIServer]
@@ -36,7 +44,10 @@ func BuildTargetRESTConfig(ctx context.Context, vault domain.Vault, target domai
 		return nil, fmt.Errorf("target %q missing property %q", target.ID(), PropAPIServer)
 	}
 
-	cfg := &rest.Config{Host: host}
+	cfg := &rest.Config{
+		Host:    host,
+		Timeout: defaultKubernetesClientTimeout,
+	}
 	if ca := props[PropCACert]; ca != "" {
 		cfg.TLSClientConfig = rest.TLSClientConfig{CAData: []byte(ca)}
 	}

@@ -228,36 +228,64 @@ func (h *KubernetesInProcessIndexHost) StopIndexer(ctx context.Context, target d
 
 // StopAllIndexers stops every running in-process indexer. It is safe during server
 // shutdown and does not perform inventory cleanup.
+//
+// All indexers are canceled first, then awaited concurrently under ctx so they
+// share one shutdown deadline instead of burning it sequentially.
 func (h *KubernetesInProcessIndexHost) StopAllIndexers(ctx context.Context) error {
 	h.mu.Lock()
 	indexers := make(map[domain.TargetID]*inProcessKubernetesIndexer, len(h.running))
 	maps.Copy(indexers, h.running)
 	h.mu.Unlock()
 
-	var firstErr error
-	for id, indexer := range indexers {
+	if len(indexers) == 0 {
+		return nil
+	}
+
+	for _, indexer := range indexers {
 		indexer.cancel()
-		select {
-		case <-indexer.done:
-		case <-ctx.Done():
-			if firstErr == nil {
-				firstErr = fmt.Errorf("stop all: waiting for %s: %w", id, ctx.Err())
+	}
+
+	type waitResult struct {
+		id       domain.TargetID
+		indexer  *inProcessKubernetesIndexer
+		timedOut bool
+	}
+	results := make(chan waitResult, len(indexers))
+	for id, indexer := range indexers {
+		go func(id domain.TargetID, indexer *inProcessKubernetesIndexer) {
+			select {
+			case <-indexer.done:
+				results <- waitResult{id: id, indexer: indexer}
+			case <-ctx.Done():
+				results <- waitResult{id: id, indexer: indexer, timedOut: true}
 			}
-			go func(id domain.TargetID, indexer *inProcessKubernetesIndexer) {
-				<-indexer.done
-				h.mu.Lock()
-				if cur, still := h.running[id]; still && cur == indexer {
-					delete(h.running, id)
-				}
-				h.mu.Unlock()
-			}(id, indexer)
+		}(id, indexer)
+	}
+
+	var firstErr error
+	for range indexers {
+		r := <-results
+		if !r.timedOut {
+			h.mu.Lock()
+			if cur, still := h.running[r.id]; still && cur == r.indexer {
+				delete(h.running, r.id)
+			}
+			h.mu.Unlock()
 			continue
 		}
-		h.mu.Lock()
-		if cur, still := h.running[id]; still && cur == indexer {
-			delete(h.running, id)
+		if firstErr == nil {
+			firstErr = fmt.Errorf("stop all: waiting for %s: %w", r.id, ctx.Err())
 		}
-		h.mu.Unlock()
+		// Leave the entry tracked until the indexer finishes so a concurrent
+		// StartIndexer cannot start a duplicate.
+		go func(id domain.TargetID, indexer *inProcessKubernetesIndexer) {
+			<-indexer.done
+			h.mu.Lock()
+			if cur, still := h.running[id]; still && cur == indexer {
+				delete(h.running, id)
+			}
+			h.mu.Unlock()
+		}(r.id, r.indexer)
 	}
 	return firstErr
 }
