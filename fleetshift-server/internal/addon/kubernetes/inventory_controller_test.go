@@ -57,6 +57,10 @@ type fakeIndexRuntime struct {
 	lastStopTimeout time.Duration // 0 if StopIndexer ctx had no deadline
 	startedCh       chan struct{}
 	stoppedCh       chan struct{}
+	// Optional hooks run while the controller holds the per-target op
+	// lock, so tests can inject terminating mid start/stop.
+	startHook func(domain.TargetID)
+	stopHook  func(domain.TargetID)
 }
 
 func newFakeIndexRuntime() *fakeIndexRuntime {
@@ -68,6 +72,13 @@ func newFakeIndexRuntime() *fakeIndexRuntime {
 }
 
 func (r *fakeIndexRuntime) StartIndexer(_ context.Context, target domain.TargetInfo) error {
+	r.mu.Lock()
+	hook := r.startHook
+	r.mu.Unlock()
+	if hook != nil {
+		hook(target.ID())
+	}
+
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.calls = append(r.calls, runtimeCall{op: "start", target: target.ID()})
@@ -86,6 +97,13 @@ func (r *fakeIndexRuntime) StartIndexer(_ context.Context, target domain.TargetI
 }
 
 func (r *fakeIndexRuntime) StopIndexer(ctx context.Context, target domain.TargetInfo) error {
+	r.mu.Lock()
+	hook := r.stopHook
+	r.mu.Unlock()
+	if hook != nil {
+		hook(target.ID())
+	}
+
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.calls = append(r.calls, runtimeCall{op: "stop", target: target.ID()})
@@ -547,8 +565,8 @@ func TestInProcessIndexController_DuplicateNotificationsHarmless(t *testing.T) {
 	}
 }
 
-func TestInProcessIndexController_TerminatingNotificationBoundedStop(t *testing.T) {
-	// Target stays listed: stop must come from the terminating hint itself,
+func TestInProcessIndexController_OnTargetDrainingBoundedStop(t *testing.T) {
+	// Target stays listed: stop must come from OnTargetDraining itself,
 	// not from the "no longer listed" undesired path.
 	lister := &fakeTargetLister{}
 	target := readyKubeTarget("t1", nil)
@@ -558,11 +576,13 @@ func TestInProcessIndexController_TerminatingNotificationBoundedStop(t *testing.
 	_, ctrl := startController(t, lister, runtime, WithReconcileInterval(time.Hour))
 	waitFor(t, runtime.startedCh, "start")
 
-	ctrl.NotifyTargetTerminating(context.Background(), target)
-	waitFor(t, runtime.stoppedCh, "terminating stop")
+	if err := ctrl.OnTargetDraining(context.Background(), target); err != nil {
+		t.Fatalf("OnTargetDraining: %v", err)
+	}
+	waitFor(t, runtime.stoppedCh, "OnTargetDraining stop")
 
 	if runtime.isRunning("t1") {
-		t.Fatal("expected terminating notification to stop the in-process indexer")
+		t.Fatal("expected OnTargetDraining to stop the in-process indexer")
 	}
 }
 
@@ -575,12 +595,14 @@ func TestInProcessIndexController_TerminatingTargetDoesNotRestartWhileStillListe
 	_, ctrl := startController(t, lister, runtime, WithReconcileInterval(time.Hour))
 	waitFor(t, runtime.startedCh, "start")
 
-	ctrl.NotifyTargetTerminating(context.Background(), target)
-	waitFor(t, runtime.stoppedCh, "terminating stop")
+	if err := ctrl.OnTargetDraining(context.Background(), target); err != nil {
+		t.Fatalf("OnTargetDraining: %v", err)
+	}
+	waitFor(t, runtime.stoppedCh, "OnTargetDraining stop")
 
 	select {
 	case <-runtime.startedCh:
-		t.Fatal("terminating target restarted while still listed")
+		t.Fatal("draining target restarted while still listed")
 	case <-time.After(50 * time.Millisecond):
 	}
 
@@ -604,8 +626,10 @@ func TestInProcessIndexController_ReadyNotificationClearsTerminatingSuppression(
 	_, ctrl := startController(t, lister, runtime, WithReconcileInterval(time.Hour))
 	waitFor(t, runtime.startedCh, "start")
 
-	ctrl.NotifyTargetTerminating(context.Background(), target)
-	waitFor(t, runtime.stoppedCh, "terminating stop")
+	if err := ctrl.OnTargetDraining(context.Background(), target); err != nil {
+		t.Fatalf("OnTargetDraining: %v", err)
+	}
+	waitFor(t, runtime.stoppedCh, "OnTargetDraining stop")
 
 	ctrl.NotifyTargetReady(context.Background(), target)
 	waitFor(t, runtime.startedCh, "restart after ready")
@@ -801,8 +825,10 @@ func TestInProcessIndexController_WithStopTimeoutAppliedOnTerminating(t *testing
 	)
 	waitFor(t, runtime.startedCh, "start")
 
-	ctrl.NotifyTargetTerminating(context.Background(), target)
-	waitFor(t, runtime.stoppedCh, "terminating stop")
+	if err := ctrl.OnTargetDraining(context.Background(), target); err != nil {
+		t.Fatalf("OnTargetDraining: %v", err)
+	}
+	waitFor(t, runtime.stoppedCh, "OnTargetDraining stop")
 
 	runtime.mu.Lock()
 	got := runtime.lastStopTimeout
@@ -937,7 +963,7 @@ func TestInProcessIndexController_FingerprintRestartStopFailureSkipsStart(t *tes
 	}
 }
 
-func TestInProcessIndexController_TerminatingStopFailureStillSuppressesRestart(t *testing.T) {
+func TestInProcessIndexController_OnTargetDrainingStopFailureReturnsErrorAndSuppressesRestart(t *testing.T) {
 	lister := &fakeTargetLister{}
 	target := readyKubeTarget("t1", nil)
 	lister.set(target)
@@ -949,12 +975,14 @@ func TestInProcessIndexController_TerminatingStopFailureStillSuppressesRestart(t
 	runtime.mu.Lock()
 	runtime.stopErr = errors.New("bounded stop failed")
 	runtime.mu.Unlock()
-	ctrl.NotifyTargetTerminating(context.Background(), target)
+	if err := ctrl.OnTargetDraining(context.Background(), target); err == nil {
+		t.Fatal("OnTargetDraining error = nil, want stop failure")
+	}
 	time.Sleep(30 * time.Millisecond)
 
 	select {
 	case <-runtime.startedCh:
-		t.Fatal("terminating target restarted after stop failure")
+		t.Fatal("draining target restarted after stop failure")
 	case <-time.After(50 * time.Millisecond):
 	}
 
@@ -978,16 +1006,22 @@ func TestInProcessIndexController_TerminatingClearedWhenTargetLeavesList(t *test
 	_, ctrl := startController(t, lister, runtime, WithReconcileInterval(time.Hour))
 	waitFor(t, runtime.startedCh, "start")
 
-	ctrl.NotifyTargetTerminating(context.Background(), target)
-	waitFor(t, runtime.stoppedCh, "terminating stop")
+	if err := ctrl.OnTargetDraining(context.Background(), target); err != nil {
+		t.Fatalf("OnTargetDraining: %v", err)
+	}
+	waitFor(t, runtime.stoppedCh, "OnTargetDraining stop")
 
 	lister.set()
 	other := readyKubeTarget("other", nil)
-	ctrl.NotifyTargetTerminating(context.Background(), other)
+	if err := ctrl.OnTargetDraining(context.Background(), other); err != nil {
+		t.Fatalf("OnTargetDraining(other): %v", err)
+	}
 	time.Sleep(30 * time.Millisecond)
 
 	lister.set(target)
-	ctrl.NotifyTargetTerminating(context.Background(), other)
+	if err := ctrl.OnTargetDraining(context.Background(), other); err != nil {
+		t.Fatalf("OnTargetDraining(other again): %v", err)
+	}
 	waitFor(t, runtime.startedCh, "restart after terminating cleared")
 
 	starts := 0
@@ -1310,9 +1344,11 @@ func TestInProcessIndexController_TerminatingDuringFingerprintRestartSkipsStart(
 	ctrl.NotifyTargetReady(context.Background(), readyKubeTarget("t1", props))
 	waitFor(t, enteredDesired, "desired blocked")
 
-	ctrl.NotifyTargetTerminating(context.Background(), readyKubeTarget("t1", props))
+	if err := ctrl.OnTargetDraining(context.Background(), readyKubeTarget("t1", props)); err != nil {
+		t.Fatalf("OnTargetDraining: %v", err)
+	}
 	close(releaseDesired)
-	waitFor(t, runtime.stoppedCh, "terminating or fingerprint stop")
+	waitFor(t, runtime.stoppedCh, "OnTargetDraining or fingerprint stop")
 	time.Sleep(30 * time.Millisecond)
 
 	starts := 0
@@ -1322,7 +1358,146 @@ func TestInProcessIndexController_TerminatingDuringFingerprintRestartSkipsStart(
 		}
 	}
 	if starts != 1 {
-		t.Fatalf("starts = %d, want 1 (restart skipped while terminating)", starts)
+		t.Fatalf("starts = %d, want 1 (restart skipped while OnTargetDraining)", starts)
+	}
+}
+
+func TestInProcessIndexController_FingerprintRestartSkipsStartWhenTerminatingSetDuringStop(t *testing.T) {
+	lister := &fakeTargetLister{}
+	props := map[string]string{
+		PropAPIServer:           "https://127.0.0.1:6443",
+		PropServiceAccountToken: "token-1",
+	}
+	lister.set(readyKubeTarget("t1", props))
+	runtime := newFakeIndexRuntime()
+
+	_, ctrl := startController(t, lister, runtime, WithReconcileInterval(time.Hour))
+	waitFor(t, runtime.startedCh, "start")
+
+	runtime.mu.Lock()
+	runtime.stopHook = func(id domain.TargetID) {
+		ctrl.mu.Lock()
+		ctrl.terminating[id] = struct{}{}
+		ctrl.mu.Unlock()
+	}
+	runtime.mu.Unlock()
+
+	props[PropServiceAccountToken] = "token-2"
+	lister.set(readyKubeTarget("t1", props))
+	ctrl.NotifyTargetReady(context.Background(), readyKubeTarget("t1", props))
+	waitFor(t, runtime.stoppedCh, "fingerprint stop")
+	time.Sleep(30 * time.Millisecond)
+
+	starts := 0
+	for _, op := range runtime.callOps() {
+		if op == "start:t1" {
+			starts++
+		}
+	}
+	if starts != 1 {
+		t.Fatalf("starts = %d, want 1 (start skipped after terminating set during stop)", starts)
+	}
+	if runtime.isRunning("t1") {
+		t.Fatal("expected indexer stopped and not restarted")
+	}
+}
+
+func TestInProcessIndexController_StartAbortedWhenTerminatingSetDuringStart(t *testing.T) {
+	lister := &fakeTargetLister{}
+	target := readyKubeTarget("t1", nil)
+	lister.set(target)
+	runtime := newFakeIndexRuntime()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	ctrl := NewInProcessIndexController(
+		lister,
+		runtime,
+		DefaultInProcessIndexPolicy{},
+		slog.New(slog.DiscardHandler),
+		WithReconcileInterval(time.Hour),
+	)
+	runtime.mu.Lock()
+	runtime.startHook = func(id domain.TargetID) {
+		ctrl.mu.Lock()
+		ctrl.terminating[id] = struct{}{}
+		ctrl.mu.Unlock()
+	}
+	runtime.mu.Unlock()
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		ctrl.Run(ctx)
+	}()
+	t.Cleanup(func() {
+		cancel()
+		<-done
+	})
+
+	waitFor(t, runtime.stoppedCh, "abort stop after start-during-terminating")
+	time.Sleep(30 * time.Millisecond)
+
+	if runtime.isRunning("t1") {
+		t.Fatal("expected post-start abort to stop the indexer")
+	}
+	ctrl.mu.Lock()
+	_, tracked := ctrl.running["t1"]
+	ctrl.mu.Unlock()
+	if tracked {
+		t.Fatal("controller must not track an indexer aborted by terminating race")
+	}
+}
+
+func TestInProcessIndexController_StartAbortStopFailureStillUntracks(t *testing.T) {
+	lister := &fakeTargetLister{}
+	target := readyKubeTarget("t1", nil)
+	lister.set(target)
+	runtime := newFakeIndexRuntime()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	ctrl := NewInProcessIndexController(
+		lister,
+		runtime,
+		DefaultInProcessIndexPolicy{},
+		slog.New(slog.DiscardHandler),
+		WithReconcileInterval(time.Hour),
+	)
+	runtime.mu.Lock()
+	runtime.stopErr = errors.New("abort stop failed")
+	runtime.startHook = func(id domain.TargetID) {
+		ctrl.mu.Lock()
+		ctrl.terminating[id] = struct{}{}
+		ctrl.mu.Unlock()
+	}
+	runtime.mu.Unlock()
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		ctrl.Run(ctx)
+	}()
+	t.Cleanup(func() {
+		cancel()
+		<-done
+	})
+
+	waitFor(t, runtime.startedCh, "start before failed abort stop")
+	time.Sleep(50 * time.Millisecond)
+
+	ctrl.mu.Lock()
+	_, tracked := ctrl.running["t1"]
+	ctrl.mu.Unlock()
+	if tracked {
+		t.Fatal("controller must not track indexer when abort-stop fails")
+	}
+	stops := 0
+	for _, op := range runtime.callOps() {
+		if op == "stop:t1" {
+			stops++
+		}
+	}
+	if stops < 1 {
+		t.Fatal("expected abort path to attempt StopIndexer")
 	}
 }
 

@@ -59,6 +59,7 @@ func TestOrchestrationCleanupTargetIndexedInventory_RealKubernetesCleaner(t *tes
 	}
 
 	hooks := application.NewTargetOutputHookService(
+		store,
 		application.WithTargetIndexedInventoryCleaner(
 			kubernetes.TargetType,
 			kubernetes.NewKubernetesTargetIndexedInventoryCleaner(subtrees),

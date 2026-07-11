@@ -706,7 +706,8 @@ func Test_ControllerIndexesRegisteredTarget(t *testing.T) {
 	)
 	cleaner := kubeaddon.NewKubernetesTargetIndexedInventoryCleaner(subtrees)
 	hooks := application.NewTargetOutputHookService(
-		application.WithTargetRuntimeNotifier(controller),
+		store,
+		application.WithTargetRuntimeHooks(controller),
 		application.WithTargetIndexedInventoryCleaner(kubeaddon.TargetType, cleaner),
 	)
 

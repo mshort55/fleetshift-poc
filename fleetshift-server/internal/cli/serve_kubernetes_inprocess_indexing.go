@@ -52,7 +52,8 @@ func newKubernetesInProcessIndexing(
 		logger,
 	)
 	hooks := application.NewTargetOutputHookService(
-		application.WithTargetRuntimeNotifier(controller),
+		store,
+		application.WithTargetRuntimeHooks(controller),
 		application.WithTargetIndexedInventoryCleaner(
 			kubernetesaddon.TargetType,
 			kubernetesaddon.NewKubernetesTargetIndexedInventoryCleaner(targetInventoryCleanupSvc),
@@ -97,11 +98,12 @@ func newDirectInventoryReportBackend(
 	return &directInventoryReportBackend{reports: reports, subtrees: subtrees}
 }
 
-// Compile-time check that the addon controller satisfies the
-// application notifier port. Kept here (composition) because the
-// implementer and the interface live in different packages; the two
-// local adapters omit this pattern since New* already type-checks them.
-var _ application.TargetRuntimeNotifier = (*kubernetesaddon.InProcessIndexController)(nil)
+// Compile-time check that the addon controller satisfies
+// application.TargetRuntimeHooks (ready hint + OnTargetDraining). Kept here
+// (composition) because the implementer and the interface live in
+// different packages; the two local adapters omit this pattern since
+// New* already type-checks them.
+var _ application.TargetRuntimeHooks = (*kubernetesaddon.InProcessIndexController)(nil)
 
 // ReplaceBatch implements [kubernetesaddon.InventoryReportBackend].
 func (b *directInventoryReportBackend) ReplaceBatch(ctx context.Context, resourceType domain.ResourceType, reports []kubernetesaddon.InventoryObjectReport) error {

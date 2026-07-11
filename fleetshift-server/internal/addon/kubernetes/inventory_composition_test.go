@@ -318,11 +318,23 @@ func TestStopBeforeCleanup_NoRecreateAfterSubtreeDelete(t *testing.T) {
 	)
 	cleaner := NewKubernetesTargetIndexedInventoryCleaner(application.NewTargetInventoryCleanupService(store))
 	hooks := application.NewTargetOutputHookService(
-		application.WithTargetRuntimeNotifier(controller),
+		store,
+		application.WithTargetRuntimeHooks(controller),
 		application.WithTargetIndexedInventoryCleaner(TargetType, cleaner),
 	)
 
 	target := compositionTarget("prod", InventoryModeInProcess)
+	tx, err := store.Begin(context.Background())
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	if err := tx.Targets().Create(context.Background(), target); err != nil {
+		t.Fatalf("Create target: %v", err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("commit target: %v", err)
+	}
+
 	if err := host.StartIndexer(context.Background(), target); err != nil {
 		t.Fatalf("StartIndexer: %v", err)
 	}
@@ -336,14 +348,28 @@ func TestStopBeforeCleanup_NoRecreateAfterSubtreeDelete(t *testing.T) {
 		return false
 	})
 
-	// Do not pre-stop the indexer: BeforeTargetDeleted must stop it, then
+	// Do not pre-stop the indexer: BeforeTargetDeleted must drain, stop it, then
 	// delete the subtree, while the fake API still has the pod.
 	if err := hooks.BeforeTargetDeleted(context.Background(), target); err != nil {
 		t.Fatalf("BeforeTargetDeleted: %v", err)
 	}
 	if host.HasIndexer("prod") {
-		t.Fatal("indexer should be stopped after terminating hint")
+		t.Fatal("indexer should be stopped after OnTargetDraining")
 	}
+
+	readTx, err := store.BeginReadOnly(context.Background())
+	if err != nil {
+		t.Fatalf("begin read: %v", err)
+	}
+	gotTarget, err := readTx.Targets().Get(context.Background(), "prod")
+	readTx.Rollback()
+	if err != nil {
+		t.Fatalf("Get target after BeforeTargetDeleted: %v", err)
+	}
+	if gotTarget.State() != domain.TargetStateDraining {
+		t.Fatalf("target state = %q, want draining", gotTarget.State())
+	}
+
 	if got := objectsForTarget(listObjectInventory(t, store), "prod"); len(got) != 0 {
 		t.Fatalf("expected empty inventory after cleanup, got %d objects", len(got))
 	}
@@ -624,7 +650,8 @@ func TestServeStyleComposition_ControllerIndexesRegisteredTarget(t *testing.T) {
 	)
 	cleaner := NewKubernetesTargetIndexedInventoryCleaner(application.NewTargetInventoryCleanupService(store))
 	hooks := application.NewTargetOutputHookService(
-		application.WithTargetRuntimeNotifier(controller),
+		store,
+		application.WithTargetRuntimeHooks(controller),
 		application.WithTargetIndexedInventoryCleaner(TargetType, cleaner),
 	)
 

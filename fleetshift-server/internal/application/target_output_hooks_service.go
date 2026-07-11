@@ -2,37 +2,44 @@ package application
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"maps"
 
 	"github.com/fleetshift/fleetshift-poc/fleetshift-server/internal/domain"
 )
 
-// TargetRuntimeNotifier receives non-failing lifecycle hints for a
-// target as it becomes ready or begins terminating. Implementations
-// must not return an error to orchestration: if a hint cannot be
-// acted on (e.g. a local runtime cannot be woken or stopped),
-// implementations should log internally and return. The target store
-// plus periodic reconcile in the interested runtime remains the
-// correctness path; these hints only reduce latency and reduce a
-// cleanup race.
-type TargetRuntimeNotifier interface {
+// TargetRuntimeHooks receives target lifecycle signals for a
+// server-hosted runtime that reacts to target readiness and draining.
+//
+// NotifyTargetReady is a non-failing wake-up hint: if the runtime cannot
+// act on it, implementations log internally and return.
+//
+// OnTargetDraining is a failing barrier used after the target has been
+// marked draining: implementations must stop local runtime work for that
+// target and return any failure so callers can retry. It does not change
+// target lifecycle state; durability of draining is owned by the caller.
+type TargetRuntimeHooks interface {
 	// NotifyTargetReady is called after target registration commits. It
 	// is a wake-up hint only.
 	NotifyTargetReady(ctx context.Context, target domain.TargetInfo)
 
-	// NotifyTargetTerminating is called before target-owned indexed
-	// inventory cleanup for this target. The target row still exists
-	// when this fires. It is a bounded, best-effort stop hint only.
-	NotifyTargetTerminating(ctx context.Context, target domain.TargetInfo)
+	// OnTargetDraining is called after the target has been marked
+	// draining and before platform cleanup that must not race still-
+	// running local work. The target row still exists when this fires.
+	// A failure to stop local runtime work for the target must be
+	// returned.
+	OnTargetDraining(ctx context.Context, target domain.TargetInfo) error
 }
 
-// NoOpTargetRuntimeNotifier is a [TargetRuntimeNotifier] that does
-// nothing. It is the default when no notifier is configured.
-type NoOpTargetRuntimeNotifier struct{}
+// NoOpTargetRuntimeHooks is a [TargetRuntimeHooks] that does nothing.
+// It is the default when no runtime hooks are configured.
+type NoOpTargetRuntimeHooks struct{}
 
-func (NoOpTargetRuntimeNotifier) NotifyTargetReady(context.Context, domain.TargetInfo)       {}
-func (NoOpTargetRuntimeNotifier) NotifyTargetTerminating(context.Context, domain.TargetInfo) {}
+func (NoOpTargetRuntimeHooks) NotifyTargetReady(context.Context, domain.TargetInfo) {}
+func (NoOpTargetRuntimeHooks) OnTargetDraining(context.Context, domain.TargetInfo) error {
+	return nil
+}
 
 // TargetIndexedInventoryCleaner performs platform-owned cleanup of
 // source-owned indexed inventory for a single target when the target
@@ -46,11 +53,12 @@ type TargetIndexedInventoryCleaner interface {
 
 // TargetOutputHookService implements [domain.TargetOutputHooks]
 // for delivery-produced target outputs. It owns the application-level
-// composition of non-failing target runtime notifiers and
-// platform-owned target indexed inventory cleaners, keeping that
-// registry out of the orchestration workflow spec.
+// composition of [TargetRuntimeHooks] and
+// [TargetIndexedInventoryCleaner] registrations, keeping that registry
+// out of the orchestration workflow spec.
 type TargetOutputHookService struct {
-	notifier TargetRuntimeNotifier
+	store    domain.Store
+	runtime  TargetRuntimeHooks
 	cleaners map[domain.TargetType]TargetIndexedInventoryCleaner
 }
 
@@ -58,12 +66,12 @@ type TargetOutputHookService struct {
 // [TargetOutputHookService].
 type TargetOutputHookServiceOption func(*TargetOutputHookService)
 
-// WithTargetRuntimeNotifier sets the non-failing notifier that
-// receives target ready and terminating hints.
-func WithTargetRuntimeNotifier(notifier TargetRuntimeNotifier) TargetOutputHookServiceOption {
+// WithTargetRuntimeHooks sets the hooks that receive target ready
+// hints and draining barriers.
+func WithTargetRuntimeHooks(hooks TargetRuntimeHooks) TargetOutputHookServiceOption {
 	return func(s *TargetOutputHookService) {
-		if notifier != nil {
-			s.notifier = notifier
+		if hooks != nil {
+			s.runtime = hooks
 		}
 	}
 }
@@ -89,9 +97,11 @@ func WithTargetIndexedInventoryCleaners(cleaners map[domain.TargetType]TargetInd
 }
 
 // NewTargetOutputHookService creates a target output hook service.
-func NewTargetOutputHookService(opts ...TargetOutputHookServiceOption) *TargetOutputHookService {
+// store is required for the durable ready-to-draining compare-and-swap on delete.
+func NewTargetOutputHookService(store domain.Store, opts ...TargetOutputHookServiceOption) *TargetOutputHookService {
 	s := &TargetOutputHookService{
-		notifier: NoOpTargetRuntimeNotifier{},
+		store:    store,
+		runtime:  NoOpTargetRuntimeHooks{},
 		cleaners: make(map[domain.TargetType]TargetIndexedInventoryCleaner),
 	}
 	for _, o := range opts {
@@ -102,16 +112,23 @@ func NewTargetOutputHookService(opts ...TargetOutputHookServiceOption) *TargetOu
 
 // AfterTargetRegistered sends a non-failing target-ready hint.
 func (s *TargetOutputHookService) AfterTargetRegistered(ctx context.Context, target domain.TargetInfo) {
-	s.notifier.NotifyTargetReady(ctx, target)
+	s.runtime.NotifyTargetReady(ctx, target)
 }
 
-// BeforeTargetDeleted sends a non-failing terminating hint, then
-// runs the platform-owned indexed inventory cleaner registered for the
-// target type. A target type with no cleaner registration is treated as
-// having no indexed inventory. A target type registered with a nil
-// cleaner is a wiring error and fails cleanup.
+// BeforeTargetDeleted marks the target draining (compare-and-swap), asks the runtime
+// to stop local work for it (failing on errors), then runs the
+// platform-owned indexed inventory cleaner registered for the target
+// type. A target type with no cleaner registration is treated as having
+// no indexed inventory. A target type registered with a nil cleaner is
+// a wiring error and fails cleanup.
 func (s *TargetOutputHookService) BeforeTargetDeleted(ctx context.Context, target domain.TargetInfo) error {
-	s.notifier.NotifyTargetTerminating(ctx, target)
+	if err := s.markDraining(ctx, target.ID()); err != nil {
+		return fmt.Errorf("mark target %s draining: %w", target.ID(), err)
+	}
+
+	if err := s.runtime.OnTargetDraining(ctx, target); err != nil {
+		return fmt.Errorf("on target draining %s: %w", target.ID(), err)
+	}
 
 	cleaner, declared := s.cleaners[target.Type()]
 	if !declared {
@@ -126,4 +143,24 @@ func (s *TargetOutputHookService) BeforeTargetDeleted(ctx context.Context, targe
 		return fmt.Errorf("cleanup indexed inventory for target %s: %w", target.ID(), err)
 	}
 	return nil
+}
+
+// markDraining compare-and-swaps ready to draining without rewriting other
+// target columns. Already-draining and already-deleted targets are
+// treated as success so cleanup retries stay idempotent.
+func (s *TargetOutputHookService) markDraining(ctx context.Context, id domain.TargetID) error {
+	tx, err := s.store.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin tx: %w", err)
+	}
+	defer tx.Rollback()
+
+	err = tx.Targets().TransitionState(ctx, id, domain.TargetStateReady, domain.TargetStateDraining)
+	if errors.Is(err, domain.ErrNotFound) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	return tx.Commit()
 }

@@ -194,6 +194,7 @@ func TestKubernetesTargetIndexedInventoryCleaner_ComposedWithTargetOutputHookSer
 
 	cleaner := kubernetes.NewKubernetesTargetIndexedInventoryCleaner(application.NewTargetInventoryCleanupService(store))
 	hooks := application.NewTargetOutputHookService(
+		store,
 		application.WithTargetIndexedInventoryCleaner(kubernetes.TargetType, cleaner),
 	)
 

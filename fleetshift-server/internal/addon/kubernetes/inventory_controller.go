@@ -145,9 +145,10 @@ type runningTarget struct {
 }
 
 // InProcessIndexController reconciles in-process Kubernetes indexers against
-// the target store. Target lifecycle notifications are wake-up and
-// bounded-stop hints only; startup and periodic reconcile remain the
-// correctness path.
+// the target store. NotifyTargetReady is a wake-up hint; OnTargetDraining is a
+// failing barrier that stops local indexer work for a draining target.
+// Startup and periodic reconcile remain the correctness path for desired
+// indexer state.
 type InProcessIndexController struct {
 	targets        TargetLister
 	runtime        InProcessIndexRuntime
@@ -161,11 +162,13 @@ type InProcessIndexController struct {
 	mu      sync.Mutex
 	running map[domain.TargetID]runningTarget
 	// terminating suppresses in-process restarts while target cleanup is in
-	// progress and the target row may still be visible to reconcile.
-	// TODO: target terminating state should eventually be saved on
-	// target itself in platform db. Change this when target status gets
-	// implemented at platform level.
+	// progress. Durable draining on the target row is the restart-safe
+	// barrier; this map covers the in-process window where reconcile may
+	// still act on a pre-drain list snapshot or a stop is still in flight.
 	terminating map[domain.TargetID]struct{}
+	// targetOps serializes start/stop/OnTargetDraining for a single target so
+	// reconcile cannot restart an indexer while OnTargetDraining is stopping it.
+	targetOps map[domain.TargetID]*sync.Mutex
 }
 
 // InProcessIndexControllerOption configures an [InProcessIndexController].
@@ -182,7 +185,7 @@ func WithReconcileInterval(d time.Duration) InProcessIndexControllerOption {
 }
 
 // WithStopTimeout overrides the bounded stop timeout used for
-// terminating notifications. Non-positive values are ignored.
+// OnTargetDraining and reconcile stops. Non-positive values are ignored.
 func WithStopTimeout(d time.Duration) InProcessIndexControllerOption {
 	return func(c *InProcessIndexController) {
 		if d > 0 {
@@ -212,6 +215,7 @@ func NewInProcessIndexController(
 		wakeCh:         make(chan struct{}, 1),
 		running:        make(map[domain.TargetID]runningTarget),
 		terminating:    make(map[domain.TargetID]struct{}),
+		targetOps:      make(map[domain.TargetID]*sync.Mutex),
 	}
 	for _, o := range opts {
 		o(c)
@@ -228,27 +232,28 @@ func (c *InProcessIndexController) NotifyTargetReady(_ context.Context, target d
 	c.wake()
 }
 
-// NotifyTargetTerminating requests a bounded best-effort stop for the
-// target, then wakes reconcile. Stop failures are logged only.
-func (c *InProcessIndexController) NotifyTargetTerminating(ctx context.Context, target domain.TargetInfo) {
+// OnTargetDraining records in-memory terminating suppression, stops the
+// target's in-process indexer with a bounded timeout, and returns stop
+// failures so cleanup can retry. It serializes against reconcile
+// start/stop for the same target.
+func (c *InProcessIndexController) OnTargetDraining(ctx context.Context, target domain.TargetInfo) error {
+	op := c.lockTarget(target.ID())
+	defer op.Unlock()
+
 	c.mu.Lock()
 	c.terminating[target.ID()] = struct{}{}
 	c.mu.Unlock()
 
-	stopCtx, cancel := context.WithTimeout(ctx, c.stopTimeout)
-	defer cancel()
-	if err := c.runtime.StopIndexer(stopCtx, target); err != nil {
-		c.logger.Warn("bounded stop on terminating target failed",
-			"target", string(target.ID()),
-			"error", err,
-		)
+	if err := c.stopIndexerBounded(ctx, target); err != nil {
 		c.wake()
-		return
+		return fmt.Errorf("stop indexer: %w", err)
 	}
+
 	c.mu.Lock()
 	delete(c.running, target.ID())
 	c.mu.Unlock()
 	c.wake()
+	return nil
 }
 
 // Run performs an initial reconcile, then reconciles on wake-ups and
@@ -286,6 +291,19 @@ func (c *InProcessIndexController) wake() {
 	case c.wakeCh <- struct{}{}:
 	default:
 	}
+}
+
+// lockTarget returns the per-target ops mutex, already locked.
+func (c *InProcessIndexController) lockTarget(id domain.TargetID) *sync.Mutex {
+	c.mu.Lock()
+	m, ok := c.targetOps[id]
+	if !ok {
+		m = &sync.Mutex{}
+		c.targetOps[id] = m
+	}
+	c.mu.Unlock()
+	m.Lock()
+	return m
 }
 
 func (c *InProcessIndexController) reconcile(ctx context.Context) {
@@ -334,7 +352,9 @@ func (c *InProcessIndexController) reconcile(ctx context.Context) {
 		if _, ok := desired[id]; ok {
 			continue
 		}
+		op := c.lockTarget(id)
 		if err := c.stopIndexerBounded(ctx, rt.Target); err != nil {
+			op.Unlock()
 			c.logger.Warn("stop undesired in-process indexer failed",
 				"target", string(id),
 				"error", err,
@@ -344,13 +364,17 @@ func (c *InProcessIndexController) reconcile(ctx context.Context) {
 		c.mu.Lock()
 		delete(c.running, id)
 		c.mu.Unlock()
+		op.Unlock()
 	}
 
 	for id, decision := range desired {
 		target := desiredTargets[id]
+		op := c.lockTarget(id)
+
 		c.mu.Lock()
 		if _, terminating := c.terminating[id]; terminating {
 			c.mu.Unlock()
+			op.Unlock()
 			continue
 		}
 		rt, isRunning := c.running[id]
@@ -358,6 +382,7 @@ func (c *InProcessIndexController) reconcile(ctx context.Context) {
 
 		if isRunning && rt.Fingerprint == decision.Fingerprint {
 			if c.runtime.HasIndexer(id) {
+				op.Unlock()
 				continue
 			}
 			// Runner exited unexpectedly; drop controller state and
@@ -367,6 +392,7 @@ func (c *InProcessIndexController) reconcile(ctx context.Context) {
 			c.mu.Unlock()
 		} else if isRunning {
 			if err := c.stopIndexerBounded(ctx, rt.Target); err != nil {
+				op.Unlock()
 				c.logger.Warn("stop in-process indexer before fingerprint restart failed",
 					"target", string(id),
 					"error", err,
@@ -377,7 +403,17 @@ func (c *InProcessIndexController) reconcile(ctx context.Context) {
 			delete(c.running, id)
 			c.mu.Unlock()
 		}
+
+		c.mu.Lock()
+		if _, terminating := c.terminating[id]; terminating {
+			c.mu.Unlock()
+			op.Unlock()
+			continue
+		}
+		c.mu.Unlock()
+
 		if err := c.runtime.StartIndexer(ctx, target); err != nil {
+			op.Unlock()
 			c.logger.Warn("start in-process indexer failed; will retry on next reconcile",
 				"target", string(id),
 				"error", err,
@@ -385,13 +421,27 @@ func (c *InProcessIndexController) reconcile(ctx context.Context) {
 			continue
 		}
 		c.mu.Lock()
+		if _, terminating := c.terminating[id]; terminating {
+			c.mu.Unlock()
+			// Terminating was set while StartIndexer ran; stop immediately
+			// so cleanup does not race a newly started runner.
+			if stopErr := c.stopIndexerBounded(ctx, target); stopErr != nil {
+				c.logger.Warn("stop indexer started during OnTargetDraining race failed",
+					"target", string(id),
+					"error", stopErr,
+				)
+			}
+			op.Unlock()
+			continue
+		}
 		c.running[id] = runningTarget{Target: target, Fingerprint: decision.Fingerprint}
 		c.mu.Unlock()
+		op.Unlock()
 	}
 }
 
 // stopIndexerBounded stops one indexer with the controller's stop timeout,
-// matching terminating-notification bounds so reconcile retries cannot hang
+// matching OnTargetDraining bounds so reconcile retries cannot hang
 // indefinitely on a stuck runner.
 func (c *InProcessIndexController) stopIndexerBounded(ctx context.Context, target domain.TargetInfo) error {
 	stopCtx, cancel := context.WithTimeout(ctx, c.stopTimeout)
