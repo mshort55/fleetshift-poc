@@ -356,7 +356,7 @@ func (a *Agent) Remove(_ context.Context, _ domain.TargetInfo, deliveryID domain
 		defer a.inflight.Delete(deliveryID)
 		ctx := context.Background()
 
-		provider := a.providerFactory(nil)
+		provider := a.providerFactory(NewObserverLogger(context.Background(), a.reporter, deliveryID, generation, time.Now))
 		for _, spec := range specs {
 			kindName, err := encodeKindClusterName(spec.resourceID())
 			if err != nil {

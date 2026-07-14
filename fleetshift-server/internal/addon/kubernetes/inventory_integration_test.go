@@ -792,12 +792,34 @@ func skipBootstrapWait() setupOption {
 	return func(c *setupConfig) { c.skipBootstrap = true }
 }
 
+// seedKubernetesObjectType registers the Kubernetes Object extension
+// resource type so inventory writes succeed against a fresh test store.
+// Previously lived in inventory_cleaner_test.go; restored here after
+// that cleanup path was removed.
+func seedKubernetesObjectType(t *testing.T, store domain.Store) {
+	t.Helper()
+	ctx := context.Background()
+	tx, err := store.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin tx: %v", err)
+	}
+	defer tx.Rollback()
+	sch := kubeaddon.InventorySchema()
+	def := domain.NewExtensionResourceType(sch.ResourceType, domain.APIVersion(sch.Version), domain.CollectionID(sch.CollectionID), time.Now(), domain.WithInventory())
+	if err := tx.ExtensionResources().CreateType(ctx, def); err != nil {
+		t.Fatalf("CreateType: %v", err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+}
+
 func setupE2E(t *testing.T, opts ...setupOption) *e2eFixture {
 	t.Helper()
 
-	cfg := &setupConfig{}
+	setup := &setupConfig{}
 	for _, o := range opts {
-		o(cfg)
+		o(setup)
 	}
 
 	store := &sqlite.Store{DB: sqlite.OpenTestDB(t)}
@@ -830,15 +852,15 @@ func setupE2E(t *testing.T, opts ...setupOption) *e2eFixture {
 		},
 	})
 
-	cfg := kubeaddon.DefaultIndexConfig()
-	cfg.BatchInterval = 200 * time.Millisecond
+	indexCfg := kubeaddon.DefaultIndexConfig()
+	indexCfg.BatchInterval = 200 * time.Millisecond
 	if err := host.EnsureIndexer(ctx, kubeaddon.IndexRuntimeInput{
 		TargetID:    target.ID(),
 		APIServer:   fixture.apiServer,
 		CACert:      fixture.caCert,
 		Credential:  []byte(fixture.saToken),
 		Generation:  1,
-		IndexConfig: cfg,
+		IndexConfig: indexCfg,
 	}); err != nil {
 		t.Fatalf("EnsureIndexer: %v", err)
 	}
@@ -875,7 +897,7 @@ func setupE2E(t *testing.T, opts ...setupOption) *e2eFixture {
 		auth:      domain.DeliveryAuth{Token: domain.RawToken(fixture.saToken)},
 	}
 
-	if !cfg.skipBootstrap {
+	if !setup.skipBootstrap {
 		awaitInventoryMatch(t, store, func(objs []*domain.ExtensionResource) bool {
 			for _, obj := range objs {
 				inv := obj.Inventory()

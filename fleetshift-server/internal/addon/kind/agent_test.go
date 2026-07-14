@@ -75,6 +75,9 @@ func (p *fakeProvider) Create(name string, opts ...cluster.CreateOption) error {
 }
 
 func (p *fakeProvider) Delete(name, _ string) error {
+	if p.logger != nil {
+		p.logger.V(0).Infof("Deleting cluster %q", name)
+	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if p.deleteErr != nil {
@@ -444,6 +447,35 @@ func TestAgent_Deliver_WiresObserverLogger(t *testing.T) {
 	if event.Kind != domain.DeliveryEventProgress {
 		t.Errorf("event kind = %q, want %q", event.Kind, domain.DeliveryEventProgress)
 	}
+}
+
+func TestAgent_Remove_WiresObserverLogger(t *testing.T) {
+	provider := newFakeProvider()
+	provider.clusters["my-cluster"] = nil
+	reporter := newChannelReporter()
+	agent := newTestAgent(reporter, fakeFactory(provider))
+
+	manifests := []domain.Manifest{{
+		Raw: json.RawMessage(`{"name":"my-cluster"}`),
+	}}
+
+	err := agent.Remove(context.Background(), domain.TargetInfoFromSnapshot(domain.TargetInfoSnapshot{}), "d1:t1", manifests, domain.DeliveryAuth{}, nil, 1)
+	if err != nil {
+		t.Fatalf("Remove: %v", err)
+	}
+
+	// The fake provider calls logger.V(0).Infof inside Delete, which
+	// flows through the observer logger to the reporter as a progress event.
+	// A nil logger would skip that Infof and hang here — and on a real
+	// kind provider, ProviderWithLogger(nil) panics during detection.
+	event := <-reporter.ch
+	if event.Kind != domain.DeliveryEventProgress {
+		t.Errorf("event kind = %q, want %q", event.Kind, domain.DeliveryEventProgress)
+	}
+	if provider.logger == nil {
+		t.Fatal("Remove passed nil logger to provider factory")
+	}
+	awaitDone(t, reporter.done)
 }
 
 func TestAgent_Deliver_ProducesTargetOutputs(t *testing.T) {
