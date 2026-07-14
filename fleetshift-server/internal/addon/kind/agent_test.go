@@ -299,6 +299,70 @@ func TestAgent_Deliver_SameGenerationRetrySkipsCreate(t *testing.T) {
 	}
 }
 
+// TestAgent_Deliver_InflightClearedBeforeTerminalReport pins the ordering
+// that at-least-once redelivery of the same delivery ID must be able to
+// start as soon as ReportResult is observed. A reporter that synchronously
+// re-Delivers from ReportResult would hang if inflight were still set
+// (the CI flake in SameGenerationRetrySkipsCreate).
+func TestAgent_Deliver_InflightClearedBeforeTerminalReport(t *testing.T) {
+	provider := newFakeProvider()
+	base := newChannelReporter()
+	target := domain.TargetInfoFromSnapshot(domain.TargetInfoSnapshot{ID: "k1", Type: kind.TargetType, Name: "local-kind"})
+	manifests := []domain.Manifest{{
+		ManifestType: kind.ClusterManifestType,
+		Raw:          json.RawMessage(`{"name": "dev-cluster"}`),
+	}}
+	const deliveryID domain.DeliveryID = "d1:k1"
+
+	var agent *kind.Agent
+	reporter := &redeliverOnResultReporter{channelReporter: base}
+	reporter.redeliver = func() {
+		if err := agent.Deliver(context.Background(), target, deliveryID, manifests, domain.DeliveryAuth{}, nil, 1); err != nil {
+			t.Errorf("nested Deliver: %v", err)
+		}
+	}
+	agent, _ = newTestAgent(reporter, provider)
+
+	if err := agent.Deliver(context.Background(), target, deliveryID, manifests, domain.DeliveryAuth{}, nil, 1); err != nil {
+		t.Fatalf("Deliver: %v", err)
+	}
+	first := awaitDone(t, reporter.done)
+	if first.State != domain.DeliveryStateDelivered {
+		t.Fatalf("first State = %q, want %q", first.State, domain.DeliveryStateDelivered)
+	}
+	second := awaitDone(t, reporter.done)
+	if second.State != domain.DeliveryStateDelivered {
+		t.Fatalf("second State = %q, want %q", second.State, domain.DeliveryStateDelivered)
+	}
+	if got := provider.createCount(); got != 1 {
+		t.Fatalf("Create called %d times, want 1", got)
+	}
+}
+
+// redeliverOnResultReporter invokes redeliver once from ReportResult after
+// forwarding the result, simulating an at-least-once retry observed as
+// soon as the terminal report is delivered.
+type redeliverOnResultReporter struct {
+	*channelReporter
+	once      sync.Once
+	redeliver func()
+}
+
+func (r *redeliverOnResultReporter) ReportResult(
+	ctx context.Context,
+	id domain.DeliveryID,
+	gen domain.Generation,
+	result domain.DeliveryResult,
+) error {
+	err := r.channelReporter.ReportResult(ctx, id, gen, result)
+	r.once.Do(func() {
+		if r.redeliver != nil {
+			r.redeliver()
+		}
+	})
+	return err
+}
+
 func TestAgent_Deliver_MissingNameReturnsFailedResult(t *testing.T) {
 	provider := newFakeProvider()
 	reporter := newChannelReporter()

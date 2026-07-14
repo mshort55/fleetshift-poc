@@ -29,6 +29,9 @@ import (
 
 const clusterName = "fleetshift-k8s-e2e"
 
+// kindName is the ownership-encoded kind/docker cluster name (fs--{id}).
+const kindName = "fs--" + clusterName
+
 var fixture *clusterFixture
 
 func TestMain(m *testing.M) {
@@ -38,7 +41,8 @@ func TestMain(m *testing.M) {
 		os.Exit(0)
 	}
 
-	_ = provider.Delete(clusterName, "")
+	_ = provider.Delete(kindName, "")
+	_ = provider.Delete(clusterName, "") // pre-ownership bare name from older runs
 
 	reporter := newChannelReporter()
 	kindAgent := kindaddon.NewAgent(reporter, func(logger kindlog.Logger) kindaddon.ClusterProvider {
@@ -67,39 +71,39 @@ func TestMain(m *testing.M) {
 	case result = <-reporter.done:
 		if result.State != domain.DeliveryStateDelivered {
 			fmt.Fprintf(os.Stderr, "kind delivery state = %q: %s\n", result.State, result.Message)
-			_ = provider.Delete(clusterName, "")
+			_ = provider.Delete(kindName, "")
 			os.Exit(1)
 		}
 	case <-ctx.Done():
 		fmt.Fprintln(os.Stderr, "timed out waiting for kind cluster")
-		_ = provider.Delete(clusterName, "")
+		_ = provider.Delete(kindName, "")
 		os.Exit(1)
 	}
 
 	if len(result.ProvisionedTargets) == 0 || len(result.ProducedSecrets) == 0 {
 		fmt.Fprintln(os.Stderr, "kind delivery missing provisioned targets or secrets")
-		_ = provider.Delete(clusterName, "")
+		_ = provider.Delete(kindName, "")
 		os.Exit(1)
 	}
 	pt := result.ProvisionedTargets[0]
 
-	kcStr, err := provider.KubeConfig(clusterName, false)
+	kcStr, err := provider.KubeConfig(kindName, false)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "KubeConfig: %v\n", err)
-		_ = provider.Delete(clusterName, "")
+		_ = provider.Delete(kindName, "")
 		os.Exit(1)
 	}
 	adminCfg, err := clientcmd.RESTConfigFromKubeConfig([]byte(kcStr))
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "RESTConfigFromKubeConfig: %v\n", err)
-		_ = provider.Delete(clusterName, "")
+		_ = provider.Delete(kindName, "")
 		os.Exit(1)
 	}
 
 	dynClient, err := dynamic.NewForConfig(adminCfg)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "dynamic client: %v\n", err)
-		_ = provider.Delete(clusterName, "")
+		_ = provider.Delete(kindName, "")
 		os.Exit(1)
 	}
 
@@ -111,7 +115,7 @@ func TestMain(m *testing.M) {
 	}
 
 	code := m.Run()
-	_ = provider.Delete(clusterName, "")
+	_ = provider.Delete(kindName, "")
 	os.Exit(code)
 }
 

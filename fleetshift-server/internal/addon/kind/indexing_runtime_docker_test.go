@@ -37,11 +37,15 @@ func TestKindAgent_Docker_IndexingRuntimeEnsureAndStop(t *testing.T) {
 		t.Skipf("Docker not available: %v", err)
 	}
 
-	const clusterName = "fleetshift-idx-lifecycle"
+	const resourceID = "fleetshift-idx-lifecycle"
+	kindName := encodedKindName(resourceID)
 	t.Cleanup(func() {
-		_ = checker.Delete(clusterName, "")
+		_ = checker.Delete(kindName, "")
+		// Also remove a pre-ownership bare name left by older test runs.
+		_ = checker.Delete(resourceID, "")
 	})
-	_ = checker.Delete(clusterName, "")
+	_ = checker.Delete(kindName, "")
+	_ = checker.Delete(resourceID, "")
 
 	runtime := &recordingIndexingRuntime{}
 	reporter := newChannelReporter()
@@ -64,7 +68,7 @@ func TestKindAgent_Docker_IndexingRuntimeEnsureAndStop(t *testing.T) {
 		"d-idx:kind-idx",
 		[]domain.Manifest{{
 			ManifestType: kindaddon.ClusterManifestType,
-			Raw:          json.RawMessage(`{"name":"` + clusterName + `"}`),
+			Raw:          json.RawMessage(`{"name":"` + resourceID + `"}`),
 		}},
 		domain.DeliveryAuth{},
 		nil,
@@ -83,8 +87,8 @@ func TestKindAgent_Docker_IndexingRuntimeEnsureAndStop(t *testing.T) {
 		t.Fatalf("EnsureIndexer calls = %d, want 1", runtime.ensureCount())
 	}
 	got := runtime.lastEnsure()
-	if got.TargetID != domain.TargetID("k8s-"+clusterName) {
-		t.Fatalf("Ensure TargetID = %q, want k8s-%s", got.TargetID, clusterName)
+	if got.TargetID != domain.TargetID("k8s-"+resourceID) {
+		t.Fatalf("Ensure TargetID = %q, want k8s-%s", got.TargetID, resourceID)
 	}
 	if len(got.Credential) == 0 || got.APIServer == "" {
 		t.Fatalf("Ensure missing credential or api server: api=%q credLen=%d",
@@ -96,12 +100,12 @@ func TestKindAgent_Docker_IndexingRuntimeEnsureAndStop(t *testing.T) {
 		if err != nil {
 			t.Fatalf("List: %v", err)
 		}
-		if slices.Contains(clusters, clusterName) {
+		if slices.Contains(clusters, kindName) {
 			break
 		}
 		select {
 		case <-ctx.Done():
-			t.Fatalf("timed out waiting for cluster %q", clusterName)
+			t.Fatalf("timed out waiting for cluster %q", kindName)
 		case <-time.After(2 * time.Second):
 		}
 	}
@@ -120,7 +124,7 @@ func TestKindAgent_Docker_IndexingRuntimeEnsureAndStop(t *testing.T) {
 		"d-idx-rm:kind-idx",
 		[]domain.Manifest{{
 			ManifestType: kindaddon.ClusterManifestType,
-			Raw:          json.RawMessage(`{"name":"` + clusterName + `"}`),
+			Raw:          json.RawMessage(`{"name":"` + resourceID + `"}`),
 		}},
 		domain.DeliveryAuth{},
 		nil,
@@ -136,8 +140,8 @@ func TestKindAgent_Docker_IndexingRuntimeEnsureAndStop(t *testing.T) {
 			removeResult.State, domain.DeliveryStateDelivered, removeResult.Message)
 	}
 	stops := runtime.stopIDs()
-	if len(stops) != 1 || stops[0] != domain.TargetID("k8s-"+clusterName) {
-		t.Fatalf("StopIndexer calls = %v, want [k8s-%s]", stops, clusterName)
+	if len(stops) != 1 || stops[0] != domain.TargetID("k8s-"+resourceID) {
+		t.Fatalf("StopIndexer calls = %v, want [k8s-%s]", stops, resourceID)
 	}
 
 	for {
@@ -145,12 +149,12 @@ func TestKindAgent_Docker_IndexingRuntimeEnsureAndStop(t *testing.T) {
 		if err != nil {
 			t.Fatalf("List after remove: %v", err)
 		}
-		if !slices.Contains(clusters, clusterName) {
+		if !slices.Contains(clusters, kindName) {
 			return
 		}
 		select {
 		case <-ctx.Done():
-			t.Fatalf("cluster %q still present after Remove", clusterName)
+			t.Fatalf("cluster %q still present after Remove", kindName)
 		case <-time.After(2 * time.Second):
 		}
 	}

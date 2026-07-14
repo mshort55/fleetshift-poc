@@ -462,7 +462,7 @@ func (a *Agent) deliverAsync(ctx context.Context, provider ClusterProvider, spec
 
 	for _, out := range outputs {
 		if err := a.ensureIndexerReady(ctx, out, generation); err != nil {
-			failDelivery(ctx, a.reporter, deliveryID, generation, "ensure indexer for %q: %v", out.Name, err)
+			a.failDelivery(ctx, deliveryID, generation, "ensure indexer for %q: %v", out.Name, err)
 			return
 		}
 	}
@@ -472,6 +472,10 @@ func (a *Agent) deliverAsync(ctx context.Context, provider ClusterProvider, spec
 		result.ProvisionedTargets = append(result.ProvisionedTargets, out.Target())
 		result.ProducedSecrets = append(result.ProducedSecrets, out.Secrets()...)
 	}
+	// Release before the terminal report so an at-least-once redelivery of
+	// the same delivery ID cannot race with this goroutine's exit and be
+	// dropped as still in-flight after the result is already observed.
+	a.inflight.Delete(deliveryID)
 	_ = reportResultWithRetry(ctx, a.reporter, deliveryID, generation, result)
 }
 
@@ -486,14 +490,14 @@ func (a *Agent) deliverCluster(ctx context.Context, provider ClusterProvider, sp
 	kindName, err := encodeKindClusterName(spec.resourceID())
 	if err != nil {
 		probe.Error(err)
-		failDelivery(ctx, a.reporter, deliveryID, generation, "%v", err)
+		a.failDelivery(ctx, deliveryID, generation, "%v", err)
 		return nil, false
 	}
 
 	listed, err := provider.List()
 	if err != nil {
 		probe.Error(err)
-		failDelivery(ctx, a.reporter, deliveryID, generation, "list kind clusters: %v", err)
+		a.failDelivery(ctx, deliveryID, generation, "list kind clusters: %v", err)
 		return nil, false
 	}
 
@@ -503,7 +507,7 @@ func (a *Agent) deliverCluster(ctx context.Context, provider ClusterProvider, sp
 	if !found {
 		if foreignClusterConflict(listed, spec.resourceID()) {
 			probe.Error(fmt.Errorf("kind cluster %q already exists and is not managed by this agent", spec.resourceID()))
-			failDelivery(ctx, a.reporter, deliveryID, generation, "kind cluster %q already exists and is not managed by this agent", spec.resourceID())
+			a.failDelivery(ctx, deliveryID, generation, "kind cluster %q already exists and is not managed by this agent", spec.resourceID())
 			return nil, false
 		}
 		if !a.createKindCluster(ctx, provider, probe, spec, auth, kindName, deliveryID, generation) {
@@ -528,7 +532,7 @@ func (a *Agent) deliverCluster(ctx context.Context, provider ClusterProvider, sp
 	recorded, hasGen, err := a.generationStore().Get(ctx, owned, kc)
 	if err != nil {
 		probe.Error(err)
-		failDelivery(ctx, a.reporter, deliveryID, generation, "read ownership generation for %q: %v", owned, err)
+		a.failDelivery(ctx, deliveryID, generation, "read ownership generation for %q: %v", owned, err)
 		return nil, false
 	}
 
@@ -544,7 +548,7 @@ func (a *Agent) deliverCluster(ctx context.Context, provider ClusterProvider, sp
 
 	if generation < recorded {
 		probe.Error(fmt.Errorf("stale generation %d for kind cluster %q (recorded %d)", generation, owned, recorded))
-		failDelivery(ctx, a.reporter, deliveryID, generation, "stale generation %d for kind cluster %q (recorded %d)", generation, owned, recorded)
+		a.failDelivery(ctx, deliveryID, generation, "stale generation %d for kind cluster %q (recorded %d)", generation, owned, recorded)
 		return nil, false
 	}
 
@@ -595,7 +599,7 @@ func (a *Agent) recreateOwnedCluster(
 
 	if err := provider.Delete(owned, ""); err != nil {
 		probe.Error(err)
-		failDelivery(ctx, a.reporter, deliveryID, generation, "delete kind cluster %q for recreate: %v", owned, err)
+		a.failDelivery(ctx, deliveryID, generation, "delete kind cluster %q for recreate: %v", owned, err)
 		return nil, false
 	}
 	a.generationStore().Forget(owned)
@@ -636,7 +640,7 @@ func (a *Agent) prepareKindCreate(
 	rawConfig, source, err := a.resolveConfig(spec, auth)
 	if err != nil {
 		probe.Error(err)
-		failDelivery(ctx, a.reporter, deliveryID, generation, "resolve config for kind cluster %q: %v", kindName, err)
+		a.failDelivery(ctx, deliveryID, generation, "resolve config for kind cluster %q: %v", kindName, err)
 		return preparedKindCreate{}, false
 	}
 
@@ -666,7 +670,7 @@ func (a *Agent) createPreparedKindCluster(
 ) bool {
 	if err := provider.Create(kindName, prep.opts...); err != nil {
 		probe.Error(err)
-		failDelivery(ctx, a.reporter, deliveryID, generation, "create kind cluster %q: %v", kindName, err)
+		a.failDelivery(ctx, deliveryID, generation, "create kind cluster %q: %v", kindName, err)
 		return false
 	}
 	return true
@@ -684,7 +688,7 @@ func (a *Agent) requireKubeconfig(ctx context.Context, provider ClusterProvider,
 	kc, err := provider.KubeConfig(kindName, useInternal)
 	if err != nil {
 		probe.Error(err)
-		failDelivery(ctx, a.reporter, deliveryID, generation, "get kubeconfig for %q: %v", kindName, err)
+		a.failDelivery(ctx, deliveryID, generation, "get kubeconfig for %q: %v", kindName, err)
 		return nil, false
 	}
 	return []byte(kc), true
@@ -694,12 +698,12 @@ func (a *Agent) advanceOrFail(ctx context.Context, kindName string, kc []byte, g
 	disp, recorded, err := a.generationStore().CheckAndAdvance(ctx, kindName, kc, generation)
 	if err != nil {
 		probe.Error(err)
-		failDelivery(ctx, a.reporter, deliveryID, generation, "advance ownership generation for %q: %v", kindName, err)
+		a.failDelivery(ctx, deliveryID, generation, "advance ownership generation for %q: %v", kindName, err)
 		return false
 	}
 	if disp == GenerationStale {
 		probe.Error(fmt.Errorf("stale generation %d for kind cluster %q (recorded %d)", generation, kindName, recorded))
-		failDelivery(ctx, a.reporter, deliveryID, generation, "stale generation %d for kind cluster %q (recorded %d)", generation, kindName, recorded)
+		a.failDelivery(ctx, deliveryID, generation, "stale generation %d for kind cluster %q (recorded %d)", generation, kindName, recorded)
 		return false
 	}
 	return true
@@ -714,7 +718,7 @@ func (a *Agent) ensureCluster(ctx context.Context, _ ClusterProvider, spec Clust
 		username := string(auth.Caller.Issuer) + "#" + string(auth.Caller.Subject)
 		if err := bootstrapRBAC(ctx, kc, auth.Caller.Issuer, auth.Caller); err != nil {
 			probe.Error(err)
-			failDelivery(ctx, a.reporter, deliveryID, generation, "bootstrap RBAC on %q: %v", kindName, err)
+			a.failDelivery(ctx, deliveryID, generation, "bootstrap RBAC on %q: %v", kindName, err)
 			return nil, false
 		}
 		probe.RBACBootstrapped(auth.Caller.Subject, username)
@@ -723,7 +727,7 @@ func (a *Agent) ensureCluster(ctx context.Context, _ ClusterProvider, spec Clust
 	apiServer, caCert, err := ExtractClusterConnInfo(kc)
 	if err != nil {
 		probe.Error(err)
-		failDelivery(ctx, a.reporter, deliveryID, generation, "extract connection info for %q: %v", kindName, err)
+		a.failDelivery(ctx, deliveryID, generation, "extract connection info for %q: %v", kindName, err)
 		return nil, false
 	}
 
@@ -744,7 +748,7 @@ func (a *Agent) ensureCluster(ctx context.Context, _ ClusterProvider, spec Clust
 	ref, token, saErr := a.bootstrapSA(ctx, kc, targetID)
 	if saErr != nil {
 		probe.Error(saErr)
-		failDelivery(ctx, a.reporter, deliveryID, generation, "platform SA bootstrap on %q: %v", kindName, saErr)
+		a.failDelivery(ctx, deliveryID, generation, "platform SA bootstrap on %q: %v", kindName, saErr)
 		return nil, false
 	}
 	out.SATokenRef = ref
@@ -795,13 +799,17 @@ func (a *Agent) stopIndexer(ctx context.Context, targetID domain.TargetID) {
 	_ = a.indexingRuntime.StopIndexer(ctx, targetID)
 }
 
-func failDelivery(ctx context.Context, reporter domain.DeliveryReporter, deliveryID domain.DeliveryID, generation domain.Generation, format string, args ...any) {
+// failDelivery clears the in-flight mark before reporting a terminal
+// failure so at-least-once redelivery of the same delivery ID cannot be
+// dropped as still in-flight after the failure result is observed.
+func (a *Agent) failDelivery(ctx context.Context, deliveryID domain.DeliveryID, generation domain.Generation, format string, args ...any) {
+	a.inflight.Delete(deliveryID)
 	msg := fmt.Sprintf(format, args...)
-	_ = reporter.ReportEvent(ctx, deliveryID, generation, domain.DeliveryEvent{
+	_ = a.reporter.ReportEvent(ctx, deliveryID, generation, domain.DeliveryEvent{
 		Kind:    domain.DeliveryEventError,
 		Message: msg,
 	})
-	_ = reportResultWithRetry(ctx, reporter, deliveryID, generation, domain.DeliveryResult{
+	_ = reportResultWithRetry(ctx, a.reporter, deliveryID, generation, domain.DeliveryResult{
 		State:   domain.DeliveryStateFailed,
 		Message: msg,
 	})
