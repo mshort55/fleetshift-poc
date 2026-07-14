@@ -1,5 +1,6 @@
 {
   "realm": "fleetshift",
+  "displayName": "ACME Corp",
   "enabled": true,
   "sslRequired": "external",
   "loginWithEmailAllowed": true,

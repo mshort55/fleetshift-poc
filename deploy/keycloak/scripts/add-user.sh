@@ -3,6 +3,8 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT_DIR="$(cd "$SCRIPT_DIR/../../.." && pwd)"
+# shellcheck source=../../scripts/common.sh
+source "$(cd "$SCRIPT_DIR/../../scripts" && pwd)/common.sh"
 
 # Add a user to the fleetshift realm with a specific GitHub username.
 #
@@ -49,6 +51,8 @@ done
 [[ -n "$USERNAME" ]] || error "Username required. Usage: ./add-user.sh --admin-password <pw> --username you@example.com --password pass --github ghuser"
 [[ -n "$PASSWORD" ]] || error "Password required."
 [[ -n "$GITHUB" ]]   || error "GitHub username required."
+[[ "$USERNAME" =~ ^[^@[:space:]]+@[^@[:space:]]+\.[^@[:space:]]+$ ]] \
+    || error "Username must be an email address (e.g. you@example.com). Got: '${USERNAME}'"
 
 # ── Resolve Keycloak URL and admin credentials ───────────────────
 
@@ -62,7 +66,7 @@ elif [[ -n "$ADMIN_PASSWORD" ]]; then
 else
     # No credentials — discover from OpenShift
     command -v oc &>/dev/null || error "'oc' CLI not found. For local usage, pass --admin-password."
-    timeout 5 oc whoami &>/dev/null || error "Not logged in to OpenShift. Run 'oc login' first."
+    require_oc_login
 
     OC_NAMESPACE="${OC_NAMESPACE:-keycloak-prod}"
     OC_CR_NAME="${OC_CR_NAME:-keycloak}"
@@ -111,11 +115,13 @@ USER_JSON=$(jq -n \
         realmRoles: $roles
     }')
 
-HTTP_CODE=$(curl -sk -o /dev/null -w '%{http_code}' -X POST \
+CREATE_RESP=$(curl -sk -w '\n%{http_code}' -X POST \
     "${KC_URL}/admin/realms/${REALM}/users" \
     -H "Authorization: Bearer ${ADMIN_TOKEN}" \
     -H "Content-Type: application/json" \
     -d "$USER_JSON")
+HTTP_CODE=$(printf '%s\n' "$CREATE_RESP" | tail -n1)
+CREATE_BODY=$(printf '%s\n' "$CREATE_RESP" | sed '$d')
 
 case "$HTTP_CODE" in
     2*) info "User created successfully." ;;
@@ -139,7 +145,7 @@ case "$HTTP_CODE" in
 
          info "User updated."
          ;;
-    *)  error "Failed to create user (HTTP ${HTTP_CODE})" ;;
+    *)  error "Failed to create user (HTTP ${HTTP_CODE}): ${CREATE_BODY}" ;;
 esac
 
 # ── Assign realm roles ───────────────────────────────────────────

@@ -21,6 +21,8 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 KEYCLOAK_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+# shellcheck source=../../scripts/common.sh
+source "$(cd "$SCRIPT_DIR/../../scripts" && pwd)/common.sh"
 NAMESPACE="keycloak-prod"
 KEYCLOAK_CR_NAME="keycloak"
 
@@ -32,7 +34,7 @@ error() { echo "ERROR: $*" >&2; exit 1; }
 command -v oc &>/dev/null || error "'oc' CLI not found in PATH."
 command -v jq &>/dev/null || error "'jq' not found in PATH."
 command -v openssl &>/dev/null || error "'openssl' not found in PATH."
-timeout 5 oc whoami &>/dev/null || error "Not logged in to OpenShift. Run 'oc login' first."
+require_oc_login
 
 oc get keycloak/"${KEYCLOAK_CR_NAME}" -n "${NAMESPACE}" &>/dev/null \
     || error "Keycloak CR '${KEYCLOAK_CR_NAME}' not found in namespace '${NAMESPACE}'. Is Keycloak deployed?"

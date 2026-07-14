@@ -14,6 +14,10 @@ set -euo pipefail
 #   ./teardown.sh
 # ------------------------------------------------------------------
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=../../scripts/common.sh
+source "$(cd "$SCRIPT_DIR/../../scripts" && pwd)/common.sh"
+
 NAMESPACE="keycloak-prod"
 KEYCLOAK_CR_NAME="keycloak"
 
@@ -21,7 +25,7 @@ info()  { echo "==> $*"; }
 warn()  { echo "WARNING: $*"; }
 error() { echo "ERROR: $*" >&2; exit 1; }
 
-timeout 5 oc whoami &>/dev/null || error "Not logged in to OpenShift. Run 'oc login' first."
+require_oc_login
 
 echo ""
 echo "This will remove the Keycloak deployment from namespace '${NAMESPACE}'."

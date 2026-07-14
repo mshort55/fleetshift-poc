@@ -19,6 +19,8 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WORKFLOW_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 MANIFESTS_DIR="${WORKFLOW_DIR}/manifests"
+# shellcheck source=../../../scripts/common.sh
+source "$(cd "$SCRIPT_DIR/../../../scripts" && pwd)/common.sh"
 
 NAMESPACE="fleetshift"
 ROUTE_NAME="grpc"
@@ -317,7 +319,7 @@ require_command oc
 require_command openssl
 require_command curl
 require_command jq
-timeout 5 oc whoami &>/dev/null || error "Not logged in to OpenShift. Run 'oc login' first."
+require_oc_login
 
 oc get route "${ROUTE_NAME}" -n "${NAMESPACE}" &>/dev/null || \
   error "Route '${ROUTE_NAME}' not found in namespace '${NAMESPACE}'. Deploy FleetShift first."
