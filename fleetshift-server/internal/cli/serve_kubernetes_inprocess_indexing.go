@@ -42,7 +42,7 @@ func newKubernetesInProcessIndexing(
 	inventoryReportSvc := application.NewInventoryReportService(store)
 	targetInventoryCleanupSvc := application.NewTargetInventoryCleanupService(store)
 	reporter := kubernetesaddon.NewDirectInventoryReporter(
-		newDirectInventoryReportBackend(inventoryReportSvc, targetInventoryCleanupSvc),
+		newDirectInventoryReportBackend(inventoryReportSvc),
 	)
 	indexHost := kubernetesaddon.NewKubernetesInProcessIndexHost(ctx, vault, reporter, logger)
 	controller := kubernetesaddon.NewInProcessIndexController(
@@ -82,20 +82,19 @@ func (l storeTargetLister) ListTargets(ctx context.Context) ([]domain.TargetInfo
 	return targets, nil
 }
 
-// directInventoryReportBackend adapts application services onto the
-// Kubernetes addon's InventoryReportBackend at the server composition boundary.
+// directInventoryReportBackend adapts InventoryReportService onto the
+// Kubernetes addon's InventoryReportBackend at the server composition
+// boundary.
 type directInventoryReportBackend struct {
-	reports  *application.InventoryReportService
-	subtrees *application.TargetInventoryCleanupService
+	reports *application.InventoryReportService
 }
 
-// newDirectInventoryReportBackend adapts InventoryReportService and
-// TargetInventoryCleanupService onto [kubernetesaddon.InventoryReportBackend].
+// newDirectInventoryReportBackend adapts InventoryReportService onto
+// [kubernetesaddon.InventoryReportBackend].
 func newDirectInventoryReportBackend(
 	reports *application.InventoryReportService,
-	subtrees *application.TargetInventoryCleanupService,
 ) *directInventoryReportBackend {
-	return &directInventoryReportBackend{reports: reports, subtrees: subtrees}
+	return &directInventoryReportBackend{reports: reports}
 }
 
 // Compile-time check that the addon controller satisfies
@@ -115,6 +114,7 @@ func (b *directInventoryReportBackend) ReplaceBatch(ctx context.Context, resourc
 		in.Reports[i] = application.InventoryReplacementInput{
 			ResourceType: resourceType,
 			Name:         &name,
+			IsDelete:     report.IsDelete,
 			Labels:       report.Labels,
 			Observation:  report.Observation,
 			Conditions:   report.Conditions,
@@ -123,66 +123,6 @@ func (b *directInventoryReportBackend) ReplaceBatch(ctx context.Context, resourc
 	}
 	if err := b.reports.ReplaceBatch(ctx, in); err != nil {
 		return fmt.Errorf("kubernetes inventory report adapter replace batch: %w", err)
-	}
-	return nil
-}
-
-// DeleteBatch implements [kubernetesaddon.InventoryReportBackend].
-func (b *directInventoryReportBackend) DeleteBatch(ctx context.Context, resources []domain.InventoryResourceRef) error {
-	in := application.InventoryDeleteBatchInput{
-		Resources: make([]application.InventoryDeleteInput, len(resources)),
-	}
-	for i, ref := range resources {
-		in.Resources[i] = application.InventoryDeleteInput{
-			ResourceType: ref.ResourceType,
-			Name:         ref.Name,
-		}
-	}
-	if err := b.reports.DeleteBatch(ctx, in); err != nil {
-		return fmt.Errorf("kubernetes inventory report adapter delete batch: %w", err)
-	}
-	return nil
-}
-
-// ReplaceCollection implements [kubernetesaddon.InventoryReportBackend].
-func (b *directInventoryReportBackend) ReplaceCollection(ctx context.Context, resourceType domain.ResourceType, collection domain.CollectionName, reports []kubernetesaddon.InventoryObjectReport) error {
-	in := application.InventoryCollectionReplacementInput{
-		ResourceType: resourceType,
-		Collection:   collection,
-		Reports:      make([]application.InventoryReplacementInput, len(reports)),
-	}
-	for i, report := range reports {
-		name := report.Name
-		in.Reports[i] = application.InventoryReplacementInput{
-			ResourceType: resourceType,
-			Name:         &name,
-			Labels:       report.Labels,
-			Observation:  report.Observation,
-			Conditions:   report.Conditions,
-			ObservedAt:   report.ObservedAt,
-		}
-	}
-	if err := b.reports.ReplaceCollection(ctx, in); err != nil {
-		return fmt.Errorf("kubernetes inventory report adapter replace collection: %w", err)
-	}
-	return nil
-}
-
-// DeleteCollection implements [kubernetesaddon.InventoryReportBackend].
-func (b *directInventoryReportBackend) DeleteCollection(ctx context.Context, resourceType domain.ResourceType, collection domain.CollectionName) error {
-	if err := b.reports.DeleteCollection(ctx, application.InventoryCollectionDeleteInput{
-		ResourceType: resourceType,
-		Collection:   collection,
-	}); err != nil {
-		return fmt.Errorf("kubernetes inventory report adapter delete collection: %w", err)
-	}
-	return nil
-}
-
-// DeleteSubtree implements [kubernetesaddon.InventoryReportBackend].
-func (b *directInventoryReportBackend) DeleteSubtree(ctx context.Context, ref domain.InventorySubtreeRef) error {
-	if err := b.subtrees.DeleteOwnedInventorySubtree(ctx, kubernetesaddon.AddonID, ref); err != nil {
-		return fmt.Errorf("kubernetes inventory report adapter delete subtree: %w", err)
 	}
 	return nil
 }

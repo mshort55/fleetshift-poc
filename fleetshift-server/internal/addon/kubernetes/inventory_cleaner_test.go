@@ -163,33 +163,15 @@ func TestKubernetesTargetIndexedInventoryCleaner_ComposedWithTargetOutputHookSer
 		t.Fatalf("ObjectResourceName siblingPod: %v", err)
 	}
 
-	if err := reports.ReplaceCollection(ctx, application.InventoryCollectionReplacementInput{
-		ResourceType: kubernetes.ObjectResourceType,
-		Collection:   pod1.Collection(),
+	if err := reports.ReplaceBatch(ctx, application.InventoryReplacementBatchInput{
 		Reports: []application.InventoryReplacementInput{
-			{Name: &pod1, ObservedAt: now},
-			{Name: &pod2, ObservedAt: now},
+			{ResourceType: kubernetes.ObjectResourceType, Name: &pod1, ObservedAt: now},
+			{ResourceType: kubernetes.ObjectResourceType, Name: &pod2, ObservedAt: now},
+			{ResourceType: kubernetes.ObjectResourceType, Name: &svc1, ObservedAt: now},
+			{ResourceType: kubernetes.ObjectResourceType, Name: &siblingPod, ObservedAt: now},
 		},
 	}); err != nil {
-		t.Fatalf("seed pods collection: %v", err)
-	}
-	if err := reports.ReplaceCollection(ctx, application.InventoryCollectionReplacementInput{
-		ResourceType: kubernetes.ObjectResourceType,
-		Collection:   svc1.Collection(),
-		Reports: []application.InventoryReplacementInput{
-			{Name: &svc1, ObservedAt: now},
-		},
-	}); err != nil {
-		t.Fatalf("seed services collection: %v", err)
-	}
-	if err := reports.ReplaceCollection(ctx, application.InventoryCollectionReplacementInput{
-		ResourceType: kubernetes.ObjectResourceType,
-		Collection:   siblingPod.Collection(),
-		Reports: []application.InventoryReplacementInput{
-			{Name: &siblingPod, ObservedAt: now},
-		},
-	}); err != nil {
-		t.Fatalf("seed sibling target pods collection: %v", err)
+		t.Fatalf("seed inventory: %v", err)
 	}
 
 	cleaner := kubernetes.NewKubernetesTargetIndexedInventoryCleaner(application.NewTargetInventoryCleanupService(store))

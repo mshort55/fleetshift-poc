@@ -43,19 +43,13 @@ func TestOrchestrationCleanupTargetIndexedInventory_RealKubernetesCleaner(t *tes
 		t.Fatalf("ObjectResourceName sibling: %v", err)
 	}
 
-	if err := reports.ReplaceCollection(ctx, application.InventoryCollectionReplacementInput{
-		ResourceType: kubernetes.ObjectResourceType,
-		Collection:   podProd.Collection(),
-		Reports:      []application.InventoryReplacementInput{{Name: &podProd, ObservedAt: now}},
+	if err := reports.ReplaceBatch(ctx, application.InventoryReplacementBatchInput{
+		Reports: []application.InventoryReplacementInput{
+			{ResourceType: kubernetes.ObjectResourceType, Name: &podProd, ObservedAt: now},
+			{ResourceType: kubernetes.ObjectResourceType, Name: &podSibling, ObservedAt: now},
+		},
 	}); err != nil {
-		t.Fatalf("seed prod: %v", err)
-	}
-	if err := reports.ReplaceCollection(ctx, application.InventoryCollectionReplacementInput{
-		ResourceType: kubernetes.ObjectResourceType,
-		Collection:   podSibling.Collection(),
-		Reports:      []application.InventoryReplacementInput{{Name: &podSibling, ObservedAt: now}},
-	}); err != nil {
-		t.Fatalf("seed sibling: %v", err)
+		t.Fatalf("seed inventory: %v", err)
 	}
 
 	hooks := application.NewTargetOutputHookService(

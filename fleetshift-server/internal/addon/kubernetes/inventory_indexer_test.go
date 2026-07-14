@@ -100,39 +100,16 @@ func TestIndexerDelegate_Start_ReportsCollectionAndShutdownDoesNotDelete(t *test
 		time.Sleep(500 * time.Millisecond)
 		synctest.Wait()
 
-		wantCollection := mustObjectCollection(t, "target-1", gvr)
-		replaces := reporter.getReplaces()
-		if len(replaces) == 0 {
-			t.Fatal("expected ReplaceCollection from initial LIST resync")
-		}
-		foundCollection := false
 		foundPod := false
-		for _, rc := range replaces {
-			if rc.snapshot.Collection == wantCollection {
-				foundCollection = true
-				for _, report := range rc.snapshot.Reports {
-					if report.Labels["k8s.uid"] == "uid-pod-1" {
-						foundPod = true
-					}
-				}
-			}
-		}
-		if !foundCollection {
-			t.Fatalf("expected ReplaceCollection for %q, got %+v", wantCollection, replaces)
-		}
-		if !foundPod {
-			// Pod may arrive via watch ApplyDelta instead of the initial resync
-			// snapshot depending on fake client timing; accept either path.
-			for _, d := range reporter.getDeltas() {
-				for _, report := range d.delta.Upserts {
-					if report.Labels["k8s.uid"] == "uid-pod-1" {
-						foundPod = true
-					}
+		for _, d := range reporter.getDeltas() {
+			for _, report := range d.delta.Upserts {
+				if report.Labels["k8s.uid"] == "uid-pod-1" {
+					foundPod = true
 				}
 			}
 		}
 		if !foundPod {
-			t.Fatal("expected pod uid-pod-1 in ReplaceCollection or ApplyDelta upserts")
+			t.Fatal("expected pod uid-pod-1 in ApplyDelta upserts from initial LIST resync")
 		}
 
 		cancel()
@@ -140,9 +117,6 @@ func TestIndexerDelegate_Start_ReportsCollectionAndShutdownDoesNotDelete(t *test
 		<-done
 		<-ic.done
 
-		if got := len(reporter.getDeleteCollections()); got != 0 {
-			t.Fatalf("indexer shutdown must not DeleteCollection, got %d calls", got)
-		}
 		for _, d := range reporter.getDeltas() {
 			if len(d.delta.Deletes) > 0 {
 				t.Fatalf("indexer shutdown must not persist object deletes, got %+v", d.delta.Deletes)
@@ -192,10 +166,11 @@ func TestIndexerDelegate_Start_AllowListExcludesOtherGVRs(t *testing.T) {
 		time.Sleep(300 * time.Millisecond)
 		synctest.Wait()
 
-		svcCollection := mustObjectCollection(t, "target-1", svcs)
-		for _, rc := range reporter.getReplaces() {
-			if rc.snapshot.Collection == svcCollection {
-				t.Fatal("services GVR must not be indexed when allow-list is pods-only")
+		for _, d := range reporter.getDeltas() {
+			for _, report := range d.delta.Upserts {
+				if report.Labels["k8s.kind"] == "Service" {
+					t.Fatal("services GVR must not be indexed when allow-list is pods-only")
+				}
 			}
 		}
 

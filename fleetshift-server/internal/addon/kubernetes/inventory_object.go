@@ -125,9 +125,7 @@ func TargetObjectSubtree(targetID domain.TargetID) (domain.ResourceName, error) 
 // ObjectCollectionName returns the exact inventory collection for
 // targetID + gvr:
 // "{TargetCollectionID}/{target}/{APIResourceCollectionID}/{gvrKey}/{ObjectCollectionID}".
-// This is the collection boundary used by ReplaceCollection and
-// DeleteCollection, and matches [ObjectResourceName]'s parent
-// collection.
+// This matches [ObjectResourceName]'s parent collection.
 func ObjectCollectionName(targetID domain.TargetID, gvr schema.GroupVersionResource) (domain.CollectionName, error) {
 	name, err := domain.ParseCollectionName(
 		string(TargetCollectionID) + "/" + encodeResourceNameSegment(string(targetID)) +

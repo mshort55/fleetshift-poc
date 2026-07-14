@@ -60,8 +60,7 @@ func seedObjectType(t *testing.T, store domain.Store) {
 }
 
 type storeReportBackend struct {
-	reports  *application.InventoryReportService
-	subtrees *application.TargetInventoryCleanupService
+	reports *application.InventoryReportService
 }
 
 func (b *storeReportBackend) ReplaceBatch(ctx context.Context, resourceType domain.ResourceType, reports []InventoryObjectReport) error {
@@ -73,6 +72,7 @@ func (b *storeReportBackend) ReplaceBatch(ctx context.Context, resourceType doma
 		in.Reports[i] = application.InventoryReplacementInput{
 			ResourceType: resourceType,
 			Name:         &name,
+			IsDelete:     report.IsDelete,
 			Labels:       report.Labels,
 			Observation:  report.Observation,
 			Conditions:   report.Conditions,
@@ -82,54 +82,9 @@ func (b *storeReportBackend) ReplaceBatch(ctx context.Context, resourceType doma
 	return b.reports.ReplaceBatch(ctx, in)
 }
 
-func (b *storeReportBackend) DeleteBatch(ctx context.Context, resources []domain.InventoryResourceRef) error {
-	in := application.InventoryDeleteBatchInput{
-		Resources: make([]application.InventoryDeleteInput, len(resources)),
-	}
-	for i, ref := range resources {
-		in.Resources[i] = application.InventoryDeleteInput{
-			ResourceType: ref.ResourceType,
-			Name:         ref.Name,
-		}
-	}
-	return b.reports.DeleteBatch(ctx, in)
-}
-
-func (b *storeReportBackend) ReplaceCollection(ctx context.Context, resourceType domain.ResourceType, collection domain.CollectionName, reports []InventoryObjectReport) error {
-	in := application.InventoryCollectionReplacementInput{
-		ResourceType: resourceType,
-		Collection:   collection,
-		Reports:      make([]application.InventoryReplacementInput, len(reports)),
-	}
-	for i, report := range reports {
-		name := report.Name
-		in.Reports[i] = application.InventoryReplacementInput{
-			ResourceType: resourceType,
-			Name:         &name,
-			Labels:       report.Labels,
-			Observation:  report.Observation,
-			Conditions:   report.Conditions,
-			ObservedAt:   report.ObservedAt,
-		}
-	}
-	return b.reports.ReplaceCollection(ctx, in)
-}
-
-func (b *storeReportBackend) DeleteCollection(ctx context.Context, resourceType domain.ResourceType, collection domain.CollectionName) error {
-	return b.reports.DeleteCollection(ctx, application.InventoryCollectionDeleteInput{
-		ResourceType: resourceType,
-		Collection:   collection,
-	})
-}
-
-func (b *storeReportBackend) DeleteSubtree(ctx context.Context, ref domain.InventorySubtreeRef) error {
-	return b.subtrees.DeleteOwnedInventorySubtree(ctx, AddonID, ref)
-}
-
 func newStoreBackedReporter(store domain.Store) InventoryReporter {
 	reports := application.NewInventoryReportService(store)
-	subtrees := application.NewTargetInventoryCleanupService(store)
-	return NewDirectInventoryReporter(&storeReportBackend{reports: reports, subtrees: subtrees})
+	return NewDirectInventoryReporter(&storeReportBackend{reports: reports})
 }
 
 func listObjectInventory(t *testing.T, store domain.Store) []*domain.ExtensionResource {
@@ -476,10 +431,10 @@ func TestInventoryMode_ControllerStartsOnlyLocalTargets(t *testing.T) {
 	})
 }
 
-// TestRemoveGVR_DeletesCollectionFromStore verifies GVR removal issues
-// DeleteCollection against the real extension-resource store while
-// leaving sibling GVR collections intact.
-func TestRemoveGVR_DeletesCollectionFromStore(t *testing.T) {
+// TestRemoveGVR_LeavesPersistedCollection verifies GVR removal is
+// non-destructive to stored inventory while clearing the writer's
+// in-memory state for that GVR.
+func TestRemoveGVR_LeavesPersistedCollection(t *testing.T) {
 	store := &sqlite.Store{DB: sqlite.OpenTestDB(t)}
 	seedObjectType(t, store)
 
@@ -517,20 +472,13 @@ func TestRemoveGVR_DeletesCollectionFromStore(t *testing.T) {
 	})
 
 	w.RemoveCh() <- RemoveGVREvent{GVR: cms}
-	awaitStoreObjects(t, store, 3*time.Second, func(objs []*domain.ExtensionResource) bool {
-		for _, obj := range objs {
-			if obj.Name() == wantCM {
-				return false
-			}
-		}
-		return true
-	})
 
 	objs := listObjectInventory(t, store)
-	var foundPod bool
+	var foundPod, foundCM bool
 	for _, obj := range objs {
 		if obj.Name() == wantCM {
-			t.Fatalf("configmap collection row still present: %s", obj.Name())
+			foundCM = true
+			assertResourceName(t, obj, wantCM)
 		}
 		if obj.Name() == wantPod {
 			foundPod = true
@@ -539,6 +487,9 @@ func TestRemoveGVR_DeletesCollectionFromStore(t *testing.T) {
 	}
 	if !foundPod {
 		t.Fatal("pod collection must survive configmap GVR removal")
+	}
+	if !foundCM {
+		t.Fatal("configmap rows must remain after non-destructive GVR removal")
 	}
 }
 

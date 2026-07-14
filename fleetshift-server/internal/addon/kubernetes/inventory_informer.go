@@ -38,10 +38,11 @@ type ResyncEvent struct {
 	Resources []*unstructured.Unstructured
 }
 
-// RemoveGVREvent signals that a GVR is no longer being indexed. The
-// writer deletes that exact target+GVR inventory collection. Informer
-// shutdown / StopAll must not emit this event — local cache eviction is
-// not a source-of-truth object delete.
+// RemoveGVREvent signals that a GVR is no longer being indexed (for
+// example it left the desired set). The writer drops in-memory state
+// for that GVR only; persisted inventory is left unchanged. Informer
+// shutdown / StopAll must not emit this event — stopping the process
+// is not a source-of-truth GVR removal.
 type RemoveGVREvent struct {
 	GVR schema.GroupVersionResource
 }
@@ -185,10 +186,12 @@ func (i *GenericInformer) listAndResync(ctx context.Context) error {
 	}
 
 	// Drop UIDs that disappeared from the LIST from the local index only.
-	// Do not emit EventDelete for them: the ResyncEvent below becomes
-	// ReplaceCollection, which already prunes the exact target+GVR
-	// inventory collection. Per-UID deletes here would only duplicate
-	// that prune. Watch tombstones still use EventDelete.
+	// Do not emit EventDelete for them: the ResyncEvent below becomes an
+	// ApplyDelta that upserts the LIST and, when the writer already has
+	// in-memory members for this GVR, deletes only those absent from the
+	// LIST (a first LIST has none, so upserts only). Per-UID deletes here
+	// would only duplicate that reconciliation. Watch tombstones still
+	// use EventDelete.
 	i.resourceIndex = newResourceIndex
 
 	// Send resync with full resource set after list completes.
@@ -397,9 +400,10 @@ func (m *InformerManager) Reconcile(ctx context.Context, desired []schema.GroupV
 			// Already running, don't restart.
 			delete(desiredSet, gvr)
 		} else {
-			// No longer desired, stop and ask the writer to delete the
-			// exact target+GVR inventory collection. StopAll does not
-			// take this path — shutdown is not a source delete.
+			// No longer desired: stop the informer and tell the writer to
+			// drop in-memory state for this GVR (non-destructive to
+			// persisted inventory). StopAll does not take this path —
+			// shutdown is not a desired-set removal.
 			m.logger.Info("stopping informer", "gvr", gvr.String())
 			stopper()
 			delete(m.stoppers, gvr)

@@ -3,6 +3,7 @@ package application
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/fleetshift/fleetshift-poc/fleetshift-server/internal/domain"
 )
@@ -11,10 +12,13 @@ import (
 // resource-type-scoped subtree cleanup for target-scoped indexed
 // inventory. Concrete [TargetIndexedInventoryCleaner] implementations
 // (e.g. a per-target-type addon cleaner) depend on this service
-// instead of calling
-// [domain.ExtensionResourceRepository.DeleteInventorySubtree]
-// directly, so cleanup authority is always checked rather than
-// assumed by the caller.
+// instead of calling the inventory write path directly, so cleanup
+// authority is always checked rather than assumed by the caller.
+//
+// Persistence uses [domain.InventoryReplacement.IsDelete] via
+// [domain.ExtensionResourceRepository.ReplaceInventory]. Broader
+// target-inventory cleanup policy remains tracked separately from the
+// live indexing write path.
 type TargetInventoryCleanupService struct {
 	store domain.Store
 }
@@ -40,10 +44,10 @@ func NewTargetInventoryCleanupService(store domain.Store) *TargetInventoryCleanu
 //     entirely to ownerAddonID's inventory reporting once a type is
 //     shared with management.
 //
-// A subtree with no matching rows is a no-op, per
-// [domain.ExtensionResourceRepository.DeleteInventorySubtree]'s doc.
-// Ownership and metadata validation failures are always cleanup
-// errors.
+// Matching uses resource-name segment boundaries: a parent of
+// "targets/prod" must not match a sibling under "targets/prod-old".
+// A subtree with no matching rows is a no-op. Ownership and metadata
+// validation failures are always cleanup errors.
 func (s *TargetInventoryCleanupService) DeleteOwnedInventorySubtree(ctx context.Context, ownerAddonID domain.AddonID, ref domain.InventorySubtreeRef) error {
 	tx, err := s.store.Begin(ctx)
 	if err != nil {
@@ -67,8 +71,27 @@ func (s *TargetInventoryCleanupService) DeleteOwnedInventorySubtree(ctx context.
 		return err
 	}
 
-	if err := tx.ExtensionResources().DeleteInventorySubtree(ctx, ref); err != nil {
-		return fmt.Errorf("delete inventory subtree: %w", err)
+	resources, err := tx.ExtensionResources().ListByResourceType(ctx, ref.ResourceType)
+	if err != nil {
+		return fmt.Errorf("list inventory resources for subtree delete: %w", err)
+	}
+	prefix := string(ref.Parent) + "/"
+	deletes := make([]domain.InventoryReplacement, 0)
+	for _, er := range resources {
+		name := er.Name()
+		if !strings.HasPrefix(string(name), prefix) {
+			continue
+		}
+		deletes = append(deletes, domain.InventoryReplacement{
+			ResourceType: ref.ResourceType,
+			Name:         name,
+			IsDelete:     true,
+		})
+	}
+	if len(deletes) > 0 {
+		if err := tx.ExtensionResources().ReplaceInventory(ctx, deletes); err != nil {
+			return fmt.Errorf("delete inventory subtree: %w", err)
+		}
 	}
 	return tx.Commit()
 }

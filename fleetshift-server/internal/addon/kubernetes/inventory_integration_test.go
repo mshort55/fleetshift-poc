@@ -658,7 +658,7 @@ func Test_ControllerIndexesRegisteredTarget(t *testing.T) {
 
 	reports := application.NewInventoryReportService(store)
 	subtrees := application.NewTargetInventoryCleanupService(store)
-	reporter := kubeaddon.NewDirectInventoryReporter(newE2EInventoryBackend(reports, subtrees))
+	reporter := kubeaddon.NewDirectInventoryReporter(newE2EInventoryBackend(reports))
 	host := kubeaddon.NewKubernetesInProcessIndexHost(
 		runCtx,
 		nil,
@@ -804,8 +804,7 @@ func setupE2E(t *testing.T, opts ...setupOption) *e2eFixture {
 	t.Cleanup(cancelRun)
 
 	reports := application.NewInventoryReportService(store)
-	subtrees := application.NewTargetInventoryCleanupService(store)
-	reporter := kubeaddon.NewDirectInventoryReporter(newE2EInventoryBackend(reports, subtrees))
+	reporter := kubeaddon.NewDirectInventoryReporter(newE2EInventoryBackend(reports))
 
 	host := kubeaddon.NewKubernetesInProcessIndexHost(
 		runCtx,
@@ -1256,15 +1255,13 @@ func findByKindNamePrefix(objs []*domain.ExtensionResource, kind, prefix string)
 // InventoryReportBackend for the in-process e2e path (same shape as
 // server composition).
 type e2eInventoryBackend struct {
-	reports  *application.InventoryReportService
-	subtrees *application.TargetInventoryCleanupService
+	reports *application.InventoryReportService
 }
 
 func newE2EInventoryBackend(
 	reports *application.InventoryReportService,
-	subtrees *application.TargetInventoryCleanupService,
 ) *e2eInventoryBackend {
-	return &e2eInventoryBackend{reports: reports, subtrees: subtrees}
+	return &e2eInventoryBackend{reports: reports}
 }
 
 func (b *e2eInventoryBackend) ReplaceBatch(ctx context.Context, resourceType domain.ResourceType, reports []kubeaddon.InventoryObjectReport) error {
@@ -1276,6 +1273,7 @@ func (b *e2eInventoryBackend) ReplaceBatch(ctx context.Context, resourceType dom
 		in.Reports[i] = application.InventoryReplacementInput{
 			ResourceType: resourceType,
 			Name:         &name,
+			IsDelete:     report.IsDelete,
 			Labels:       report.Labels,
 			Observation:  report.Observation,
 			Conditions:   report.Conditions,
@@ -1283,47 +1281,4 @@ func (b *e2eInventoryBackend) ReplaceBatch(ctx context.Context, resourceType dom
 		}
 	}
 	return b.reports.ReplaceBatch(ctx, in)
-}
-
-func (b *e2eInventoryBackend) DeleteBatch(ctx context.Context, resources []domain.InventoryResourceRef) error {
-	in := application.InventoryDeleteBatchInput{
-		Resources: make([]application.InventoryDeleteInput, len(resources)),
-	}
-	for i, ref := range resources {
-		in.Resources[i] = application.InventoryDeleteInput{
-			ResourceType: ref.ResourceType,
-			Name:         ref.Name,
-		}
-	}
-	return b.reports.DeleteBatch(ctx, in)
-}
-
-func (b *e2eInventoryBackend) ReplaceCollection(ctx context.Context, resourceType domain.ResourceType, collection domain.CollectionName, reports []kubeaddon.InventoryObjectReport) error {
-	in := application.InventoryCollectionReplacementInput{
-		ResourceType: resourceType,
-		Collection:   collection,
-		Reports:      make([]application.InventoryReplacementInput, len(reports)),
-	}
-	for i, report := range reports {
-		name := report.Name
-		in.Reports[i] = application.InventoryReplacementInput{
-			Name:        &name,
-			Labels:      report.Labels,
-			Observation: report.Observation,
-			Conditions:  report.Conditions,
-			ObservedAt:  report.ObservedAt,
-		}
-	}
-	return b.reports.ReplaceCollection(ctx, in)
-}
-
-func (b *e2eInventoryBackend) DeleteCollection(ctx context.Context, resourceType domain.ResourceType, collection domain.CollectionName) error {
-	return b.reports.DeleteCollection(ctx, application.InventoryCollectionDeleteInput{
-		ResourceType: resourceType,
-		Collection:   collection,
-	})
-}
-
-func (b *e2eInventoryBackend) DeleteSubtree(ctx context.Context, ref domain.InventorySubtreeRef) error {
-	return b.subtrees.DeleteOwnedInventorySubtree(ctx, kubeaddon.AddonID, ref)
 }

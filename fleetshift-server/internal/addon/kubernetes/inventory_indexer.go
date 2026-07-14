@@ -108,8 +108,8 @@ func (ic *indexerDelegate) start(ctx context.Context) {
 	mgr.RunContinuous(ctx, ic.cfg.DenyList, ic.cfg.AllowList)
 
 	// Context is done; clean up informers and writer under one budget.
-	// StopAll does not emit RemoveGVR events, so local cache eviction is
-	// not persisted as object or collection deletes.
+	// StopAll does not emit RemoveGVR events, so shutdown does not treat
+	// local cache eviction as a desired-set GVR removal.
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), defaultStopTimeout)
 	defer shutdownCancel()
 

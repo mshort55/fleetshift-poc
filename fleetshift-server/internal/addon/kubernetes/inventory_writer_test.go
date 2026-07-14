@@ -16,26 +16,12 @@ type deltaCall struct {
 	delta InventoryDeltaReport
 }
 
-type replaceCall struct {
-	snapshot InventoryCollectionSnapshot
-}
-
-type deleteCollectionCall struct {
-	ref domain.InventoryCollectionRef
-}
-
 type recordingReporter struct {
 	mu sync.Mutex
 
-	deltas            []deltaCall
-	replaces          []replaceCall
-	deleteCollections []deleteCollectionCall
-	deleteResources   [][]domain.InventoryResourceRef
-	deleteSubtrees    []domain.InventorySubtreeRef
+	deltas []deltaCall
 
-	applyDeltaFunc        func(context.Context, InventoryDeltaReport) error
-	replaceCollectionFunc func(context.Context, InventoryCollectionSnapshot) error
-	deleteCollectionFunc  func(context.Context, domain.InventoryCollectionRef) error
+	applyDeltaFunc func(context.Context, InventoryDeltaReport) error
 }
 
 func (m *recordingReporter) ApplyDelta(ctx context.Context, delta InventoryDeltaReport) error {
@@ -50,67 +36,11 @@ func (m *recordingReporter) ApplyDelta(ctx context.Context, delta InventoryDelta
 	return nil
 }
 
-func (m *recordingReporter) ReplaceCollection(ctx context.Context, snapshot InventoryCollectionSnapshot) error {
-	if m.replaceCollectionFunc != nil {
-		if err := m.replaceCollectionFunc(ctx, snapshot); err != nil {
-			return err
-		}
-	}
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.replaces = append(m.replaces, replaceCall{snapshot: snapshot})
-	return nil
-}
-
-func (m *recordingReporter) DeleteResources(ctx context.Context, refs []domain.InventoryResourceRef) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	copied := make([]domain.InventoryResourceRef, len(refs))
-	copy(copied, refs)
-	m.deleteResources = append(m.deleteResources, copied)
-	return nil
-}
-
-func (m *recordingReporter) DeleteCollection(ctx context.Context, ref domain.InventoryCollectionRef) error {
-	if m.deleteCollectionFunc != nil {
-		if err := m.deleteCollectionFunc(ctx, ref); err != nil {
-			return err
-		}
-	}
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.deleteCollections = append(m.deleteCollections, deleteCollectionCall{ref: ref})
-	return nil
-}
-
-func (m *recordingReporter) DeleteSubtree(_ context.Context, ref domain.InventorySubtreeRef) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.deleteSubtrees = append(m.deleteSubtrees, ref)
-	return nil
-}
-
 func (m *recordingReporter) getDeltas() []deltaCall {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	out := make([]deltaCall, len(m.deltas))
 	copy(out, m.deltas)
-	return out
-}
-
-func (m *recordingReporter) getReplaces() []replaceCall {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	out := make([]replaceCall, len(m.replaces))
-	copy(out, m.replaces)
-	return out
-}
-
-func (m *recordingReporter) getDeleteCollections() []deleteCollectionCall {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	out := make([]deleteCollectionCall, len(m.deleteCollections))
-	copy(out, m.deleteCollections)
 	return out
 }
 
@@ -168,15 +98,6 @@ func mustObjectName(t *testing.T, targetID, uid string, gvr schema.GroupVersionR
 	})
 	if err != nil {
 		t.Fatalf("ObjectResourceName: %v", err)
-	}
-	return name
-}
-
-func mustObjectCollection(t *testing.T, targetID string, gvr schema.GroupVersionResource) domain.CollectionName {
-	t.Helper()
-	name, err := ObjectCollectionName(domain.TargetID(targetID), gvr)
-	if err != nil {
-		t.Fatalf("ObjectCollectionName: %v", err)
 	}
 	return name
 }
@@ -264,13 +185,10 @@ func TestDelete_MapsToApplyDeltaDeletesWithObjectResourceName(t *testing.T) {
 		if !found {
 			t.Fatalf("expected delete ref %s in ApplyDelta.Deletes, not found in %+v", wantName, deltas)
 		}
-		if len(mock.getDeleteCollections()) != 0 {
-			t.Fatal("watch delete must not call DeleteCollection")
-		}
 	})
 }
 
-func TestResync_MapsToReplaceCollection(t *testing.T) {
+func TestResync_MapsToApplyDelta(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		mock := &recordingReporter{}
 		w := newTestWriter(mock, nil, nil, 10*time.Second)
@@ -289,17 +207,22 @@ func TestResync_MapsToReplaceCollection(t *testing.T) {
 		}
 		advanceAndWait(100 * time.Millisecond)
 
-		replaces := mock.getReplaces()
-		if len(replaces) == 0 {
-			t.Fatal("expected at least one ReplaceCollection, got none")
+		deltas := mock.getDeltas()
+		if len(deltas) == 0 {
+			t.Fatal("expected at least one ApplyDelta, got none")
 		}
-		rs := replaces[0]
-		wantCollection := mustObjectCollection(t, "target-1", testGVR)
-		if rs.snapshot.Collection != wantCollection {
-			t.Errorf("collection = %q, want %q", rs.snapshot.Collection, wantCollection)
+		first := deltas[0]
+		if got := len(first.delta.Upserts); got != 2 {
+			t.Fatalf("expected 2 upserts in resync, got %d", got)
 		}
-		if len(rs.snapshot.Reports) != 2 {
-			t.Fatalf("expected 2 reports in resync, got %d", len(rs.snapshot.Reports))
+		if len(first.delta.Deletes) != 0 {
+			t.Fatalf("first resync with no prior nodes must not emit deletes, got %d", len(first.delta.Deletes))
+		}
+		names := reportNames(first.delta.Upserts)
+		for _, expected := range []string{"deploy-r1", "deploy-r2"} {
+			if !names[expected] {
+				t.Errorf("expected item name %s in upserts", expected)
+			}
 		}
 	})
 }
@@ -363,19 +286,15 @@ func TestResync_MissingSchemaEntry(t *testing.T) {
 		}
 		advanceAndWait(100 * time.Millisecond)
 
-		replaces := mock.getReplaces()
-		if len(replaces) == 0 {
-			t.Fatal("expected at least one ReplaceCollection, got none")
+		deltas := mock.getDeltas()
+		if len(deltas) == 0 {
+			t.Fatal("expected at least one ApplyDelta, got none")
 		}
-		rs := replaces[0]
-		wantCollection := mustObjectCollection(t, "target-1", cmGVR)
-		if rs.snapshot.Collection != wantCollection {
-			t.Errorf("collection = %q, want %q", rs.snapshot.Collection, wantCollection)
+		first := deltas[0]
+		if len(first.delta.Upserts) != 1 {
+			t.Fatalf("expected 1 upsert in resync, got %d", len(first.delta.Upserts))
 		}
-		if len(rs.snapshot.Reports) != 1 {
-			t.Fatalf("expected 1 report in resync, got %d", len(rs.snapshot.Reports))
-		}
-		if got := rs.snapshot.Reports[0].Labels["k8s.kind"]; got != "ConfigMap" {
+		if got := first.delta.Upserts[0].Labels["k8s.kind"]; got != "ConfigMap" {
 			t.Errorf("k8s.kind = %q, want ConfigMap", got)
 		}
 	})
@@ -597,12 +516,6 @@ func TestNoIdleHeartbeat(t *testing.T) {
 		if got := len(mock.getDeltas()); got != 0 {
 			t.Fatalf("idle writer must not emit ApplyDelta heartbeats, got %d deltas", got)
 		}
-		if got := len(mock.getReplaces()); got != 0 {
-			t.Fatalf("idle writer must not emit ReplaceCollection, got %d", got)
-		}
-		if got := len(mock.getDeleteCollections()); got != 0 {
-			t.Fatalf("idle writer must not emit DeleteCollection, got %d", got)
-		}
 	})
 }
 
@@ -793,8 +706,13 @@ func TestResync_DoesNotClobberFlushEdges(t *testing.T) {
 
 		w.ResyncCh() <- ResyncEvent{GVR: pvcGVR, Resources: []*unstructured.Unstructured{pvc}}
 		advanceAndWait(100 * time.Millisecond)
-		if len(mock.getReplaces()) == 0 {
-			t.Fatal("expected ReplaceCollection call")
+		deltas := mock.getDeltas()
+		if len(deltas) == 0 {
+			t.Fatal("expected ApplyDelta call from resync")
+		}
+		last := deltas[len(deltas)-1]
+		if len(last.delta.Upserts) != 1 {
+			t.Fatalf("expected 1 upsert in resync delta, got %d", len(last.delta.Upserts))
 		}
 
 		for _, d := range edges.getDeltas() {
@@ -1131,9 +1049,6 @@ func TestShutdownFlush_PersistsPendingEvents(t *testing.T) {
 		if !names["deploy-1"] || !names["deploy-2"] {
 			t.Fatalf("shutdown flush missing events: got %v", names)
 		}
-		if len(mock.getDeleteCollections()) != 0 {
-			t.Fatal("informer shutdown must not call DeleteCollection")
-		}
 	})
 }
 
@@ -1165,9 +1080,6 @@ func TestShutdown_DoesNotPersistCacheEvictionDeletes(t *testing.T) {
 			if len(d.delta.Deletes) > 0 {
 				t.Fatalf("shutdown must not persist cache-eviction deletes, got %+v", d.delta.Deletes)
 			}
-		}
-		if len(mock.getDeleteCollections()) != 0 {
-			t.Fatal("shutdown must not call DeleteCollection")
 		}
 	})
 }
@@ -1368,7 +1280,7 @@ func TestResync_RetriesOnFailure(t *testing.T) {
 		var attemptCount int
 		var mu sync.Mutex
 		mock := &recordingReporter{
-			replaceCollectionFunc: func(_ context.Context, _ InventoryCollectionSnapshot) error {
+			applyDeltaFunc: func(_ context.Context, _ InventoryDeltaReport) error {
 				mu.Lock()
 				defer mu.Unlock()
 				attemptCount++
@@ -1391,7 +1303,7 @@ func TestResync_RetriesOnFailure(t *testing.T) {
 		}
 		advanceAndWait(4 * time.Second)
 
-		if len(mock.getReplaces()) == 0 {
+		if len(mock.getDeltas()) == 0 {
 			t.Fatal("expected resync to succeed after retries")
 		}
 	})
@@ -1518,7 +1430,7 @@ func TestResync_PurgeOnlyAffectsResyncdGVR(t *testing.T) {
 	})
 }
 
-func TestRemoveGVR_MapsToDeleteCollection(t *testing.T) {
+func TestRemoveGVR_DoesNotPersistDeletes(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		mock := &recordingReporter{}
 		w := newTestWriter(mock, nil, nil, 100*time.Millisecond)
@@ -1536,20 +1448,15 @@ func TestRemoveGVR_MapsToDeleteCollection(t *testing.T) {
 		if len(mock.getDeltas()) == 0 {
 			t.Fatal("precondition: expected flush before RemoveGVR")
 		}
+		deltaCountBefore := len(mock.getDeltas())
 
 		w.RemoveCh() <- RemoveGVREvent{GVR: testGVR}
 		advanceAndWait(100 * time.Millisecond)
 
-		wantCollection := mustObjectCollection(t, "target-1", testGVR)
-		calls := mock.getDeleteCollections()
-		if len(calls) != 1 {
-			t.Fatalf("DeleteCollection calls = %d, want 1", len(calls))
-		}
-		if calls[0].ref.ResourceType != ObjectResourceType {
-			t.Errorf("ResourceType = %q, want %q", calls[0].ref.ResourceType, ObjectResourceType)
-		}
-		if calls[0].ref.Collection != wantCollection {
-			t.Errorf("Collection = %q, want %q", calls[0].ref.Collection, wantCollection)
+		for _, d := range mock.getDeltas()[deltaCountBefore:] {
+			if len(d.delta.Deletes) > 0 {
+				t.Fatalf("RemoveGVR must not persist deletes, got %+v", d.delta.Deletes)
+			}
 		}
 
 		cancel()
@@ -1591,17 +1498,44 @@ func TestResync_EmptySnapshotPrunesCollection(t *testing.T) {
 
 		w.ResyncCh() <- ResyncEvent{GVR: testGVR, Resources: nil}
 		advanceAndWait(100 * time.Millisecond)
+		if len(mock.getDeltas()) != 0 {
+			t.Fatalf("empty first resync must not call ApplyDelta, got %d deltas", len(mock.getDeltas()))
+		}
 
-		replaces := mock.getReplaces()
-		if len(replaces) != 1 {
-			t.Fatalf("ReplaceCollection calls = %d, want 1", len(replaces))
+		w.ResyncCh() <- ResyncEvent{
+			GVR: testGVR,
+			Resources: []*unstructured.Unstructured{
+				makeResource("uid-1", "deploy-1", "100"),
+				makeResource("uid-2", "deploy-2", "101"),
+			},
 		}
-		want := mustObjectCollection(t, "target-1", testGVR)
-		if replaces[0].snapshot.Collection != want {
-			t.Errorf("collection = %q, want %q", replaces[0].snapshot.Collection, want)
+		advanceAndWait(100 * time.Millisecond)
+		if len(mock.getDeltas()) != 1 {
+			t.Fatalf("seed resync ApplyDelta calls = %d, want 1", len(mock.getDeltas()))
 		}
-		if len(replaces[0].snapshot.Reports) != 0 {
-			t.Fatalf("empty LIST must replace with 0 reports, got %d", len(replaces[0].snapshot.Reports))
+
+		w.ResyncCh() <- ResyncEvent{GVR: testGVR, Resources: nil}
+		advanceAndWait(100 * time.Millisecond)
+
+		deltas := mock.getDeltas()
+		if len(deltas) != 2 {
+			t.Fatalf("expected prune ApplyDelta after seed resync, got %d deltas", len(deltas))
+		}
+		prune := deltas[1]
+		if len(prune.delta.Upserts) != 0 {
+			t.Fatalf("empty LIST prune should have no upserts, got %d", len(prune.delta.Upserts))
+		}
+		if len(prune.delta.Deletes) != 2 {
+			t.Fatalf("empty LIST prune deletes = %d, want 2", len(prune.delta.Deletes))
+		}
+		want1 := mustObjectName(t, "target-1", "uid-1", testGVR)
+		want2 := mustObjectName(t, "target-1", "uid-2", testGVR)
+		got := make(map[domain.ResourceName]bool, len(prune.delta.Deletes))
+		for _, ref := range prune.delta.Deletes {
+			got[ref.Name] = true
+		}
+		if !got[want1] || !got[want2] {
+			t.Fatalf("expected deletes for prior UIDs, got %+v", prune.delta.Deletes)
 		}
 	})
 }
@@ -1673,11 +1607,6 @@ func TestRemoveGVR_DropsPendingForRemovedGVROnly(t *testing.T) {
 		w.RemoveCh() <- RemoveGVREvent{GVR: testGVR}
 		advanceAndWait(50 * time.Millisecond)
 
-		wantDeleted := mustObjectCollection(t, "target-1", testGVR)
-		if calls := mock.getDeleteCollections(); len(calls) != 1 || calls[0].ref.Collection != wantDeleted {
-			t.Fatalf("DeleteCollection = %+v, want %q", mock.getDeleteCollections(), wantDeleted)
-		}
-
 		cancel()
 		<-done
 
@@ -1697,43 +1626,6 @@ func TestRemoveGVR_DropsPendingForRemovedGVROnly(t *testing.T) {
 		}
 		if !sawRS {
 			t.Fatal("pending ReplicaSet upsert for a different GVR must still flush")
-		}
-	})
-}
-
-func TestRemoveGVR_RetriesDeleteCollection(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
-		var attempts int
-		var mu sync.Mutex
-		mock := &recordingReporter{
-			deleteCollectionFunc: func(_ context.Context, _ domain.InventoryCollectionRef) error {
-				mu.Lock()
-				defer mu.Unlock()
-				attempts++
-				if attempts <= 2 {
-					return context.DeadlineExceeded
-				}
-				return nil
-			},
-		}
-		w := newTestWriter(mock, nil, nil, 10*time.Second)
-
-		ctx, cancel := context.WithCancel(context.Background())
-		defer cancel()
-		go w.Run(ctx)
-		synctest.Wait()
-
-		w.RemoveCh() <- RemoveGVREvent{GVR: testGVR}
-		advanceAndWait(4 * time.Second)
-
-		mu.Lock()
-		got := attempts
-		mu.Unlock()
-		if got < 3 {
-			t.Fatalf("DeleteCollection attempts = %d, want at least 3", got)
-		}
-		if len(mock.getDeleteCollections()) != 1 {
-			t.Fatalf("successful DeleteCollection recordings = %d, want 1", len(mock.getDeleteCollections()))
 		}
 	})
 }
@@ -1844,16 +1736,24 @@ func TestDelete_UsesEventGVRForResourceName(t *testing.T) {
 	})
 }
 
-func TestInformerReconcile_RemoveGVR_WriterDeletesCollection(t *testing.T) {
+func TestInformerReconcile_RemoveGVR_DoesNotPersistDeletes(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		// End-to-end: InformerManager reconcile drop → RemoveGVREvent → writer DeleteCollection.
+		// End-to-end: InformerManager reconcile drop → RemoveGVREvent → writer
+		// clears in-memory state only (no persisted deletes).
 		mock := &recordingReporter{}
-		w := newTestWriter(mock, nil, nil, 10*time.Second)
+		w := newTestWriter(mock, nil, nil, 100*time.Millisecond)
 
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 		go w.Run(ctx)
 		synctest.Wait()
+
+		w.EventCh() <- ResourceEvent{Op: EventAdd, Resource: makeResource("uid-1", "deploy-1", "100"), GVR: testGVR}
+		advanceAndWait(250 * time.Millisecond)
+		deltaCountBefore := len(mock.getDeltas())
+		if deltaCountBefore == 0 {
+			t.Fatal("precondition: expected initial flush before reconcile")
+		}
 
 		disc := newFakeDiscovery(nil)
 		mgr := NewInformerManager(nil, disc, w.EventCh(), w.ResyncCh(), w.RemoveCh(), nil, discardLogger)
@@ -1863,13 +1763,13 @@ func TestInformerReconcile_RemoveGVR_WriterDeletesCollection(t *testing.T) {
 		mgr.Reconcile(ctx, []schema.GroupVersionResource{podsGVR()})
 		advanceAndWait(100 * time.Millisecond)
 
-		want := mustObjectCollection(t, "target-1", testGVR)
-		calls := mock.getDeleteCollections()
-		if len(calls) != 1 {
-			t.Fatalf("DeleteCollection calls = %d, want 1", len(calls))
+		for _, d := range mock.getDeltas()[deltaCountBefore:] {
+			if len(d.delta.Deletes) > 0 {
+				t.Fatalf("RemoveGVR via reconcile must not persist deletes, got %+v", d.delta.Deletes)
+			}
 		}
-		if calls[0].ref.Collection != want {
-			t.Errorf("collection = %q, want %q", calls[0].ref.Collection, want)
+		if _, ok := w.currentNodes["uid-1"]; ok {
+			t.Fatal("RemoveGVR should clear in-memory nodes for dropped GVR")
 		}
 	})
 }
@@ -1951,15 +1851,15 @@ func TestResync_SkipsExtractionFailure(t *testing.T) {
 		}
 		advanceAndWait(100 * time.Millisecond)
 
-		replaces := mock.getReplaces()
-		if len(replaces) != 1 {
-			t.Fatalf("ReplaceCollection calls = %d, want 1", len(replaces))
+		deltas := mock.getDeltas()
+		if len(deltas) != 1 {
+			t.Fatalf("ApplyDelta calls = %d, want 1", len(deltas))
 		}
-		if len(replaces[0].snapshot.Reports) != 1 {
-			t.Fatalf("reports = %d, want 1 (bad UID skipped)", len(replaces[0].snapshot.Reports))
+		if len(deltas[0].delta.Upserts) != 1 {
+			t.Fatalf("upserts = %d, want 1 (bad UID skipped)", len(deltas[0].delta.Upserts))
 		}
-		if replaces[0].snapshot.Reports[0].Labels["k8s.uid"] != "uid-ok" {
-			t.Fatalf("expected uid-ok report, got %+v", replaces[0].snapshot.Reports[0].Labels)
+		if deltas[0].delta.Upserts[0].Labels["k8s.uid"] != "uid-ok" {
+			t.Fatalf("expected uid-ok report, got %+v", deltas[0].delta.Upserts[0].Labels)
 		}
 	})
 }

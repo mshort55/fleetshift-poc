@@ -121,8 +121,7 @@ func TestDirectInventoryReportBackend_RoundTrip(t *testing.T) {
 	ctx := context.Background()
 	now := time.Now()
 	reports := application.NewInventoryReportService(store)
-	subtrees := application.NewTargetInventoryCleanupService(store)
-	backend := newDirectInventoryReportBackend(reports, subtrees)
+	backend := newDirectInventoryReportBackend(reports)
 
 	podsGVR := schema.GroupVersionResource{Version: "v1", Resource: "pods"}
 	pod1, err := kubernetesaddon.ObjectResourceName(kubernetesaddon.KubernetesObjectIdentity{
@@ -149,11 +148,10 @@ func TestDirectInventoryReportBackend_RoundTrip(t *testing.T) {
 	}
 	readTx.Rollback()
 
-	if err := backend.DeleteBatch(ctx, []domain.InventoryResourceRef{{
-		ResourceType: kubernetesaddon.ObjectResourceType,
-		Name:         pod1,
+	if err := backend.ReplaceBatch(ctx, kubernetesaddon.ObjectResourceType, []kubernetesaddon.InventoryObjectReport{{
+		Name: pod1, IsDelete: true,
 	}}); err != nil {
-		t.Fatalf("DeleteBatch: %v", err)
+		t.Fatalf("ReplaceBatch delete: %v", err)
 	}
 	readTx, err = store.BeginReadOnly(ctx)
 	if err != nil {
@@ -161,39 +159,19 @@ func TestDirectInventoryReportBackend_RoundTrip(t *testing.T) {
 	}
 	if _, err := readTx.ExtensionResources().Get(ctx, kubernetesaddon.ObjectResourceType.FullName(pod1)); !errors.Is(err, domain.ErrNotFound) {
 		readTx.Rollback()
-		t.Fatalf("Get after DeleteBatch err=%v, want ErrNotFound", err)
+		t.Fatalf("Get after ReplaceBatch delete err=%v, want ErrNotFound", err)
 	}
 	readTx.Rollback()
 
-	collection := pod1.Collection()
-	if err := backend.ReplaceCollection(ctx, kubernetesaddon.ObjectResourceType, collection, []kubernetesaddon.InventoryObjectReport{{
+	if err := backend.ReplaceBatch(ctx, kubernetesaddon.ObjectResourceType, []kubernetesaddon.InventoryObjectReport{{
 		Name: pod1, ObservedAt: now,
 	}}); err != nil {
-		t.Fatalf("ReplaceCollection: %v", err)
+		t.Fatalf("re-upsert ReplaceBatch: %v", err)
 	}
-	if err := backend.DeleteCollection(ctx, kubernetesaddon.ObjectResourceType, collection); err != nil {
-		t.Fatalf("DeleteCollection: %v", err)
-	}
-	readTx, err = store.BeginReadOnly(ctx)
-	if err != nil {
-		t.Fatalf("begin read: %v", err)
-	}
-	if _, err := readTx.ExtensionResources().Get(ctx, kubernetesaddon.ObjectResourceType.FullName(pod1)); !errors.Is(err, domain.ErrNotFound) {
-		readTx.Rollback()
-		t.Fatalf("Get after DeleteCollection err=%v, want ErrNotFound", err)
-	}
-	readTx.Rollback()
-
-	if err := backend.ReplaceCollection(ctx, kubernetesaddon.ObjectResourceType, collection, []kubernetesaddon.InventoryObjectReport{{
-		Name: pod1, ObservedAt: now,
+	if err := backend.ReplaceBatch(ctx, kubernetesaddon.ObjectResourceType, []kubernetesaddon.InventoryObjectReport{{
+		Name: pod1, IsDelete: true,
 	}}); err != nil {
-		t.Fatalf("re-seed ReplaceCollection: %v", err)
-	}
-	if err := backend.DeleteSubtree(ctx, domain.InventorySubtreeRef{
-		ResourceType: kubernetesaddon.ObjectResourceType,
-		Parent:       "clusters/prod",
-	}); err != nil {
-		t.Fatalf("DeleteSubtree: %v", err)
+		t.Fatalf("second ReplaceBatch delete: %v", err)
 	}
 	readTx, err = store.BeginReadOnly(ctx)
 	if err != nil {
@@ -201,7 +179,7 @@ func TestDirectInventoryReportBackend_RoundTrip(t *testing.T) {
 	}
 	defer readTx.Rollback()
 	if _, err := readTx.ExtensionResources().Get(ctx, kubernetesaddon.ObjectResourceType.FullName(pod1)); !errors.Is(err, domain.ErrNotFound) {
-		t.Fatalf("Get after DeleteSubtree err=%v, want ErrNotFound", err)
+		t.Fatalf("Get after second ReplaceBatch delete err=%v, want ErrNotFound", err)
 	}
 }
 
@@ -233,10 +211,12 @@ func TestNewKubernetesInProcessIndexing_WiresHooksAndController(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ObjectResourceName: %v", err)
 	}
-	if err := reports.ReplaceCollection(ctx, application.InventoryCollectionReplacementInput{
-		ResourceType: kubernetesaddon.ObjectResourceType,
-		Collection:   pod1.Collection(),
-		Reports:      []application.InventoryReplacementInput{{Name: &pod1, ObservedAt: now}},
+	if err := reports.ReplaceBatch(ctx, application.InventoryReplacementBatchInput{
+		Reports: []application.InventoryReplacementInput{{
+			ResourceType: kubernetesaddon.ObjectResourceType,
+			Name:         &pod1,
+			ObservedAt:   now,
+		}},
 	}); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
@@ -352,33 +332,16 @@ func TestDirectInventoryReportBackend_PropagatesServiceErrors(t *testing.T) {
 	// Intentionally do not seed Object type so report writes fail validation.
 	ctx := context.Background()
 	now := time.Now()
-	backend := newDirectInventoryReportBackend(
-		application.NewInventoryReportService(store),
-		application.NewTargetInventoryCleanupService(store),
-	)
+	backend := newDirectInventoryReportBackend(application.NewInventoryReportService(store))
 
 	name := domain.ResourceName("clusters/prod/apiResources/core~v1~pods/objects/uid-1")
 	report := kubernetesaddon.InventoryObjectReport{Name: name, ObservedAt: now}
+	deleteReport := kubernetesaddon.InventoryObjectReport{Name: name, IsDelete: true}
 
 	if err := backend.ReplaceBatch(ctx, kubernetesaddon.ObjectResourceType, []kubernetesaddon.InventoryObjectReport{report}); err == nil {
-		t.Fatal("expected ReplaceBatch error")
+		t.Fatal("expected ReplaceBatch upsert error")
 	}
-	if err := backend.DeleteBatch(ctx, []domain.InventoryResourceRef{{
-		ResourceType: kubernetesaddon.ObjectResourceType,
-		Name:         name,
-	}}); err == nil {
-		t.Fatal("expected DeleteBatch error")
-	}
-	if err := backend.ReplaceCollection(ctx, kubernetesaddon.ObjectResourceType, name.Collection(), []kubernetesaddon.InventoryObjectReport{report}); err == nil {
-		t.Fatal("expected ReplaceCollection error")
-	}
-	if err := backend.DeleteCollection(ctx, kubernetesaddon.ObjectResourceType, name.Collection()); err == nil {
-		t.Fatal("expected DeleteCollection error")
-	}
-	if err := backend.DeleteSubtree(ctx, domain.InventorySubtreeRef{
-		ResourceType: kubernetesaddon.ObjectResourceType,
-		Parent:       "clusters/prod",
-	}); err == nil {
-		t.Fatal("expected DeleteSubtree error")
+	if err := backend.ReplaceBatch(ctx, kubernetesaddon.ObjectResourceType, []kubernetesaddon.InventoryObjectReport{deleteReport}); err == nil {
+		t.Fatal("expected ReplaceBatch delete error")
 	}
 }

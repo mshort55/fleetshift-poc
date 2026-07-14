@@ -171,8 +171,8 @@ func TestListAndResync_PrunesStaleIndexWithoutEventDelete(t *testing.T) {
 		t.Fatalf("listAndResync: %v", err)
 	}
 
-	// Stale absence is owned by ResyncEvent → ReplaceCollection, not
-	// per-UID EventDelete (which would duplicate the collection prune).
+	// Stale absence is owned by ResyncEvent → mixed ApplyDelta, not
+	// per-UID EventDelete (which would duplicate writer reconciliation).
 	select {
 	case ev := <-eventCh:
 		t.Fatalf("unexpected event on empty LIST: op=%v uid=%s", ev.Op, ev.Resource.GetUID())

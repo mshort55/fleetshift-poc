@@ -348,14 +348,6 @@ func TestIndexerDelegate_DoneClosesOnlyAfterWriterFlush(t *testing.T) {
 				}
 				return nil
 			},
-			replaceCollectionFunc: func(ctx context.Context, _ InventoryCollectionSnapshot) error {
-				select {
-				case <-doneClosed:
-					callsAfterDone.Add(1)
-				default:
-				}
-				return nil
-			},
 		}
 
 		ic := newIndexerDelegate(
@@ -807,26 +799,6 @@ func (r *lateCallReporter) note() {
 func (r *lateCallReporter) ApplyDelta(ctx context.Context, delta InventoryDeltaReport) error {
 	r.note()
 	return r.recordingReporter.ApplyDelta(ctx, delta)
-}
-
-func (r *lateCallReporter) ReplaceCollection(ctx context.Context, snapshot InventoryCollectionSnapshot) error {
-	r.note()
-	return r.recordingReporter.ReplaceCollection(ctx, snapshot)
-}
-
-func (r *lateCallReporter) DeleteCollection(ctx context.Context, ref domain.InventoryCollectionRef) error {
-	r.note()
-	return r.recordingReporter.DeleteCollection(ctx, ref)
-}
-
-func (r *lateCallReporter) DeleteResources(ctx context.Context, refs []domain.InventoryResourceRef) error {
-	r.note()
-	return r.recordingReporter.DeleteResources(ctx, refs)
-}
-
-func (r *lateCallReporter) DeleteSubtree(ctx context.Context, ref domain.InventorySubtreeRef) error {
-	r.note()
-	return r.recordingReporter.DeleteSubtree(ctx, ref)
 }
 
 func TestControllerShutdown_NoReporterCallsAfterRunReturns(t *testing.T) {

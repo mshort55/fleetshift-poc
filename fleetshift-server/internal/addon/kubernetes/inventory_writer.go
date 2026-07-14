@@ -88,7 +88,8 @@ func (w *Writer) EventCh() chan<- ResourceEvent { return w.eventCh }
 func (w *Writer) ResyncCh() chan<- ResyncEvent { return w.resyncCh }
 
 // RemoveCh returns the channel callers use to signal that a GVR is no
-// longer being indexed and its inventory collection should be deleted.
+// longer being indexed. Removal is non-destructive to persisted
+// inventory: the writer drops in-memory state for that GVR only.
 func (w *Writer) RemoveCh() chan<- RemoveGVREvent { return w.removeCh }
 
 // Stop requests that Run perform a final flush under flushCtx and then
@@ -107,9 +108,9 @@ func (w *Writer) Stop(flushCtx context.Context) {
 
 // Run starts the event loop. It blocks until Stop is called or ctx is
 // cancelled, flushing any remaining batch before returning. Informer
-// shutdown flushes real pending object events only; it does not turn local
-// cache eviction into persisted deletes, and it does not emit RemoveGVR /
-// DeleteCollection commands.
+// shutdown flushes real pending object events only; it does not turn
+// local cache eviction into persisted deletes. RemoveGVR also leaves
+// persisted inventory unchanged (in-memory drop only).
 func (w *Writer) Run(ctx context.Context) {
 	batchTicker := time.NewTicker(w.batchInterval)
 	defer batchTicker.Stop()
@@ -172,7 +173,7 @@ func (w *Writer) Run(ctx context.Context) {
 
 		case rm := <-w.removeCh:
 			// Drop any pending work for this GVR so a later flush cannot
-			// resurrect objects whose collection is about to be deleted.
+			// resurrect objects after the GVR generation is closed.
 			for uid, gvr := range pendingUpsertGVR {
 				if gvr == rm.GVR {
 					delete(pendingUpserts, uid)
@@ -184,7 +185,7 @@ func (w *Writer) Run(ctx context.Context) {
 					delete(pendingDeletes, uid)
 				}
 			}
-			w.removeGVR(ctx, rm.GVR)
+			w.removeGVR(rm.GVR)
 
 		case <-batchTicker.C:
 			if err := w.flush(ctx, pendingUpserts, pendingUpsertGVR, pendingDeletes, sentVersions); err == nil {
@@ -341,7 +342,13 @@ func (w *Writer) applyDeltaWithRetry(ctx context.Context, delta InventoryDeltaRe
 	return err
 }
 
-// sendResync replaces the exact target+GVR inventory collection.
+// sendResync upserts the LIST snapshot and deletes only resources this
+// writer already knew for the GVR that are absent from the LIST. That
+// is same-process omission reconciliation via in-memory membership; it
+// does not discover database-only rows from an earlier process.
+// In-memory membership for this GVR is updated only after the write
+// succeeds (or when there is no reporter), matching flush's
+// advance-on-success rule.
 //
 // Resync handles items only — edges are not written. Edge computation
 // is deferred to the flush path, which runs ALL edge closures against
@@ -353,7 +360,9 @@ func (w *Writer) sendResync(ctx context.Context, rs ResyncEvent) {
 	entry := w.schemaEntry(rs.GVR)
 
 	resyncUIDs := make(map[string]struct{})
-	var reports []InventoryObjectReport
+	var upserts []InventoryObjectReport
+	nextNodes := make(map[string]inventoryNode)
+	nextEdgeFuncs := make(map[string]func(NodeStore) []Edge)
 
 	for _, r := range rs.Resources {
 		report, node, err := ExtractObservedResource(r, entry, w.targetID)
@@ -365,124 +374,63 @@ func (w *Writer) sendResync(ctx context.Context, rs ResyncEvent) {
 			continue
 		}
 		node.GVR = rs.GVR
-		reports = append(reports, report)
+		upserts = append(upserts, report)
 		uid := string(r.GetUID())
 		resyncUIDs[uid] = struct{}{}
-
-		w.currentNodes[uid] = node
+		nextNodes[uid] = node
 		if entry.BuildEdges != nil {
-			w.edgeFuncs[uid] = entry.BuildEdges(r, uid)
+			nextEdgeFuncs[uid] = entry.BuildEdges(r, uid)
 		}
 	}
 
+	var deletes []domain.InventoryResourceRef
+	var staleUIDs []string
 	for uid, node := range w.currentNodes {
-		if node.GVR == rs.GVR {
-			if _, exists := resyncUIDs[uid]; !exists {
-				delete(w.currentNodes, uid)
-				delete(w.edgeFuncs, uid)
-			}
+		if node.GVR != rs.GVR {
+			continue
 		}
+		if _, exists := resyncUIDs[uid]; exists {
+			continue
+		}
+		ref, err := w.resourceRef(rs.GVR, uid)
+		if err != nil {
+			w.logger.Warn("skipping resync delete; resource name construction failed",
+				"uid", uid,
+				"gvr", rs.GVR.String(),
+				"error", err)
+			continue
+		}
+		deletes = append(deletes, ref)
+		staleUIDs = append(staleUIDs, uid)
 	}
 
-	collection, err := ObjectCollectionName(domain.TargetID(w.targetID), rs.GVR)
-	if err != nil {
-		w.logger.Error("resync aborted; collection name construction failed",
-			"gvr", rs.GVR.String(),
-			"error", err)
+	if err := w.applyDeltaWithRetry(ctx, InventoryDeltaReport{
+		Upserts: upserts,
+		Deletes: deletes,
+	}); err != nil {
+		// applyDeltaWithRetry already logged; keep prior membership so a
+		// later resync can retry the same omission set.
 		return
 	}
 
-	if w.reporter == nil {
-		return
+	maps.Copy(w.currentNodes, nextNodes)
+	maps.Copy(w.edgeFuncs, nextEdgeFuncs)
+	for _, uid := range staleUIDs {
+		delete(w.currentNodes, uid)
+		delete(w.edgeFuncs, uid)
 	}
-	w.replaceCollectionWithRetry(ctx, InventoryCollectionSnapshot{
-		Collection: collection,
-		Reports:    reports,
-	})
 }
 
-func (w *Writer) replaceCollectionWithRetry(ctx context.Context, snapshot InventoryCollectionSnapshot) {
-	var err error
-	for attempt := range 3 {
-		err = w.reporter.ReplaceCollection(ctx, snapshot)
-		if err == nil {
-			return
-		}
-		if ctx.Err() != nil {
-			return
-		}
-
-		backoff := time.Duration(1<<attempt) * time.Second
-		w.logger.Warn("ReplaceCollection failed, retrying",
-			"attempt", attempt+1,
-			"backoff", backoff,
-			"error", err)
-
-		select {
-		case <-ctx.Done():
-			return
-		case <-time.After(backoff):
-		}
-	}
-
-	w.logger.Error("ReplaceCollection failed after retries", "error", err)
-}
-
-// removeGVR deletes the exact target+GVR inventory collection and drops
-// in-memory nodes/edge closures for that GVR. It does not persist edge
-// deletes; the next flush recomputes topology against the remaining
-// nodes. Informer shutdown must not call this path.
-func (w *Writer) removeGVR(ctx context.Context, gvr schema.GroupVersionResource) {
+// removeGVR drops in-memory nodes/edge closures for that GVR. It does
+// not persist inventory deletes; GVR removal from the desired set is
+// non-destructive to stored rows.
+func (w *Writer) removeGVR(gvr schema.GroupVersionResource) {
 	for uid, node := range w.currentNodes {
 		if node.GVR == gvr {
 			delete(w.currentNodes, uid)
 			delete(w.edgeFuncs, uid)
 		}
 	}
-
-	collection, err := ObjectCollectionName(domain.TargetID(w.targetID), gvr)
-	if err != nil {
-		w.logger.Error("GVR removal aborted; collection name construction failed",
-			"gvr", gvr.String(),
-			"error", err)
-		return
-	}
-
-	if w.reporter == nil {
-		return
-	}
-
-	ref := domain.InventoryCollectionRef{
-		ResourceType: ObjectResourceType,
-		Collection:   collection,
-	}
-	var deleteErr error
-	for attempt := range 3 {
-		deleteErr = w.reporter.DeleteCollection(ctx, ref)
-		if deleteErr == nil {
-			return
-		}
-		if ctx.Err() != nil {
-			return
-		}
-
-		backoff := time.Duration(1<<attempt) * time.Second
-		w.logger.Warn("DeleteCollection failed, retrying",
-			"attempt", attempt+1,
-			"backoff", backoff,
-			"gvr", gvr.String(),
-			"error", deleteErr)
-
-		select {
-		case <-ctx.Done():
-			return
-		case <-time.After(backoff):
-		}
-	}
-
-	w.logger.Error("DeleteCollection failed after retries",
-		"gvr", gvr.String(),
-		"error", deleteErr)
 }
 
 func (w *Writer) schemaEntry(gvr schema.GroupVersionResource) SchemaEntry {
