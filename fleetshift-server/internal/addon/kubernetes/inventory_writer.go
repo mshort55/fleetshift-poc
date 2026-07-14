@@ -2,6 +2,7 @@ package kubernetes
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"maps"
 	"time"
@@ -21,6 +22,46 @@ type edgeKey struct {
 	EdgeType  EdgeType
 }
 
+// gvrState is the writer's per-GVR process-generation state. ReportedUIDs
+// is the persistence acknowledgement baseline: it changes only after a
+// successful mixed ReplaceBatch. Generation fencing rejects late events
+// after RemoveGVR closes the generation.
+type gvrState struct {
+	Generation   uint64
+	ReportedUIDs map[string]struct{}
+}
+
+// pendingResync holds a failed LIST/resync mixed batch retained until it
+// succeeds or the GVR generation ends. Unlike watch flushes (which stay
+// in pendingUpserts/pendingDeletes), resync has no natural retry from a
+// healthy watch, so the writer must retain and retry here. Ack is signaled
+// only after success or generation end so the informer can start WATCH.
+type pendingResync struct {
+	generation    uint64
+	delta         InventoryDeltaReport
+	nextNodes     map[string]inventoryNode
+	nextEdgeFuncs map[string]func(NodeStore) []Edge
+	staleUIDs     []string
+	currentUIDs   map[string]struct{}
+	ack           chan<- error
+}
+
+// errResyncGenerationClosed is sent on ResyncEvent.Ack when the GVR
+// generation ends before the LIST write commits.
+var errResyncGenerationClosed = errors.New("inventory resync generation closed")
+
+// ackResync delivers a single result on ack if present. Non-blocking:
+// a canceled informer may no longer be waiting.
+func ackResync(ack chan<- error, err error) {
+	if ack == nil {
+		return
+	}
+	select {
+	case ack <- err:
+	default:
+	}
+}
+
 // Writer batches informer events and reports them through an
 // [InventoryReporter]. Topology edge deltas are computed in memory and
 // delivered to an [EdgeSink] (typically [NoopEdgeSink]); they never
@@ -29,6 +70,11 @@ type Writer struct {
 	targetID      string
 	reporter      InventoryReporter
 	edgeSink      EdgeSink
+	gvrStates     map[schema.GroupVersionResource]*gvrState
+	pendingResync map[schema.GroupVersionResource]*pendingResync
+	// closedGens records the highest generation closed per GVR so late
+	// events for a closed generation cannot re-open it.
+	closedGens    map[schema.GroupVersionResource]uint64
 	schema        map[schema.GroupVersionResource]SchemaEntry
 	eventCh       chan ResourceEvent
 	resyncCh      chan ResyncEvent
@@ -54,7 +100,7 @@ func NewWriter(
 	targetID string,
 	reporter InventoryReporter,
 	edgeSink EdgeSink,
-	schema map[schema.GroupVersionResource]SchemaEntry,
+	schemaEntries map[schema.GroupVersionResource]SchemaEntry,
 	batchInterval time.Duration,
 	logger *slog.Logger,
 ) *Writer {
@@ -68,7 +114,7 @@ func NewWriter(
 		targetID:      targetID,
 		reporter:      reporter,
 		edgeSink:      edgeSink,
-		schema:        schema,
+		schema:        schemaEntries,
 		eventCh:       make(chan ResourceEvent, 256),
 		resyncCh:      make(chan ResyncEvent, 16),
 		removeCh:      make(chan RemoveGVREvent, 16),
@@ -76,6 +122,9 @@ func NewWriter(
 		currentNodes:  make(map[string]inventoryNode),
 		edgeFuncs:     make(map[string]func(NodeStore) []Edge),
 		previousEdges: make(map[edgeKey]Edge),
+		gvrStates:     make(map[schema.GroupVersionResource]*gvrState),
+		pendingResync: make(map[schema.GroupVersionResource]*pendingResync),
+		closedGens:    make(map[schema.GroupVersionResource]uint64),
 		logger:        logger,
 		stopCh:        make(chan context.Context, 1),
 	}
@@ -127,6 +176,10 @@ func (w *Writer) Run(ctx context.Context) {
 		if flushCtx == nil {
 			flushCtx = context.Background()
 		}
+		// Best-effort only: Run is exiting and has no caller to return to.
+		// applyDeltaWithRetry already logs; a still-failing batch stays in
+		// pendingResync until process teardown drops it.
+		_ = w.retryPendingResyncs(flushCtx)
 		w.flush(flushCtx, pendingUpserts, pendingUpsertGVR, pendingDeletes, sentVersions)
 	}
 
@@ -143,6 +196,9 @@ func (w *Writer) Run(ctx context.Context) {
 			return
 
 		case ev := <-w.eventCh:
+			if !w.acceptGeneration(ev.GVR, ev.Generation) {
+				continue
+			}
 			uid := string(ev.Resource.GetUID())
 
 			switch ev.Op {
@@ -163,12 +219,18 @@ func (w *Writer) Run(ctx context.Context) {
 				// Clear sent version so a future add for this UID is not
 				// deduped against the deleted resource.
 				delete(sentVersions, uid)
-				// Remove from edge state.
+				// Drop local edge state immediately so topology tracks the
+				// watch tombstone; ReportedUIDs still waits for flush
+				// success before removing the UID.
 				delete(w.currentNodes, uid)
 				delete(w.edgeFuncs, uid)
 			}
 
 		case rs := <-w.resyncCh:
+			if !w.acceptGeneration(rs.GVR, rs.Generation) {
+				ackResync(rs.Ack, errResyncGenerationClosed)
+				continue
+			}
 			w.sendResync(ctx, rs)
 
 		case rm := <-w.removeCh:
@@ -185,9 +247,12 @@ func (w *Writer) Run(ctx context.Context) {
 					delete(pendingDeletes, uid)
 				}
 			}
-			w.removeGVR(rm.GVR)
+			w.closeGeneration(rm.GVR, rm.Generation)
 
 		case <-batchTicker.C:
+			// Failure keeps the entry in pendingResync for the next tick;
+			// the returned error does not change Run's control flow.
+			_ = w.retryPendingResyncs(ctx)
 			if err := w.flush(ctx, pendingUpserts, pendingUpsertGVR, pendingDeletes, sentVersions); err == nil {
 				pendingUpserts = make(map[string]*unstructured.Unstructured)
 				pendingUpsertGVR = make(map[string]schema.GroupVersionResource)
@@ -207,9 +272,100 @@ func writerShutdownFlushContext(ctx context.Context) (context.Context, context.C
 	return context.WithTimeout(context.Background(), defaultWriterShutdownFlushTimeout)
 }
 
+// acceptGeneration returns whether events for (gvr, gen) should be
+// processed. Generation 0 is untagged (tests) and always accepted for
+// an open GVR slot. A newer generation replaces an older open one; a
+// stale or closed generation is rejected.
+func (w *Writer) acceptGeneration(gvr schema.GroupVersionResource, gen uint64) bool {
+	if gen != 0 {
+		if closed, ok := w.closedGens[gvr]; ok && gen <= closed {
+			return false
+		}
+	}
+	st := w.gvrStates[gvr]
+	if gen == 0 {
+		if st == nil {
+			w.gvrStates[gvr] = &gvrState{
+				Generation:   0,
+				ReportedUIDs: make(map[string]struct{}),
+			}
+		}
+		return true
+	}
+	if st == nil {
+		w.gvrStates[gvr] = &gvrState{
+			Generation:   gen,
+			ReportedUIDs: make(map[string]struct{}),
+		}
+		return true
+	}
+	if st.Generation == gen {
+		return true
+	}
+	if gen > st.Generation {
+		// Fast re-add installed a newer generation before/without a
+		// matching RemoveGVR for the old one; adopt the new baseline.
+		w.dropGVRMemory(gvr)
+		w.gvrStates[gvr] = &gvrState{
+			Generation:   gen,
+			ReportedUIDs: make(map[string]struct{}),
+		}
+		if p, ok := w.pendingResync[gvr]; ok {
+			ackResync(p.ack, errResyncGenerationClosed)
+			delete(w.pendingResync, gvr)
+		}
+		return true
+	}
+	return false
+}
+
+// closeGeneration discards in-memory state for gen. If the writer has
+// already moved to a newer generation for gvr, the close is ignored.
+func (w *Writer) closeGeneration(gvr schema.GroupVersionResource, gen uint64) {
+	st := w.gvrStates[gvr]
+	if st == nil {
+		if gen != 0 {
+			if closed, ok := w.closedGens[gvr]; !ok || gen > closed {
+				w.closedGens[gvr] = gen
+			}
+		}
+		if p, ok := w.pendingResync[gvr]; ok {
+			ackResync(p.ack, errResyncGenerationClosed)
+			delete(w.pendingResync, gvr)
+		}
+		return
+	}
+	if gen != 0 && st.Generation != gen {
+		return
+	}
+	if gen != 0 {
+		w.closedGens[gvr] = gen
+	} else if st.Generation != 0 {
+		w.closedGens[gvr] = st.Generation
+	}
+	w.dropGVRMemory(gvr)
+	delete(w.gvrStates, gvr)
+	if p, ok := w.pendingResync[gvr]; ok {
+		ackResync(p.ack, errResyncGenerationClosed)
+		delete(w.pendingResync, gvr)
+	}
+}
+
+// dropGVRMemory clears edge/node state for gvr without touching
+// persisted inventory.
+func (w *Writer) dropGVRMemory(gvr schema.GroupVersionResource) {
+	for uid, node := range w.currentNodes {
+		if node.GVR == gvr {
+			delete(w.currentNodes, uid)
+			delete(w.edgeFuncs, uid)
+		}
+	}
+}
+
 // flush sends the accumulated batch as a single ApplyDelta call. It applies
 // dedup by skipping upserts whose resourceVersion has not changed.
-// Returns error if the write fails; state is only advanced on success.
+// Returns error if the write fails; ReportedUIDs / sentVersions advance
+// only on success.
 func (w *Writer) flush(
 	ctx context.Context,
 	upserts map[string]*unstructured.Unstructured,
@@ -223,6 +379,11 @@ func (w *Writer) flush(
 
 	var reports []InventoryObjectReport
 	newSentVersions := make(map[string]string)
+	upsertedUIDs := make(map[string]schema.GroupVersionResource)
+	prevNodes := make(map[string]inventoryNode)
+	prevEdgeFuncs := make(map[string]func(NodeStore) []Edge)
+	hadPrevNode := make(map[string]bool)
+	hadPrevEdgeFn := make(map[string]bool)
 
 	for uid, r := range upserts {
 		rv := r.GetResourceVersion()
@@ -244,16 +405,28 @@ func (w *Writer) flush(
 		node.GVR = gvr
 		reports = append(reports, report)
 		newSentVersions[uid] = rv
+		upsertedUIDs[uid] = gvr
 
-		// Track inventory node for edge computation.
+		// Uncommitted edge-state update for diffEdges; restored on write
+		// failure so a retry does not lose a previously acknowledged node.
+		if existing, ok := w.currentNodes[uid]; ok {
+			prevNodes[uid] = existing
+			hadPrevNode[uid] = true
+		}
+		if existing, ok := w.edgeFuncs[uid]; ok {
+			prevEdgeFuncs[uid] = existing
+			hadPrevEdgeFn[uid] = true
+		}
 		w.currentNodes[uid] = node
-
 		if entry.BuildEdges != nil {
 			w.edgeFuncs[uid] = entry.BuildEdges(r, uid)
+		} else {
+			delete(w.edgeFuncs, uid)
 		}
 	}
 
 	var deletedRefs []domain.InventoryResourceRef
+	deletedUIDs := make(map[string]schema.GroupVersionResource)
 	for uid, gvr := range deletes {
 		ref, err := w.resourceRef(gvr, uid)
 		if err != nil {
@@ -264,6 +437,7 @@ func (w *Writer) flush(
 			continue
 		}
 		deletedRefs = append(deletedRefs, ref)
+		deletedUIDs[uid] = gvr
 	}
 
 	if len(reports) == 0 && len(deletedRefs) == 0 {
@@ -273,6 +447,9 @@ func (w *Writer) flush(
 	edgeAdds, edgeDels, newEdges := w.diffEdges()
 
 	if w.reporter == nil {
+		w.acknowledgeFlush(upsertedUIDs, deletedUIDs)
+		maps.Copy(sentVersions, newSentVersions)
+		w.previousEdges = newEdges
 		return nil
 	}
 
@@ -281,6 +458,7 @@ func (w *Writer) flush(
 		Deletes: deletedRefs,
 	}
 	if err := w.applyDeltaWithRetry(ctx, delta); err != nil {
+		w.restoreUncommittedNodes(upsertedUIDs, prevNodes, prevEdgeFuncs, hadPrevNode, hadPrevEdgeFn)
 		return err
 	}
 
@@ -290,13 +468,61 @@ func (w *Writer) flush(
 			Deletes: edgeDels,
 		}); err != nil {
 			w.logger.Warn("edge sink ApplyEdgeDelta failed", "error", err)
+			w.restoreUncommittedNodes(upsertedUIDs, prevNodes, prevEdgeFuncs, hadPrevNode, hadPrevEdgeFn)
 			return err
 		}
 	}
 
+	w.acknowledgeFlush(upsertedUIDs, deletedUIDs)
 	maps.Copy(sentVersions, newSentVersions)
 	w.previousEdges = newEdges
 	return nil
+}
+
+// restoreUncommittedNodes rolls back currentNodes/edgeFuncs for UIDs that
+// were updated before a failed ApplyDelta/ApplyEdgeDelta so a later retry
+// still diffs from the last acknowledged edge state.
+func (w *Writer) restoreUncommittedNodes(
+	upsertedUIDs map[string]schema.GroupVersionResource,
+	prevNodes map[string]inventoryNode,
+	prevEdgeFuncs map[string]func(NodeStore) []Edge,
+	hadPrevNode map[string]bool,
+	hadPrevEdgeFn map[string]bool,
+) {
+	for uid := range upsertedUIDs {
+		if hadPrevNode[uid] {
+			w.currentNodes[uid] = prevNodes[uid]
+		} else {
+			delete(w.currentNodes, uid)
+		}
+		if hadPrevEdgeFn[uid] {
+			w.edgeFuncs[uid] = prevEdgeFuncs[uid]
+		} else {
+			delete(w.edgeFuncs, uid)
+		}
+	}
+}
+
+// acknowledgeFlush advances ReportedUIDs after a successful watch flush:
+// upserted UIDs are added, deleted UIDs are removed. Call only after the
+// mixed ReplaceBatch (and any edge sink write) has succeeded.
+func (w *Writer) acknowledgeFlush(
+	upsertedUIDs map[string]schema.GroupVersionResource,
+	deletedUIDs map[string]schema.GroupVersionResource,
+) {
+	for uid, gvr := range upsertedUIDs {
+		st := w.gvrStates[gvr]
+		if st == nil {
+			st = &gvrState{ReportedUIDs: make(map[string]struct{})}
+			w.gvrStates[gvr] = st
+		}
+		st.ReportedUIDs[uid] = struct{}{}
+	}
+	for uid, gvr := range deletedUIDs {
+		if st := w.gvrStates[gvr]; st != nil {
+			delete(st.ReportedUIDs, uid)
+		}
+	}
 }
 
 // applyDeltaWithRetry applies a delta with exponential backoff retry.
@@ -342,20 +568,14 @@ func (w *Writer) applyDeltaWithRetry(ctx context.Context, delta InventoryDeltaRe
 	return err
 }
 
-// sendResync upserts the LIST snapshot and deletes only resources this
-// writer already knew for the GVR that are absent from the LIST. That
-// is same-process omission reconciliation via in-memory membership; it
-// does not discover database-only rows from an earlier process.
-// In-memory membership for this GVR is updated only after the write
-// succeeds (or when there is no reporter), matching flush's
-// advance-on-success rule.
-//
-// Resync handles items only — edges are not written. Edge computation
-// is deferred to the flush path, which runs ALL edge closures against
-// the full w.currentNodes on every tick. This avoids a class of race
-// where a GVR resync runs before cross-GVR dependencies are in
-// w.currentNodes (e.g. Pod resync before ReplicaSets are known),
-// which would delete correct edges and fail to re-create them.
+// sendResync upserts the LIST snapshot and deletes only UIDs in this
+// generation's ReportedUIDs that are absent from the LIST. That is
+// same-process omission reconciliation; it does not discover
+// database-only rows from an earlier process. ReportedUIDs and
+// in-memory membership update only after the write succeeds. On
+// failure the mixed batch is retained and retried until success or
+// generation end; ResyncEvent.Ack is signaled only then so the
+// informer does not start WATCH from an uncommitted LIST cursor.
 func (w *Writer) sendResync(ctx context.Context, rs ResyncEvent) {
 	entry := w.schemaEntry(rs.GVR)
 
@@ -383,54 +603,101 @@ func (w *Writer) sendResync(ctx context.Context, rs ResyncEvent) {
 		}
 	}
 
+	st := w.gvrStates[rs.GVR]
 	var deletes []domain.InventoryResourceRef
 	var staleUIDs []string
-	for uid, node := range w.currentNodes {
-		if node.GVR != rs.GVR {
-			continue
+	if st != nil {
+		for uid := range st.ReportedUIDs {
+			if _, exists := resyncUIDs[uid]; exists {
+				continue
+			}
+			ref, err := w.resourceRef(rs.GVR, uid)
+			if err != nil {
+				w.logger.Warn("skipping resync delete; resource name construction failed",
+					"uid", uid,
+					"gvr", rs.GVR.String(),
+					"error", err)
+				continue
+			}
+			deletes = append(deletes, ref)
+			staleUIDs = append(staleUIDs, uid)
 		}
-		if _, exists := resyncUIDs[uid]; exists {
-			continue
-		}
-		ref, err := w.resourceRef(rs.GVR, uid)
-		if err != nil {
-			w.logger.Warn("skipping resync delete; resource name construction failed",
-				"uid", uid,
-				"gvr", rs.GVR.String(),
-				"error", err)
-			continue
-		}
-		deletes = append(deletes, ref)
-		staleUIDs = append(staleUIDs, uid)
 	}
 
-	if err := w.applyDeltaWithRetry(ctx, InventoryDeltaReport{
-		Upserts: upserts,
-		Deletes: deletes,
-	}); err != nil {
-		// applyDeltaWithRetry already logged; keep prior membership so a
-		// later resync can retry the same omission set.
+	// A newer LIST for the same GVR replaces any retained prior batch;
+	// nack the old waiter so it can relist rather than hang.
+	if prev, ok := w.pendingResync[rs.GVR]; ok {
+		ackResync(prev.ack, errResyncGenerationClosed)
+	}
+
+	pending := &pendingResync{
+		generation:    rs.Generation,
+		delta:         InventoryDeltaReport{Upserts: upserts, Deletes: deletes},
+		nextNodes:     nextNodes,
+		nextEdgeFuncs: nextEdgeFuncs,
+		staleUIDs:     staleUIDs,
+		currentUIDs:   resyncUIDs,
+		ack:           rs.Ack,
+	}
+
+	if err := w.applyDeltaWithRetry(ctx, pending.delta); err != nil {
+		// Retain for ticker retry; do not advance ReportedUIDs or ack yet.
+		w.pendingResync[rs.GVR] = pending
 		return
 	}
+	delete(w.pendingResync, rs.GVR)
+	w.applyResyncSuccess(rs.GVR, pending)
+	ackResync(pending.ack, nil)
+}
 
-	maps.Copy(w.currentNodes, nextNodes)
-	maps.Copy(w.edgeFuncs, nextEdgeFuncs)
-	for _, uid := range staleUIDs {
+// applyResyncSuccess commits in-memory membership and ReportedUIDs for a
+// successful LIST/resync write. Call only after ApplyDelta succeeds (or
+// when there is no reporter).
+func (w *Writer) applyResyncSuccess(gvr schema.GroupVersionResource, pending *pendingResync) {
+	maps.Copy(w.currentNodes, pending.nextNodes)
+	maps.Copy(w.edgeFuncs, pending.nextEdgeFuncs)
+	for _, uid := range pending.staleUIDs {
 		delete(w.currentNodes, uid)
 		delete(w.edgeFuncs, uid)
 	}
+
+	st := w.gvrStates[gvr]
+	if st == nil {
+		st = &gvrState{
+			Generation:   pending.generation,
+			ReportedUIDs: make(map[string]struct{}),
+		}
+		w.gvrStates[gvr] = st
+	}
+	st.ReportedUIDs = maps.Clone(pending.currentUIDs)
+	if st.ReportedUIDs == nil {
+		st.ReportedUIDs = make(map[string]struct{})
+	}
 }
 
-// removeGVR drops in-memory nodes/edge closures for that GVR. It does
-// not persist inventory deletes; GVR removal from the desired set is
-// non-destructive to stored rows.
-func (w *Writer) removeGVR(gvr schema.GroupVersionResource) {
-	for uid, node := range w.currentNodes {
-		if node.GVR == gvr {
-			delete(w.currentNodes, uid)
-			delete(w.edgeFuncs, uid)
+// retryPendingResyncs retries retained LIST writes. Membership /
+// ReportedUIDs advance only on success. RemoveGVR / generation close
+// drops pending entries without synthesizing deletes and nacks waiters.
+func (w *Writer) retryPendingResyncs(ctx context.Context) error {
+	var firstErr error
+	for gvr, pending := range w.pendingResync {
+		st := w.gvrStates[gvr]
+		if st == nil || (pending.generation != 0 && st.Generation != pending.generation) {
+			ackResync(pending.ack, errResyncGenerationClosed)
+			delete(w.pendingResync, gvr)
+			continue
 		}
+		if err := w.applyDeltaWithRetry(ctx, pending.delta); err != nil {
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
+		}
+		delete(w.pendingResync, gvr)
+		w.applyResyncSuccess(gvr, pending)
+		ackResync(pending.ack, nil)
 	}
+	return firstErr
 }
 
 func (w *Writer) schemaEntry(gvr schema.GroupVersionResource) SchemaEntry {

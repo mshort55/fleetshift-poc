@@ -2,6 +2,8 @@ package kubernetes
 
 import (
 	"context"
+	"errors"
+	"log/slog"
 	"sync"
 	"testing"
 	"testing/synctest"
@@ -9,7 +11,10 @@ import (
 
 	"github.com/fleetshift/fleetshift-poc/fleetshift-server/internal/domain"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/watch"
+	k8stesting "k8s.io/client-go/testing"
 )
 
 type deltaCall struct {
@@ -1888,5 +1893,430 @@ func TestRemoveGVR_NilReporterIsNoop(t *testing.T) {
 		if _, ok := w.currentNodes["uid-1"]; ok {
 			t.Fatal("removeGVR should drop in-memory nodes even when reporter is nil")
 		}
+	})
+}
+
+func TestWriter_RejectsClosedGenerationEvents(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		mock := &recordingReporter{}
+		w := newTestWriter(mock, nil, nil, 100*time.Millisecond)
+
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		go w.Run(ctx)
+		synctest.Wait()
+
+		w.EventCh() <- ResourceEvent{
+			Op: EventAdd, Resource: makeResource("uid-1", "deploy-1", "100"),
+			GVR: testGVR, Generation: 1,
+		}
+		advanceAndWait(250 * time.Millisecond)
+		if len(mock.getDeltas()) != 1 {
+			t.Fatalf("gen-1 upsert ApplyDelta calls = %d, want 1", len(mock.getDeltas()))
+		}
+
+		w.RemoveCh() <- RemoveGVREvent{GVR: testGVR, Generation: 1}
+		advanceAndWait(50 * time.Millisecond)
+
+		w.EventCh() <- ResourceEvent{
+			Op: EventAdd, Resource: makeResource("uid-late", "deploy-late", "200"),
+			GVR: testGVR, Generation: 1,
+		}
+		advanceAndWait(250 * time.Millisecond)
+		if got := len(mock.getDeltas()); got != 1 {
+			t.Fatalf("closed generation must not flush, ApplyDelta calls = %d", got)
+		}
+	})
+}
+
+func TestResync_UsesReportedUIDsNotUnackedNodes(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		// ReportedUIDs advances only after a successful write. A pending
+		// watch upsert that has not been acknowledged must not appear in
+		// the baseline a later resync would delete against.
+		mock := &recordingReporter{}
+		w := newTestWriter(mock, nil, nil, time.Hour)
+
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		go w.Run(ctx)
+		synctest.Wait()
+
+		w.ResyncCh() <- ResyncEvent{
+			GVR:       testGVR,
+			Resources: []*unstructured.Unstructured{makeResource("uid-ack", "deploy-ack", "100")},
+		}
+		advanceAndWait(100 * time.Millisecond)
+
+		w.EventCh() <- ResourceEvent{
+			Op: EventAdd, Resource: makeResource("uid-unacked", "deploy-unacked", "200"), GVR: testGVR,
+		}
+		advanceAndWait(50 * time.Millisecond)
+
+		st := w.gvrStates[testGVR]
+		if st == nil {
+			t.Fatal("expected gvrState after seed resync")
+		}
+		if _, ok := st.ReportedUIDs["uid-ack"]; !ok {
+			t.Fatal("ReportedUIDs missing acknowledged uid-ack")
+		}
+		if _, ok := st.ReportedUIDs["uid-unacked"]; ok {
+			t.Fatal("unflushed upsert must not add uid-unacked to ReportedUIDs")
+		}
+
+		// Empty resync must delete only acknowledged absences (uid-ack),
+		// never the still-pending unacked watch upsert.
+		w.ResyncCh() <- ResyncEvent{GVR: testGVR, Resources: nil}
+		advanceAndWait(100 * time.Millisecond)
+
+		deltas := mock.getDeltas()
+		if len(deltas) < 2 {
+			t.Fatalf("ApplyDelta calls = %d, want >= 2 (seed + prune)", len(deltas))
+		}
+		prune := deltas[len(deltas)-1].delta
+		if len(prune.Deletes) != 1 {
+			t.Fatalf("prune deletes = %d, want 1 (uid-ack only)", len(prune.Deletes))
+		}
+		wantAck := mustObjectName(t, "target-1", "uid-ack", testGVR)
+		if prune.Deletes[0].Name != wantAck {
+			t.Fatalf("prune deleted %v, want %v", prune.Deletes[0], wantAck)
+		}
+		wantUnacked := mustObjectName(t, "target-1", "uid-unacked", testGVR)
+		for _, d := range prune.Deletes {
+			if d.Name == wantUnacked {
+				t.Fatal("unacked uid must not be deleted by ReportedUIDs resync")
+			}
+		}
+
+		// Drop pending work so shutdown flush cannot acknowledge it.
+		w.RemoveCh() <- RemoveGVREvent{GVR: testGVR}
+		advanceAndWait(50 * time.Millisecond)
+	})
+}
+
+func TestResync_RetainsFailedWriteAndRetriesWithoutSecondResync(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		var mu sync.Mutex
+		attempts := 0
+		mock := &recordingReporter{
+			applyDeltaFunc: func(_ context.Context, _ InventoryDeltaReport) error {
+				mu.Lock()
+				defer mu.Unlock()
+				attempts++
+				// Fail the initial applyDeltaWithRetry window (3 attempts),
+				// then succeed on the retained ticker retry.
+				if attempts <= 3 {
+					return context.DeadlineExceeded
+				}
+				return nil
+			},
+		}
+		w := newTestWriter(mock, nil, nil, 100*time.Millisecond)
+
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		go w.Run(ctx)
+		synctest.Wait()
+
+		ack := make(chan error, 1)
+		w.ResyncCh() <- ResyncEvent{
+			GVR:       testGVR,
+			Resources: []*unstructured.Unstructured{makeResource("uid-r1", "deploy-r1", "300")},
+			Ack:       ack,
+		}
+		// Exhaust sendResync's bounded retries (1s+2s+4s), then let the
+		// batch ticker retry the retained pending resync.
+		advanceAndWait(10 * time.Second)
+
+		select {
+		case err := <-ack:
+			if err != nil {
+				t.Fatalf("retained retry ack = %v, want nil", err)
+			}
+		default:
+			t.Fatal("retained resync must ack waiter after successful retry")
+		}
+
+		mu.Lock()
+		gotAttempts := attempts
+		mu.Unlock()
+		if gotAttempts < 4 {
+			t.Fatalf("attempts = %d, want >= 4 (3 immediate + retained retry)", gotAttempts)
+		}
+		if len(mock.getDeltas()) == 0 {
+			t.Fatal("retained resync must eventually succeed without a second ResyncEvent")
+		}
+		st := w.gvrStates[testGVR]
+		if st == nil {
+			t.Fatal("expected gvrState after successful retained resync")
+		}
+		if _, ok := st.ReportedUIDs["uid-r1"]; !ok {
+			t.Fatal("ReportedUIDs must include uid-r1 only after successful write")
+		}
+	})
+}
+
+func TestResync_RemoveGVRNacksWaitingAck(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		mock := &recordingReporter{
+			applyDeltaFunc: func(context.Context, InventoryDeltaReport) error {
+				return context.DeadlineExceeded
+			},
+		}
+		w := newTestWriter(mock, nil, nil, time.Hour)
+
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		go w.Run(ctx)
+		synctest.Wait()
+
+		ack := make(chan error, 1)
+		w.ResyncCh() <- ResyncEvent{
+			GVR:        testGVR,
+			Resources:  []*unstructured.Unstructured{makeResource("uid-1", "deploy-1", "100")},
+			Generation: 1,
+			Ack:        ack,
+		}
+		// Exhaust bounded retries so the batch is retained pending.
+		advanceAndWait(8 * time.Second)
+
+		select {
+		case <-ack:
+			t.Fatal("ack must not fire while write is still failing/retained")
+		default:
+		}
+
+		w.RemoveCh() <- RemoveGVREvent{GVR: testGVR, Generation: 1}
+		advanceAndWait(50 * time.Millisecond)
+
+		select {
+		case err := <-ack:
+			if !errors.Is(err, errResyncGenerationClosed) {
+				t.Fatalf("ack err = %v, want %v", err, errResyncGenerationClosed)
+			}
+		default:
+			t.Fatal("RemoveGVR must nack waiting ResyncEvent.Ack")
+		}
+		if _, ok := w.pendingResync[testGVR]; ok {
+			t.Fatal("pendingResync must be cleared on generation close")
+		}
+	})
+}
+
+func TestResync_NewerListNacksPendingAck(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		var mu sync.Mutex
+		attempts := 0
+		mock := &recordingReporter{
+			applyDeltaFunc: func(context.Context, InventoryDeltaReport) error {
+				mu.Lock()
+				defer mu.Unlock()
+				attempts++
+				// First LIST exhausts retries and retains; second LIST succeeds.
+				if attempts <= 3 {
+					return context.DeadlineExceeded
+				}
+				return nil
+			},
+		}
+		w := newTestWriter(mock, nil, nil, time.Hour)
+
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		go w.Run(ctx)
+		synctest.Wait()
+
+		ack1 := make(chan error, 1)
+		w.ResyncCh() <- ResyncEvent{
+			GVR:        testGVR,
+			Resources:  []*unstructured.Unstructured{makeResource("uid-old", "deploy-old", "100")},
+			Generation: 1,
+			Ack:        ack1,
+		}
+		advanceAndWait(8 * time.Second)
+
+		ack2 := make(chan error, 1)
+		w.ResyncCh() <- ResyncEvent{
+			GVR:        testGVR,
+			Resources:  []*unstructured.Unstructured{makeResource("uid-new", "deploy-new", "200")},
+			Generation: 1,
+			Ack:        ack2,
+		}
+		advanceAndWait(100 * time.Millisecond)
+
+		select {
+		case err := <-ack1:
+			if !errors.Is(err, errResyncGenerationClosed) {
+				t.Fatalf("replaced pending ack = %v, want generation closed", err)
+			}
+		default:
+			t.Fatal("newer LIST must nack the previous pending Ack")
+		}
+		select {
+		case err := <-ack2:
+			if err != nil {
+				t.Fatalf("replacement LIST ack = %v, want nil", err)
+			}
+		default:
+			t.Fatal("successful replacement LIST must ack its waiter")
+		}
+	})
+}
+
+func TestWriter_FastReAddAdoptsNewerGeneration(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		mock := &recordingReporter{}
+		w := newTestWriter(mock, nil, nil, 100*time.Millisecond)
+
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		go w.Run(ctx)
+		synctest.Wait()
+
+		w.EventCh() <- ResourceEvent{
+			Op: EventAdd, Resource: makeResource("uid-old", "deploy-old", "100"),
+			GVR: testGVR, Generation: 1,
+		}
+		advanceAndWait(250 * time.Millisecond)
+		if st := w.gvrStates[testGVR]; st == nil || st.Generation != 1 {
+			t.Fatalf("expected gen 1 state, got %+v", st)
+		}
+
+		// Fast re-add without RemoveGVR: newer generation must replace baseline.
+		w.EventCh() <- ResourceEvent{
+			Op: EventAdd, Resource: makeResource("uid-new", "deploy-new", "200"),
+			GVR: testGVR, Generation: 2,
+		}
+		advanceAndWait(250 * time.Millisecond)
+
+		st := w.gvrStates[testGVR]
+		if st == nil || st.Generation != 2 {
+			t.Fatalf("expected gen 2 state after fast re-add, got %+v", st)
+		}
+		if _, ok := st.ReportedUIDs["uid-new"]; !ok {
+			t.Fatal("gen-2 upsert must be acknowledged in ReportedUIDs")
+		}
+		if _, ok := st.ReportedUIDs["uid-old"]; ok {
+			t.Fatal("fast re-add must drop prior generation ReportedUIDs")
+		}
+
+		// Late gen-1 event must be rejected after gen-2 is open.
+		before := len(mock.getDeltas())
+		w.EventCh() <- ResourceEvent{
+			Op: EventAdd, Resource: makeResource("uid-late", "deploy-late", "300"),
+			GVR: testGVR, Generation: 1,
+		}
+		advanceAndWait(250 * time.Millisecond)
+		if got := len(mock.getDeltas()); got != before {
+			t.Fatalf("stale gen-1 event flushed: deltas %d -> %d", before, got)
+		}
+	})
+}
+
+func TestFlush_FailureRestoresUncommittedNodes(t *testing.T) {
+	mock := &recordingReporter{
+		applyDeltaFunc: func(context.Context, InventoryDeltaReport) error {
+			return context.DeadlineExceeded
+		},
+	}
+	w := newTestWriter(mock, nil, nil, time.Hour)
+
+	upserts := map[string]*unstructured.Unstructured{
+		"uid-1": makeResource("uid-1", "deploy-1", "100"),
+	}
+	upsertGVRs := map[string]schema.GroupVersionResource{"uid-1": testGVR}
+	deletes := map[string]schema.GroupVersionResource{}
+	sent := map[string]string{}
+
+	if err := w.flush(context.Background(), upserts, upsertGVRs, deletes, sent); err == nil {
+		t.Fatal("expected flush failure")
+	}
+	if _, ok := w.currentNodes["uid-1"]; ok {
+		t.Fatal("flush failure must restore/clear uncommitted currentNodes entry")
+	}
+	if _, ok := w.edgeFuncs["uid-1"]; ok {
+		t.Fatal("flush failure must restore/clear uncommitted edgeFuncs entry")
+	}
+	if st := w.gvrStates[testGVR]; st != nil {
+		if _, ok := st.ReportedUIDs["uid-1"]; ok {
+			t.Fatal("ReportedUIDs must not advance after flush failure")
+		}
+	}
+	if len(sent) != 0 {
+		t.Fatalf("sentVersions must not advance after flush failure, got %#v", sent)
+	}
+}
+
+func TestGenericInformer_Run_WatchBlockedUntilWriterRetainedRetryAcks(t *testing.T) {
+	// End-to-end Option A: failed LIST write retains; watch stays down until
+	// the writer's ticker retry succeeds and acks.
+	synctest.Test(t, func(t *testing.T) {
+		gvr := podsGVR()
+		dyn := newFakeDynamicClient(gvr)
+		pod := makePod("uid-1", "pod-1", "default", "1")
+		list := &unstructured.UnstructuredList{Items: []unstructured.Unstructured{*pod}}
+		list.Object = map[string]any{"metadata": map[string]any{"resourceVersion": "1"}}
+		dyn.PrependReactor("list", "pods", func(k8stesting.Action) (handled bool, ret runtime.Object, err error) {
+			return true, list, nil
+		})
+
+		watchStarted := make(chan struct{})
+		dyn.PrependWatchReactor("pods", func(k8stesting.Action) (bool, watch.Interface, error) {
+			select {
+			case <-watchStarted:
+			default:
+				close(watchStarted)
+			}
+			return true, watch.NewFake(), nil
+		})
+
+		var mu sync.Mutex
+		attempts := 0
+		reporter := &recordingReporter{
+			applyDeltaFunc: func(context.Context, InventoryDeltaReport) error {
+				mu.Lock()
+				defer mu.Unlock()
+				attempts++
+				if attempts <= 3 {
+					return context.DeadlineExceeded
+				}
+				return nil
+			},
+		}
+		schema := map[schema.GroupVersionResource]SchemaEntry{
+			gvr: {GVR: gvr, Kind: "Pod"},
+		}
+		w := NewWriter("target-1", reporter, NoopEdgeSink{}, schema, 100*time.Millisecond, discardLogger)
+
+		inf := NewInformerGeneration(dyn, gvr, 1, w.EventCh(), w.ResyncCh(), nil, slog.Default())
+
+		runCtx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		go w.Run(runCtx)
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			inf.Run(runCtx)
+		}()
+		synctest.Wait()
+
+		select {
+		case <-watchStarted:
+			t.Fatal("watch must not start while LIST write is still failing")
+		default:
+		}
+
+		// Exhaust immediate retries, then ticker retained retry succeeds and acks.
+		time.Sleep(10 * time.Second)
+		synctest.Wait()
+
+		select {
+		case <-watchStarted:
+		default:
+			t.Fatal("watch should start after retained LIST write succeeds")
+		}
+		cancel()
+		synctest.Wait()
+		<-done
 	})
 }

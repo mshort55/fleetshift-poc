@@ -207,6 +207,8 @@ func TestInformerManager_Reconcile_StartNew(t *testing.T) {
 
 	dynClient := newFakeDynamicClient(podsGVR, svcsGVR)
 	mgr := NewInformerManager(dynClient, disc, eventCh, resyncCh, nil, nil, logger)
+	stopAck := ackAllResyncs(resyncCh)
+	defer stopAck()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -278,7 +280,9 @@ func TestInformerManager_Reconcile_SendsRemoveGVREvent(t *testing.T) {
 	mgr := NewInformerManager(nil, disc, eventCh, resyncCh, removeCh, nil, logger)
 
 	mgr.stoppers[svcsGVR] = func() {}
+	mgr.generations[svcsGVR] = 7
 	mgr.stoppers[podsGVR] = func() {}
+	mgr.generations[podsGVR] = 3
 
 	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
 	defer cancel()
@@ -288,6 +292,9 @@ func TestInformerManager_Reconcile_SendsRemoveGVREvent(t *testing.T) {
 	case got := <-removeCh:
 		if got.GVR != svcsGVR {
 			t.Fatalf("RemoveGVREvent GVR = %v, want %v", got.GVR, svcsGVR)
+		}
+		if got.Generation != 7 {
+			t.Fatalf("RemoveGVREvent Generation = %d, want 7", got.Generation)
 		}
 	default:
 		t.Fatal("expected RemoveGVREvent for stopped services GVR")
@@ -367,6 +374,8 @@ func TestGenericInformer_ClusterScopedPassesThroughNamespaceFilter(t *testing.T)
 
 	eventCh := make(chan ResourceEvent, 100)
 	resyncCh := make(chan ResyncEvent, 100)
+	stopAck := ackAllResyncs(resyncCh)
+	defer stopAck()
 
 	informer := NewInformer(dynClient, nodesGVR, eventCh, resyncCh, nsFilter, slog.Default())
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)

@@ -125,6 +125,8 @@ func TestInformerManager_StopAllAwaitsInformerGoroutines(t *testing.T) {
 		dyn := newFakeDynamicClient(gvr)
 		eventCh := make(chan ResourceEvent, 64)
 		resyncCh := make(chan ResyncEvent, 8)
+		stopAck := ackAllResyncs(resyncCh)
+		defer stopAck()
 		mgr := NewInformerManager(dyn, disc, eventCh, resyncCh, nil, nil, slog.Default())
 
 		ctx, cancel := context.WithCancel(context.Background())
@@ -158,6 +160,8 @@ func TestInformerManager_StopAllAwaitsCRDInformer(t *testing.T) {
 		dyn := newFakeDynamicClient(podsGVR(), crdGVR)
 		eventCh := make(chan ResourceEvent, 64)
 		resyncCh := make(chan ResyncEvent, 8)
+		stopAck := ackAllResyncs(resyncCh)
+		defer stopAck()
 		mgr := NewInformerManager(dyn, disc, eventCh, resyncCh, nil, nil, slog.Default())
 
 		ctx, cancel := context.WithCancel(context.Background())
@@ -502,8 +506,10 @@ func TestWatch_SendUnblocksOnCancel(t *testing.T) {
 		// Unbuffered: watch blocks on the first event send.
 		eventCh := make(chan ResourceEvent)
 		resyncCh := make(chan ResyncEvent, 1)
+		stopAck := ackAllResyncs(resyncCh)
+		defer stopAck()
 		inf := NewInformer(dyn, gvr, eventCh, resyncCh, nil, slog.Default())
-		inf.listRV = "1"
+		inf.watchResourceVersion = "1"
 
 		ctx, cancel := context.WithCancel(context.Background())
 		done := make(chan struct{})
@@ -540,6 +546,8 @@ func TestInformerManager_StopAllUnblocksFullEventBuffer(t *testing.T) {
 		// Capacity 0: LIST's first EventAdd blocks inside the informer.
 		eventCh := make(chan ResourceEvent)
 		resyncCh := make(chan ResyncEvent, 1)
+		stopAck := ackAllResyncs(resyncCh)
+		defer stopAck()
 		mgr := NewInformerManager(dyn, newFakeDiscovery(nil), eventCh, resyncCh, nil, nil, slog.Default())
 
 		informer := NewInformer(dyn, gvr, eventCh, resyncCh, nil, slog.Default())

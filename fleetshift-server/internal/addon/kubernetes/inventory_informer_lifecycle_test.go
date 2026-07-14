@@ -9,6 +9,7 @@ import (
 	"testing/synctest"
 	"time"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -33,6 +34,45 @@ func makePod(uid, name, namespace, rv string) *unstructured.Unstructured {
 		},
 	}}
 	return obj
+}
+
+// ackNextResync receives one ResyncEvent and acknowledges success so
+// listAndResync can return. Must be started before listAndResync.
+func ackNextResync(resyncCh <-chan ResyncEvent) <-chan ResyncEvent {
+	got := make(chan ResyncEvent, 1)
+	go func() {
+		rs := <-resyncCh
+		got <- rs
+		if rs.Ack != nil {
+			rs.Ack <- nil
+		}
+	}()
+	return got
+}
+
+// ackAllResyncs acknowledges every ResyncEvent until stop is closed.
+// Use with InformerManager tests that have no Writer draining resyncCh.
+func ackAllResyncs(resyncCh <-chan ResyncEvent) (stop func()) {
+	done := make(chan struct{})
+	go func() {
+		for {
+			select {
+			case <-done:
+				return
+			case rs, ok := <-resyncCh:
+				if !ok {
+					return
+				}
+				if rs.Ack != nil {
+					select {
+					case rs.Ack <- nil:
+					default:
+					}
+				}
+			}
+		}
+	}()
+	return func() { close(done) }
 }
 
 func TestDrainChannel(t *testing.T) {
@@ -105,6 +145,7 @@ func TestListAndResync_EmitsAddsAndResync(t *testing.T) {
 	resyncCh := make(chan ResyncEvent, 10)
 	inf := NewInformer(dyn, gvr, eventCh, resyncCh, nil, slog.Default())
 
+	gotResync := ackNextResync(resyncCh)
 	if err := inf.listAndResync(context.Background()); err != nil {
 		t.Fatalf("listAndResync: %v", err)
 	}
@@ -117,13 +158,9 @@ func TestListAndResync_EmitsAddsAndResync(t *testing.T) {
 	default:
 		t.Fatal("expected EventAdd")
 	}
-	select {
-	case rs := <-resyncCh:
-		if rs.GVR != gvr || len(rs.Resources) != 1 {
-			t.Fatalf("unexpected resync: %+v", rs)
-		}
-	default:
-		t.Fatal("expected ResyncEvent")
+	rs := <-gotResync
+	if rs.GVR != gvr || len(rs.Resources) != 1 {
+		t.Fatalf("unexpected resync: %+v", rs)
 	}
 	if inf.resourceIndex["uid-1"] != "10" {
 		t.Fatalf("resourceIndex = %#v", inf.resourceIndex)
@@ -146,6 +183,7 @@ func TestListAndResync_SkipsDisallowedNamespaces(t *testing.T) {
 	filter := NewNamespaceFilter(NamespaceFilterConfig{IncludePatterns: []string{"prod-*"}})
 	inf := NewInformer(dyn, gvr, eventCh, resyncCh, filter, slog.Default())
 
+	gotResync := ackNextResync(resyncCh)
 	if err := inf.listAndResync(context.Background()); err != nil {
 		t.Fatalf("listAndResync: %v", err)
 	}
@@ -153,7 +191,7 @@ func TestListAndResync_SkipsDisallowedNamespaces(t *testing.T) {
 	if len(inf.resourceIndex) != 1 || inf.resourceIndex["uid-ok"] == "" {
 		t.Fatalf("resourceIndex = %#v, want only uid-ok", inf.resourceIndex)
 	}
-	rs := <-resyncCh
+	rs := <-gotResync
 	if len(rs.Resources) != 1 || rs.Resources[0].GetUID() != "uid-ok" {
 		t.Fatalf("resync resources = %v", rs.Resources)
 	}
@@ -167,6 +205,7 @@ func TestListAndResync_PrunesStaleIndexWithoutEventDelete(t *testing.T) {
 	inf := NewInformer(dyn, gvr, eventCh, resyncCh, nil, slog.Default())
 	inf.resourceIndex = map[string]string{"stale-uid": "1"}
 
+	gotResync := ackNextResync(resyncCh)
 	if err := inf.listAndResync(context.Background()); err != nil {
 		t.Fatalf("listAndResync: %v", err)
 	}
@@ -181,16 +220,12 @@ func TestListAndResync_PrunesStaleIndexWithoutEventDelete(t *testing.T) {
 	if _, ok := inf.resourceIndex["stale-uid"]; ok {
 		t.Fatal("stale uid should be removed from resourceIndex")
 	}
-	select {
-	case rs := <-resyncCh:
-		if rs.GVR != gvr {
-			t.Fatalf("resync GVR = %v, want %v", rs.GVR, gvr)
-		}
-		if len(rs.Resources) != 0 {
-			t.Fatalf("resync resources = %d, want 0", len(rs.Resources))
-		}
-	default:
-		t.Fatal("expected ResyncEvent")
+	rs := <-gotResync
+	if rs.GVR != gvr {
+		t.Fatalf("resync GVR = %v, want %v", rs.GVR, gvr)
+	}
+	if len(rs.Resources) != 0 {
+		t.Fatalf("resync resources = %d, want 0", len(rs.Resources))
 	}
 }
 
@@ -244,6 +279,7 @@ func TestListAndResync_Pagination(t *testing.T) {
 	resyncCh := make(chan ResyncEvent, 10)
 	inf := NewInformer(dyn, gvr, eventCh, resyncCh, nil, slog.Default())
 
+	gotResync := ackNextResync(resyncCh)
 	if err := inf.listAndResync(context.Background()); err != nil {
 		t.Fatalf("listAndResync: %v", err)
 	}
@@ -253,12 +289,47 @@ func TestListAndResync_Pagination(t *testing.T) {
 	if len(inf.resourceIndex) != 2 {
 		t.Fatalf("resourceIndex = %#v", inf.resourceIndex)
 	}
-	rs := <-resyncCh
+	rs := <-gotResync
 	if len(rs.Resources) != 2 {
 		t.Fatalf("resync len = %d, want 2", len(rs.Resources))
 	}
-	if inf.listRV != "2" {
-		t.Fatalf("listRV = %q, want 2", inf.listRV)
+	if inf.watchResourceVersion != "2" {
+		t.Fatalf("watchResourceVersion = %q, want 2", inf.watchResourceVersion)
+	}
+}
+
+func TestListAndResync_PaginationIgnoresRemainingItemCountAlone(t *testing.T) {
+	// remainingItemCount without a continue token must not be treated as
+	// proof that another page exists.
+	gvr := podsGVR()
+	dyn := newFakeDynamicClient(gvr)
+	page := 0
+	dyn.PrependReactor("list", "pods", func(k8stesting.Action) (bool, runtime.Object, error) {
+		page++
+		pod := makePod("uid-1", "pod-1", "default", "1")
+		list := &unstructured.UnstructuredList{Items: []unstructured.Unstructured{*pod}}
+		list.Object = map[string]any{
+			"metadata": map[string]any{
+				"resourceVersion":    "1",
+				"remainingItemCount": int64(5),
+			},
+		}
+		return true, list, nil
+	})
+
+	eventCh := make(chan ResourceEvent, 10)
+	resyncCh := make(chan ResyncEvent, 10)
+	inf := NewInformer(dyn, gvr, eventCh, resyncCh, nil, slog.Default())
+
+	_ = ackNextResync(resyncCh)
+	if err := inf.listAndResync(context.Background()); err != nil {
+		t.Fatalf("listAndResync: %v", err)
+	}
+	if page != 1 {
+		t.Fatalf("expected single list page, got %d", page)
+	}
+	if inf.watchResourceVersion != "1" {
+		t.Fatalf("watchResourceVersion = %q, want 1", inf.watchResourceVersion)
 	}
 }
 
@@ -274,7 +345,7 @@ func TestWatch_AddUpdateDelete(t *testing.T) {
 		eventCh := make(chan ResourceEvent, 10)
 		resyncCh := make(chan ResyncEvent, 10)
 		inf := NewInformer(dyn, gvr, eventCh, resyncCh, nil, slog.Default())
-		inf.listRV = "1"
+		inf.watchResourceVersion = "1"
 
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
@@ -333,7 +404,7 @@ func TestWatch_NamespaceFilter(t *testing.T) {
 		resyncCh := make(chan ResyncEvent, 10)
 		filter := NewNamespaceFilter(NamespaceFilterConfig{IncludePatterns: []string{"prod-*"}})
 		inf := NewInformer(dyn, gvr, eventCh, resyncCh, filter, slog.Default())
-		inf.listRV = "1"
+		inf.watchResourceVersion = "1"
 
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
@@ -376,16 +447,143 @@ func TestWatch_ErrorEndsWatch(t *testing.T) {
 		eventCh := make(chan ResourceEvent, 10)
 		resyncCh := make(chan ResyncEvent, 10)
 		inf := NewInformer(dyn, gvr, eventCh, resyncCh, nil, slog.Default())
-		inf.listRV = "1"
+		inf.watchResourceVersion = "1"
 
 		done := make(chan struct{})
+		var outcome watchOutcome
 		go func() {
 			defer close(done)
-			inf.watch(context.Background())
+			outcome = inf.watch(context.Background())
 		}()
 		synctest.Wait()
 
 		fakeWatch.Error(&metav1.Status{Status: metav1.StatusFailure, Message: "boom"})
+		synctest.Wait()
+		<-done
+		if outcome != watchOutcomeNeedList {
+			t.Fatalf("error outcome = %v, want needList", outcome)
+		}
+	})
+}
+
+func TestWatch_ExpiredStatusNeedsList(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		gvr := podsGVR()
+		dyn := newFakeDynamicClient(gvr)
+		fakeWatch := watch.NewFake()
+		dyn.PrependWatchReactor("pods", func(k8stesting.Action) (bool, watch.Interface, error) {
+			return true, fakeWatch, nil
+		})
+
+		eventCh := make(chan ResourceEvent, 10)
+		resyncCh := make(chan ResyncEvent, 10)
+		inf := NewInformer(dyn, gvr, eventCh, resyncCh, nil, slog.Default())
+		inf.watchResourceVersion = "1"
+
+		done := make(chan struct{})
+		var outcome watchOutcome
+		go func() {
+			defer close(done)
+			outcome = inf.watch(context.Background())
+		}()
+		synctest.Wait()
+
+		fakeWatch.Error(&metav1.Status{
+			Status: metav1.StatusFailure,
+			Reason: metav1.StatusReasonExpired,
+			Code:   410,
+		})
+		synctest.Wait()
+		<-done
+		if outcome != watchOutcomeNeedList {
+			t.Fatalf("410 expired outcome = %v, want needList", outcome)
+		}
+	})
+}
+
+func TestWatch_StartExpiredNeedsList(t *testing.T) {
+	gvr := podsGVR()
+	dyn := newFakeDynamicClient(gvr)
+	dyn.PrependWatchReactor("pods", func(k8stesting.Action) (bool, watch.Interface, error) {
+		return true, nil, apierrors.NewResourceExpired("too old resource version")
+	})
+
+	eventCh := make(chan ResourceEvent, 10)
+	resyncCh := make(chan ResyncEvent, 10)
+	inf := NewInformer(dyn, gvr, eventCh, resyncCh, nil, slog.Default())
+	inf.watchResourceVersion = "1"
+	outcome := inf.watch(context.Background())
+	if outcome != watchOutcomeNeedList {
+		t.Fatalf("expired start outcome = %v, want needList", outcome)
+	}
+	if inf.retries != 1 {
+		t.Fatalf("retries = %d, want 1", inf.retries)
+	}
+}
+
+func TestWatch_AllowWatchBookmarks(t *testing.T) {
+	gvr := podsGVR()
+	dyn := newFakeDynamicClient(gvr)
+	var allowBookmarks bool
+	var watchRV string
+	dyn.PrependWatchReactor("pods", func(action k8stesting.Action) (bool, watch.Interface, error) {
+		wa, ok := action.(k8stesting.WatchActionImpl)
+		if !ok {
+			t.Fatalf("expected WatchActionImpl, got %T", action)
+		}
+		opts := wa.GetListOptions()
+		watchRV = opts.ResourceVersion
+		allowBookmarks = opts.AllowWatchBookmarks
+		return true, nil, apierrors.NewResourceExpired("inspect only")
+	})
+
+	inf := NewInformer(dyn, gvr, make(chan ResourceEvent, 1), make(chan ResyncEvent, 1), nil, slog.Default())
+	inf.watchResourceVersion = "7"
+	_ = inf.watch(context.Background())
+	if watchRV != "7" {
+		t.Fatalf("ResourceVersion = %q, want 7", watchRV)
+	}
+	if !allowBookmarks {
+		t.Fatal("expected AllowWatchBookmarks=true")
+	}
+}
+
+func TestWatch_BookmarkAdvancesCursorWithoutEnding(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		gvr := podsGVR()
+		dyn := newFakeDynamicClient(gvr)
+		fakeWatch := watch.NewFake()
+		dyn.PrependWatchReactor("pods", func(k8stesting.Action) (bool, watch.Interface, error) {
+			return true, fakeWatch, nil
+		})
+
+		eventCh := make(chan ResourceEvent, 10)
+		resyncCh := make(chan ResyncEvent, 10)
+		inf := NewInformer(dyn, gvr, eventCh, resyncCh, nil, slog.Default())
+		inf.watchResourceVersion = "1"
+
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			inf.watch(ctx)
+		}()
+		synctest.Wait()
+
+		fakeWatch.Action(watch.Bookmark, makePod("uid-1", "pod-1", "default", "42"))
+		synctest.Wait()
+		if inf.watchResourceVersion != "42" {
+			t.Fatalf("watchResourceVersion after bookmark = %q, want 42", inf.watchResourceVersion)
+		}
+		select {
+		case ev := <-eventCh:
+			t.Fatalf("bookmark must not emit ResourceEvent, got %+v", ev)
+		default:
+		}
+
+		// Watch must still be running; cancel to join.
+		cancel()
 		synctest.Wait()
 		<-done
 	})
@@ -403,16 +601,19 @@ func TestWatch_UnexpectedTypeEndsWatch(t *testing.T) {
 		eventCh := make(chan ResourceEvent, 10)
 		resyncCh := make(chan ResyncEvent, 10)
 		inf := NewInformer(dyn, gvr, eventCh, resyncCh, nil, slog.Default())
-		inf.listRV = "1"
+		inf.watchResourceVersion = "1"
 
 		done := make(chan struct{})
 		go func() {
 			defer close(done)
-			inf.watch(context.Background())
+			outcome := inf.watch(context.Background())
+			if outcome != watchOutcomeNeedList {
+				t.Errorf("unexpected type outcome = %v, want needList", outcome)
+			}
 		}()
 		synctest.Wait()
 
-		fakeWatch.Action(watch.Bookmark, makePod("uid-1", "pod-1", "default", "1"))
+		fakeWatch.Action(watch.EventType("TOMBSTONE"), makePod("uid-1", "pod-1", "default", "1"))
 		synctest.Wait()
 		<-done
 	})
@@ -428,7 +629,7 @@ func TestWatch_StartErrorIncrementsRetries(t *testing.T) {
 	eventCh := make(chan ResourceEvent, 10)
 	resyncCh := make(chan ResyncEvent, 10)
 	inf := NewInformer(dyn, gvr, eventCh, resyncCh, nil, slog.Default())
-	inf.listRV = "1"
+	inf.watchResourceVersion = "1"
 	inf.watch(context.Background())
 	if inf.retries != 1 {
 		t.Fatalf("retries = %d, want 1", inf.retries)
@@ -447,17 +648,24 @@ func TestWatch_ChannelClosedEndsWatch(t *testing.T) {
 		eventCh := make(chan ResourceEvent, 10)
 		resyncCh := make(chan ResyncEvent, 10)
 		inf := NewInformer(dyn, gvr, eventCh, resyncCh, nil, slog.Default())
-		inf.listRV = "1"
+		inf.watchResourceVersion = "1"
 
 		done := make(chan struct{})
+		var outcome watchOutcome
 		go func() {
 			defer close(done)
-			inf.watch(context.Background())
+			outcome = inf.watch(context.Background())
 		}()
 		synctest.Wait()
 		fakeWatch.Stop()
 		synctest.Wait()
 		<-done
+		if outcome != watchOutcomeResume {
+			t.Fatalf("clean disconnect outcome = %v, want resume (no LIST)", outcome)
+		}
+		if inf.watchResourceVersion != "1" {
+			t.Fatalf("clean disconnect must retain watch cursor, got %q", inf.watchResourceVersion)
+		}
 	})
 }
 
@@ -472,6 +680,8 @@ func TestGenericInformer_Run_ShutdownDoesNotEmitDeletes(t *testing.T) {
 
 		eventCh := make(chan ResourceEvent, 20)
 		resyncCh := make(chan ResyncEvent, 10)
+		stopAck := ackAllResyncs(resyncCh)
+		defer stopAck()
 		inf := NewInformer(dyn, gvr, eventCh, resyncCh, nil, slog.Default())
 
 		ctx, cancel := context.WithCancel(context.Background())
@@ -482,13 +692,12 @@ func TestGenericInformer_Run_ShutdownDoesNotEmitDeletes(t *testing.T) {
 		}()
 		synctest.Wait()
 
-		// Drain list/watch startup events.
+		// Drain list/watch startup events (resync acks handled by ackAllResyncs).
 		deadline := time.After(time.Second)
 	drain:
 		for {
 			select {
 			case <-eventCh:
-			case <-resyncCh:
 			case <-deadline:
 				break drain
 			default:
@@ -529,6 +738,8 @@ func TestDiscoverAndReconcile_StartsAllowedInformers(t *testing.T) {
 		dyn := newFakeDynamicClient(gvr, schema.GroupVersionResource{Group: "", Version: "v1", Resource: "secrets"})
 		eventCh := make(chan ResourceEvent, 10)
 		resyncCh := make(chan ResyncEvent, 10)
+		stopAck := ackAllResyncs(resyncCh)
+		defer stopAck()
 		mgr := NewInformerManager(dyn, disc, eventCh, resyncCh, nil, nil, slog.Default())
 
 		ctx, cancel := context.WithCancel(context.Background())
@@ -582,6 +793,8 @@ func TestRunContinuous_InitialReconcileThenCancel(t *testing.T) {
 		dyn := newFakeDynamicClient(gvr, crdGVR)
 		eventCh := make(chan ResourceEvent, 100)
 		resyncCh := make(chan ResyncEvent, 100)
+		stopAck := ackAllResyncs(resyncCh)
+		defer stopAck()
 		mgr := NewInformerManager(dyn, disc, eventCh, resyncCh, nil, nil, slog.Default())
 
 		ctx, cancel := context.WithCancel(context.Background())
@@ -615,6 +828,8 @@ func TestRunContinuous_CRDEventTriggersReconcile(t *testing.T) {
 		dyn := newFakeDynamicClient(gvr, crdGVR)
 		eventCh := make(chan ResourceEvent, 100)
 		resyncCh := make(chan ResyncEvent, 100)
+		stopAck := ackAllResyncs(resyncCh)
+		defer stopAck()
 		mgr := NewInformerManager(dyn, disc, eventCh, resyncCh, nil, nil, slog.Default())
 
 		ctx, cancel := context.WithCancel(context.Background())
@@ -703,7 +918,7 @@ func TestWatch_NonUnstructuredObjectsIgnored(t *testing.T) {
 
 		eventCh := make(chan ResourceEvent, 10)
 		inf := NewInformer(dyn, gvr, eventCh, make(chan ResyncEvent, 10), nil, slog.Default())
-		inf.listRV = "1"
+		inf.watchResourceVersion = "1"
 
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
@@ -749,7 +964,7 @@ func TestWatch_NamespaceFilterOnModifyAndDelete(t *testing.T) {
 		eventCh := make(chan ResourceEvent, 10)
 		filter := NewNamespaceFilter(NamespaceFilterConfig{IncludePatterns: []string{"prod-*"}})
 		inf := NewInformer(dyn, gvr, eventCh, make(chan ResyncEvent, 10), filter, slog.Default())
-		inf.listRV = "1"
+		inf.watchResourceVersion = "1"
 
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
@@ -805,6 +1020,241 @@ func TestGenericInformer_Run_BackoffThenCancel(t *testing.T) {
 	})
 }
 
+func TestGenericInformer_Run_WaitsForWriteAckBeforeWatch(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		gvr := podsGVR()
+		dyn := newFakeDynamicClient(gvr)
+		list := &unstructured.UnstructuredList{}
+		list.Object = map[string]any{"metadata": map[string]any{"resourceVersion": "42"}}
+		dyn.PrependReactor("list", "pods", func(k8stesting.Action) (bool, runtime.Object, error) {
+			return true, list, nil
+		})
+
+		watchStarted := make(chan struct{})
+		fakeWatch := watch.NewFake()
+		dyn.PrependWatchReactor("pods", func(k8stesting.Action) (bool, watch.Interface, error) {
+			select {
+			case <-watchStarted:
+			default:
+				close(watchStarted)
+			}
+			return true, fakeWatch, nil
+		})
+
+		eventCh := make(chan ResourceEvent, 10)
+		resyncCh := make(chan ResyncEvent, 1)
+		inf := NewInformer(dyn, gvr, eventCh, resyncCh, nil, slog.Default())
+
+		ctx, cancel := context.WithCancel(context.Background())
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			inf.Run(ctx)
+		}()
+		synctest.Wait()
+
+		var rs ResyncEvent
+		select {
+		case rs = <-resyncCh:
+		default:
+			t.Fatal("expected ResyncEvent before watch")
+		}
+		if rs.Ack == nil {
+			t.Fatal("expected non-nil Ack on ResyncEvent")
+		}
+		select {
+		case <-watchStarted:
+			t.Fatal("watch started before LIST write ack")
+		default:
+		}
+		if inf.initialized.Load() {
+			t.Fatal("informer should not be initialized before LIST write ack")
+		}
+
+		rs.Ack <- nil
+		synctest.Wait()
+
+		select {
+		case <-watchStarted:
+		default:
+			t.Fatal("watch should start after LIST write ack")
+		}
+		if !inf.initialized.Load() {
+			t.Fatal("informer should be initialized after LIST write ack")
+		}
+
+		cancel()
+		synctest.Wait()
+		<-done
+	})
+}
+
+func TestListAndResync_NackPreventsReturnUntilRelistPath(t *testing.T) {
+	gvr := podsGVR()
+	dyn := newFakeDynamicClient(gvr)
+	eventCh := make(chan ResourceEvent, 10)
+	resyncCh := make(chan ResyncEvent, 1)
+	inf := NewInformer(dyn, gvr, eventCh, resyncCh, nil, slog.Default())
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- inf.listAndResync(context.Background())
+	}()
+
+	rs := <-resyncCh
+	if rs.Ack == nil {
+		t.Fatal("expected Ack")
+	}
+	rs.Ack <- errResyncGenerationClosed
+
+	err := <-errCh
+	if !errors.Is(err, errResyncGenerationClosed) {
+		t.Fatalf("listAndResync err = %v, want %v", err, errResyncGenerationClosed)
+	}
+	if inf.retries < 1 {
+		t.Fatalf("retries = %d, want >= 1 after nack", inf.retries)
+	}
+}
+
+func TestListAndResync_TagsGeneration(t *testing.T) {
+	gvr := podsGVR()
+	dyn := newFakeDynamicClient(gvr)
+	pod := makePod("uid-1", "pod-1", "default", "1")
+	if _, err := dyn.Resource(gvr).Namespace("default").Create(context.Background(), pod, metav1.CreateOptions{}); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+
+	eventCh := make(chan ResourceEvent, 10)
+	resyncCh := make(chan ResyncEvent, 1)
+	inf := NewInformerGeneration(dyn, gvr, 9, eventCh, resyncCh, nil, slog.Default())
+	gotResync := ackNextResync(resyncCh)
+	if err := inf.listAndResync(context.Background()); err != nil {
+		t.Fatalf("listAndResync: %v", err)
+	}
+	ev := <-eventCh
+	if ev.Generation != 9 {
+		t.Fatalf("event generation = %d, want 9", ev.Generation)
+	}
+	rs := <-gotResync
+	if rs.Generation != 9 {
+		t.Fatalf("resync generation = %d, want 9", rs.Generation)
+	}
+}
+
+func TestGenericInformer_Run_CleanDisconnectResumesWithoutList(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		gvr := podsGVR()
+		dyn := newFakeDynamicClient(gvr)
+		lists := 0
+		dyn.PrependReactor("list", "pods", func(k8stesting.Action) (bool, runtime.Object, error) {
+			lists++
+			list := &unstructured.UnstructuredList{}
+			list.Object = map[string]any{"metadata": map[string]any{"resourceVersion": "1"}}
+			return true, list, nil
+		})
+
+		fakeWatch := watch.NewFake()
+		watches := 0
+		dyn.PrependWatchReactor("pods", func(k8stesting.Action) (bool, watch.Interface, error) {
+			watches++
+			if watches == 1 {
+				return true, fakeWatch, nil
+			}
+			return true, watch.NewFake(), nil
+		})
+
+		eventCh := make(chan ResourceEvent, 10)
+		resyncCh := make(chan ResyncEvent, 10)
+		stopAck := ackAllResyncs(resyncCh)
+		defer stopAck()
+		inf := NewInformer(dyn, gvr, eventCh, resyncCh, nil, slog.Default())
+
+		ctx, cancel := context.WithCancel(context.Background())
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			inf.Run(ctx)
+		}()
+		synctest.Wait()
+		if lists != 1 {
+			t.Fatalf("lists before disconnect = %d, want 1", lists)
+		}
+		if watches != 1 {
+			t.Fatalf("watches before disconnect = %d, want 1", watches)
+		}
+
+		fakeWatch.Stop()
+		synctest.Wait()
+		if lists != 1 {
+			t.Fatalf("clean disconnect must not relist, lists = %d", lists)
+		}
+		if watches < 2 {
+			t.Fatalf("expected resumed watch, watches = %d", watches)
+		}
+
+		cancel()
+		synctest.Wait()
+		<-done
+	})
+}
+
+func TestGenericInformer_Run_ExpiredWatchForcesRelist(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		gvr := podsGVR()
+		dyn := newFakeDynamicClient(gvr)
+		lists := 0
+		dyn.PrependReactor("list", "pods", func(k8stesting.Action) (bool, runtime.Object, error) {
+			lists++
+			list := &unstructured.UnstructuredList{}
+			list.Object = map[string]any{"metadata": map[string]any{"resourceVersion": fmt.Sprintf("%d", lists)}}
+			return true, list, nil
+		})
+
+		fakeWatch := watch.NewFake()
+		watches := 0
+		dyn.PrependWatchReactor("pods", func(k8stesting.Action) (bool, watch.Interface, error) {
+			watches++
+			if watches == 1 {
+				return true, fakeWatch, nil
+			}
+			return true, watch.NewFake(), nil
+		})
+
+		eventCh := make(chan ResourceEvent, 10)
+		resyncCh := make(chan ResyncEvent, 10)
+		stopAck := ackAllResyncs(resyncCh)
+		defer stopAck()
+		inf := NewInformer(dyn, gvr, eventCh, resyncCh, nil, slog.Default())
+
+		ctx, cancel := context.WithCancel(context.Background())
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			inf.Run(ctx)
+		}()
+		synctest.Wait()
+		if lists != 1 {
+			t.Fatalf("lists = %d, want 1", lists)
+		}
+
+		fakeWatch.Error(&metav1.Status{
+			Status: metav1.StatusFailure,
+			Reason: metav1.StatusReasonExpired,
+			Code:   410,
+		})
+		// Exhaust backoff after needList (retries incremented by ERROR path).
+		time.Sleep(3 * time.Second)
+		synctest.Wait()
+		if lists < 2 {
+			t.Fatalf("410 must force relist, lists = %d", lists)
+		}
+
+		cancel()
+		synctest.Wait()
+		<-done
+	})
+}
+
 func TestGenericInformer_Run_BackoffThenSucceed(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		gvr := podsGVR()
@@ -826,6 +1276,8 @@ func TestGenericInformer_Run_BackoffThenSucceed(t *testing.T) {
 
 		eventCh := make(chan ResourceEvent, 10)
 		resyncCh := make(chan ResyncEvent, 10)
+		stopAck := ackAllResyncs(resyncCh)
+		defer stopAck()
 		inf := NewInformer(dyn, gvr, eventCh, resyncCh, nil, slog.Default())
 
 		ctx, cancel := context.WithCancel(context.Background())
@@ -856,7 +1308,11 @@ func TestRunContinuous_ImmediateReconcileAfterThrottleWindow(t *testing.T) {
 			},
 		}})
 		dyn := newFakeDynamicClient(gvr, crdGVR)
-		mgr := NewInformerManager(dyn, disc, make(chan ResourceEvent, 100), make(chan ResyncEvent, 100), nil, nil, slog.Default())
+		eventCh := make(chan ResourceEvent, 100)
+		resyncCh := make(chan ResyncEvent, 100)
+		stopAck := ackAllResyncs(resyncCh)
+		defer stopAck()
+		mgr := NewInformerManager(dyn, disc, eventCh, resyncCh, nil, nil, slog.Default())
 
 		ctx, cancel := context.WithCancel(context.Background())
 		done := make(chan struct{})
@@ -903,7 +1359,11 @@ func TestRunContinuous_ThrottleTimerFires(t *testing.T) {
 			},
 		}})
 		dyn := newFakeDynamicClient(gvr, crdGVR)
-		mgr := NewInformerManager(dyn, disc, make(chan ResourceEvent, 100), make(chan ResyncEvent, 100), nil, nil, slog.Default())
+		eventCh := make(chan ResourceEvent, 100)
+		resyncCh := make(chan ResyncEvent, 100)
+		stopAck := ackAllResyncs(resyncCh)
+		defer stopAck()
+		mgr := NewInformerManager(dyn, disc, eventCh, resyncCh, nil, nil, slog.Default())
 
 		ctx, cancel := context.WithCancel(context.Background())
 		done := make(chan struct{})
@@ -939,7 +1399,11 @@ func TestRunContinuous_DuplicateCRDEventsWhilePending(t *testing.T) {
 			},
 		}})
 		dyn := newFakeDynamicClient(gvr, crdGVR)
-		mgr := NewInformerManager(dyn, disc, make(chan ResourceEvent, 100), make(chan ResyncEvent, 100), nil, nil, slog.Default())
+		eventCh := make(chan ResourceEvent, 100)
+		resyncCh := make(chan ResyncEvent, 100)
+		stopAck := ackAllResyncs(resyncCh)
+		defer stopAck()
+		mgr := NewInformerManager(dyn, disc, eventCh, resyncCh, nil, nil, slog.Default())
 
 		ctx, cancel := context.WithCancel(context.Background())
 		done := make(chan struct{})

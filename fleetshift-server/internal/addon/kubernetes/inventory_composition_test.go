@@ -2,6 +2,7 @@ package kubernetes
 
 import (
 	"context"
+	"encoding/json"
 	"log/slog"
 	"testing"
 	"time"
@@ -554,6 +555,59 @@ func TestResyncPrune_RemovesAbsentObjectsFromStore(t *testing.T) {
 	if !foundKeep {
 		t.Fatal("sibling object must survive resync prune")
 	}
+}
+
+// TestStartupList_DoesNotDeleteDBOnlyRows verifies a new process/GVR
+// generation's initial LIST upserts current objects but does not remove
+// persisted rows that were never acknowledged in this generation
+// (Accepted gap: cross-process stale inventory).
+func TestStartupList_DoesNotDeleteDBOnlyRows(t *testing.T) {
+	store := &sqlite.Store{DB: sqlite.OpenTestDB(t)}
+	seedObjectType(t, store)
+
+	pods := podsGVR()
+	reporter := newStoreBackedReporter(store)
+	schema := IndexSchema{Entries: map[schema.GroupVersionResource]SchemaEntry{
+		pods: {GVR: pods, Kind: "Pod"},
+	}}
+
+	// Pre-seed a DB-only row as if an earlier process wrote it.
+	staleName := mustNamedObjectName(t, "prod", pods, "default", "stale", "uid-stale")
+	ctx := context.Background()
+	obs := json.RawMessage(`{"kind":"Pod"}`)
+	if err := application.NewInventoryReportService(store).ReplaceBatch(ctx, application.InventoryReplacementBatchInput{
+		Reports: []application.InventoryReplacementInput{{
+			ResourceType: ObjectResourceType,
+			Name:         &staleName,
+			Labels:       map[string]string{"k8s.name": "stale"},
+			Observation:  &obs,
+			ObservedAt:   time.Now(),
+		}},
+	}); err != nil {
+		t.Fatalf("seed stale row: %v", err)
+	}
+
+	w := NewWriter("prod", reporter, NoopEdgeSink{}, schema.Entries, time.Hour, slog.New(slog.DiscardHandler))
+	runCtx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go w.Run(runCtx)
+
+	live := makePod("uid-live", "live", "default", "1")
+	w.ResyncCh() <- ResyncEvent{GVR: pods, Resources: []*unstructured.Unstructured{live}}
+
+	wantLive := mustNamedObjectName(t, "prod", pods, "default", "live", "uid-live")
+	awaitStoreObjects(t, store, 3*time.Second, func(objs []*domain.ExtensionResource) bool {
+		haveLive, haveStale := false, false
+		for _, obj := range objs {
+			switch obj.Name() {
+			case wantLive:
+				haveLive = true
+			case staleName:
+				haveStale = true
+			}
+		}
+		return haveLive && haveStale
+	})
 }
 
 // TestServeStyleComposition_ControllerIndexesRegisteredTarget mirrors

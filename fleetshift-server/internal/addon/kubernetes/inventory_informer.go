@@ -7,8 +7,10 @@ import (
 	"sync/atomic"
 	"time"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/client-go/discovery"
@@ -25,46 +27,74 @@ const (
 )
 
 // ResourceEvent is a single informer event for a Kubernetes resource.
+// Generation tags the GVR process generation that produced the event so
+// the writer can reject late deliveries after that generation closes.
 type ResourceEvent struct {
-	Op       EventOp
-	Resource *unstructured.Unstructured
-	GVR      schema.GroupVersionResource
+	Op         EventOp
+	Resource   *unstructured.Unstructured
+	GVR        schema.GroupVersionResource
+	Generation uint64
 }
 
 // ResyncEvent carries the full resource set for a GVR after an informer
-// completes its initial LIST.
+// completes a LIST (initial generation LIST or expired-cursor relist).
+// When Ack is non-nil, the writer must send one result (nil on success)
+// after the LIST write commits or the generation ends; the informer
+// waits for that ack before starting WATCH so the cursor is only used
+// after persistence succeeds.
 type ResyncEvent struct {
-	GVR       schema.GroupVersionResource
-	Resources []*unstructured.Unstructured
+	GVR        schema.GroupVersionResource
+	Resources  []*unstructured.Unstructured
+	Generation uint64
+	// Ack receives a single write result. Buffer size 1 so the writer
+	// never blocks if the informer has already canceled. Nil means no
+	// wait (unit tests that inject events directly).
+	Ack chan<- error
 }
 
-// RemoveGVREvent signals that a GVR is no longer being indexed (for
-// example it left the desired set). The writer drops in-memory state
-// for that GVR only; persisted inventory is left unchanged. Informer
-// shutdown / StopAll must not emit this event — stopping the process
-// is not a source-of-truth GVR removal.
+// RemoveGVREvent signals that a GVR generation is no longer being
+// indexed (for example it left the desired set). The writer drops
+// in-memory state for that generation only; persisted inventory is left
+// unchanged. Informer shutdown / StopAll must not emit this event —
+// stopping the process is not a source-of-truth GVR removal.
 type RemoveGVREvent struct {
-	GVR schema.GroupVersionResource
+	GVR        schema.GroupVersionResource
+	Generation uint64
 }
+
+// watchOutcome classifies how a watch ended so Run can choose between
+// resumable reconnect and full LIST.
+type watchOutcome int
+
+const (
+	watchOutcomeContextCanceled watchOutcome = iota
+	watchOutcomeResume
+	watchOutcomeNeedList
+)
 
 // GenericInformer performs LIST+WATCH for a single GVR and sends events to
 // channels. It tracks only UID -> resourceVersion for minimal memory usage.
+// WatchResourceVersion is the cursor used to resume a clean watch disconnect;
+// it is distinct from the writer's ReportedUIDs persistence baseline.
 type GenericInformer struct {
-	client        dynamic.Interface
-	gvr           schema.GroupVersionResource
-	resourceIndex map[string]string // UID -> resourceVersion
-	initialized   atomic.Bool
-	retries       int64
-	eventCh       chan<- ResourceEvent
-	resyncCh      chan<- ResyncEvent
-	nsFilter      *NamespaceFilter
-	listRV        string // saved resourceVersion from last LIST for watch continuity
-	logger        *slog.Logger
+	client               dynamic.Interface
+	gvr                  schema.GroupVersionResource
+	generation           uint64
+	resourceIndex        map[string]string // UID -> resourceVersion
+	initialized          atomic.Bool
+	retries              int64
+	eventCh              chan<- ResourceEvent
+	resyncCh             chan<- ResyncEvent
+	nsFilter             *NamespaceFilter
+	watchResourceVersion string // cursor for clean watch resume
+	logger               *slog.Logger
 }
 
 // NewInformer creates a GenericInformer for the given GVR. Events are sent to
 // eventCh and resync snapshots to resyncCh. If nsFilter is non-nil, only
-// resources in allowed namespaces are forwarded.
+// resources in allowed namespaces are forwarded. Emitted events are untagged
+// (generation 0); use [NewInformerGeneration] when the writer must fence by
+// process generation.
 func NewInformer(
 	client dynamic.Interface,
 	gvr schema.GroupVersionResource,
@@ -73,45 +103,82 @@ func NewInformer(
 	nsFilter *NamespaceFilter,
 	logger *slog.Logger,
 ) *GenericInformer {
+	return NewInformerGeneration(client, gvr, 0, eventCh, resyncCh, nsFilter, logger)
+}
+
+// NewInformerGeneration is like [NewInformer] but assigns an explicit GVR
+// process generation to every emitted ResourceEvent and ResyncEvent so the
+// writer can reject late deliveries after that generation closes.
+func NewInformerGeneration(
+	client dynamic.Interface,
+	gvr schema.GroupVersionResource,
+	generation uint64,
+	eventCh chan<- ResourceEvent,
+	resyncCh chan<- ResyncEvent,
+	nsFilter *NamespaceFilter,
+	logger *slog.Logger,
+) *GenericInformer {
 	return &GenericInformer{
 		client:        client,
 		gvr:           gvr,
+		generation:    generation,
 		resourceIndex: make(map[string]string),
 		eventCh:       eventCh,
 		resyncCh:      resyncCh,
 		nsFilter:      nsFilter,
-		logger:        logger.With("gvr", gvr.String()),
+		logger:        logger.With("gvr", gvr.String(), "generation", generation),
 	}
 }
 
 // Run starts the informer loop. It blocks until ctx is cancelled.
 // Shutdown is a runtime lifecycle event, not a Kubernetes source-of-truth
 // delete: tracked UIDs are discarded locally and no EventDelete is emitted.
-// Stale-object deletes still come from listAndResync / watch tombstones.
+//
+// A new generation always begins with LIST. The LIST write must be
+// acknowledged by the writer before WATCH starts from that cursor.
+// Clean watch terminations resume WATCH from WatchResourceVersion
+// without LIST. Expired or unsafe watch endings force another LIST
+// (writer reconciles omissions against ReportedUIDs for this generation).
 func (i *GenericInformer) Run(ctx context.Context) {
+	needList := true
 	for {
 		select {
 		case <-ctx.Done():
 			i.logger.Info("informer stopped")
 			return
 		default:
-			if i.retries > 0 {
-				// Backoff: 2s increments, max 2min.
-				wait := time.Duration(min(i.retries*2, 120)) * time.Second
-				i.logger.Debug("backoff before retry", "wait", wait)
-				select {
-				case <-time.After(wait):
-				case <-ctx.Done():
-					continue // re-enter loop to hit the ctx.Done() case above
-				}
-			}
+		}
 
+		if i.retries > 0 {
+			// Backoff: 2s increments, max 2min.
+			wait := time.Duration(min(i.retries*2, 120)) * time.Second
+			i.logger.Debug("backoff before retry", "wait", wait)
+			select {
+			case <-time.After(wait):
+			case <-ctx.Done():
+				continue // re-enter loop to hit the ctx.Done() case above
+			}
+		}
+
+		if needList || i.watchResourceVersion == "" {
 			i.logger.Debug("starting list and resync")
 			err := i.listAndResync(ctx)
-			if err == nil {
-				i.initialized.Store(true)
-				i.watch(ctx)
+			if err != nil {
+				continue
 			}
+			i.initialized.Store(true)
+			needList = false
+		}
+
+		outcome := i.watch(ctx)
+		switch outcome {
+		case watchOutcomeContextCanceled:
+			i.logger.Info("informer stopped")
+			return
+		case watchOutcomeResume:
+			needList = false
+		case watchOutcomeNeedList:
+			needList = true
 		}
 	}
 }
@@ -129,7 +196,11 @@ func newUnstructured(kind, uid string) *unstructured.Unstructured {
 }
 
 // listAndResync does a paginated LIST, sends Add events for each resource,
-// deletes stale resources, and sends a ResyncEvent with the full set.
+// and sends a ResyncEvent with the full set. It waits for the writer's
+// persistence ack before returning so Run does not start WATCH until the
+// LIST write has succeeded (or the generation/context ends). Stale local
+// index UIDs are dropped without EventDelete; omission deletes are the
+// writer's ReportedUIDs diff on ResyncEvent.
 func (i *GenericInformer) listAndResync(ctx context.Context) error {
 	newResourceIndex := make(map[string]string)
 	var allResources []*unstructured.Unstructured
@@ -158,9 +229,10 @@ func (i *GenericInformer) listAndResync(ctx context.Context) error {
 
 			i.logger.Debug("listed resource", "uid", uid, "rv", rv)
 			if !i.sendEvent(ctx, ResourceEvent{
-				Op:       EventAdd,
-				Resource: item,
-				GVR:      i.gvr,
+				Op:         EventAdd,
+				Resource:   item,
+				GVR:        i.gvr,
+				Generation: i.generation,
 			}) {
 				return ctx.Err()
 			}
@@ -174,63 +246,92 @@ func (i *GenericInformer) listAndResync(ctx context.Context) error {
 			"count", len(resources.Items),
 			"rv", resources.GetResourceVersion())
 
-		// Check for remaining pages.
-		metadata := resources.UnstructuredContent()["metadata"].(map[string]any)
-		if metadata["remainingItemCount"] != nil && metadata["remainingItemCount"] != 0 {
-			opts.Continue = metadata["continue"].(string)
-		} else {
-			// Save the list resourceVersion for the subsequent watch.
-			i.listRV = resources.GetResourceVersion()
-			break
+		// Pagination is controlled by the continue token. Optional
+		// remainingItemCount is not proof that no next page exists.
+		cont := ""
+		if metadata, ok := resources.UnstructuredContent()["metadata"].(map[string]any); ok {
+			if c, ok := metadata["continue"].(string); ok {
+				cont = c
+			}
 		}
+		if cont != "" {
+			opts.Continue = cont
+			continue
+		}
+		i.watchResourceVersion = resources.GetResourceVersion()
+		break
 	}
 
 	// Drop UIDs that disappeared from the LIST from the local index only.
 	// Do not emit EventDelete for them: the ResyncEvent below becomes an
 	// ApplyDelta that upserts the LIST and, when the writer already has
-	// in-memory members for this GVR, deletes only those absent from the
-	// LIST (a first LIST has none, so upserts only). Per-UID deletes here
-	// would only duplicate that reconciliation. Watch tombstones still
-	// use EventDelete.
+	// ReportedUIDs for this GVR generation, deletes only those absent from
+	// the LIST (a first LIST has none, so upserts only). Per-UID deletes
+	// here would only duplicate that reconciliation. Watch tombstones
+	// still use EventDelete.
 	i.resourceIndex = newResourceIndex
 
-	// Send resync with full resource set after list completes.
+	ack := make(chan error, 1)
 	if !i.sendResync(ctx, ResyncEvent{
-		GVR:       i.gvr,
-		Resources: allResources,
+		GVR:        i.gvr,
+		Resources:  allResources,
+		Generation: i.generation,
+		Ack:        ack,
 	}) {
 		return ctx.Err()
 	}
 
-	return nil
+	select {
+	case err := <-ack:
+		if err != nil {
+			i.retries++
+			return err
+		}
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
-// watch starts a WATCH from the last list's resourceVersion and processes events.
-func (i *GenericInformer) watch(ctx context.Context) {
-	// BUG FIX 2: pass the list's resourceVersion instead of empty ListOptions.
+// watch starts a WATCH from WatchResourceVersion and processes events.
+// Returns how the watch ended so Run can resume or relist:
+// clean channel close with a cursor resumes; start failures, ERROR
+// events, unexpected types, and an empty cursor force LIST. BOOKMARK
+// advances the cursor without changing membership.
+func (i *GenericInformer) watch(ctx context.Context) watchOutcome {
 	watcher, err := i.client.Resource(i.gvr).Watch(ctx, metav1.ListOptions{
-		ResourceVersion: i.listRV,
+		ResourceVersion:     i.watchResourceVersion,
+		AllowWatchBookmarks: true,
 	})
 	if err != nil {
 		i.logger.Warn("error starting watch", "error", err)
 		i.retries++
-		return
+		if isExpiredResourceVersionError(err) {
+			return watchOutcomeNeedList
+		}
+		// Watch start failures are not positively classified as clean
+		// disconnects; force a LIST to re-establish a safe cursor.
+		return watchOutcomeNeedList
 	}
 	defer watcher.Stop()
 
 	i.logger.Info("watching", "group", i.gvr.Group, "resource", i.gvr.Resource)
-	i.retries = 0 // Reset retries on successful list + watch.
+	i.retries = 0 // Reset retries on successful watch start.
 
 	for {
 		select {
 		case <-ctx.Done():
 			i.logger.Debug("watch stopped by context")
-			return
+			return watchOutcomeContextCanceled
 
 		case event, ok := <-watcher.ResultChan():
 			if !ok {
 				i.logger.Debug("watch channel closed")
-				return
+				// Ordinary transport / API-server close: resume from cursor.
+				if i.watchResourceVersion == "" {
+					return watchOutcomeNeedList
+				}
+				return watchOutcomeResume
 			}
 
 			switch event.Type {
@@ -244,13 +345,15 @@ func (i *GenericInformer) watch(ctx context.Context) {
 					continue
 				}
 				if !i.sendEvent(ctx, ResourceEvent{
-					Op:       EventAdd,
-					Resource: obj,
-					GVR:      i.gvr,
+					Op:         EventAdd,
+					Resource:   obj,
+					GVR:        i.gvr,
+					Generation: i.generation,
 				}) {
-					return
+					return watchOutcomeContextCanceled
 				}
 				i.resourceIndex[string(obj.GetUID())] = obj.GetResourceVersion()
+				i.advanceWatchRV(obj.GetResourceVersion())
 
 			case watch.Modified:
 				obj, ok := event.Object.(*unstructured.Unstructured)
@@ -262,13 +365,15 @@ func (i *GenericInformer) watch(ctx context.Context) {
 					continue
 				}
 				if !i.sendEvent(ctx, ResourceEvent{
-					Op:       EventUpdate,
-					Resource: obj,
-					GVR:      i.gvr,
+					Op:         EventUpdate,
+					Resource:   obj,
+					GVR:        i.gvr,
+					Generation: i.generation,
 				}) {
-					return
+					return watchOutcomeContextCanceled
 				}
 				i.resourceIndex[string(obj.GetUID())] = obj.GetResourceVersion()
+				i.advanceWatchRV(obj.GetResourceVersion())
 
 			case watch.Deleted:
 				obj, ok := event.Object.(*unstructured.Unstructured)
@@ -280,27 +385,52 @@ func (i *GenericInformer) watch(ctx context.Context) {
 					continue
 				}
 				if !i.sendEvent(ctx, ResourceEvent{
-					Op:       EventDelete,
-					Resource: obj,
-					GVR:      i.gvr,
+					Op:         EventDelete,
+					Resource:   obj,
+					GVR:        i.gvr,
+					Generation: i.generation,
 				}) {
-					return
+					return watchOutcomeContextCanceled
 				}
 				delete(i.resourceIndex, string(obj.GetUID()))
+				i.advanceWatchRV(obj.GetResourceVersion())
+
+			case watch.Bookmark:
+				// Bookmark is only resourceVersion progress; it does not
+				// change membership and is not a second checkpoint kind.
+				if rv := bookmarkResourceVersion(event.Object); rv != "" {
+					i.advanceWatchRV(rv)
+				}
 
 			case watch.Error:
 				i.logger.Warn("received ERROR event, ending watch", "event", event)
-				return
+				i.retries++
+				if isExpiredWatchObject(event.Object) {
+					return watchOutcomeNeedList
+				}
+				return watchOutcomeNeedList
 
 			default:
 				i.logger.Warn("received unexpected event type, ending watch", "type", event.Type)
-				return
+				i.retries++
+				return watchOutcomeNeedList
 			}
 		}
 	}
 }
 
+// advanceWatchRV updates the resume cursor used after a clean watch
+// disconnect. Empty rv is ignored so a malformed event cannot clear a
+// known-good cursor.
+func (i *GenericInformer) advanceWatchRV(rv string) {
+	if rv != "" {
+		i.watchResourceVersion = rv
+	}
+}
+
 // sendEvent delivers an event or returns false when ctx is cancelled.
+// WatchResourceVersion is advanced by the caller after the event is
+// retained in the in-process queue (successful send).
 func (i *GenericInformer) sendEvent(ctx context.Context, ev ResourceEvent) bool {
 	select {
 	case i.eventCh <- ev:
@@ -310,7 +440,9 @@ func (i *GenericInformer) sendEvent(ctx context.Context, ev ResourceEvent) bool 
 	}
 }
 
-// sendResync delivers a resync snapshot or returns false when ctx is cancelled.
+// sendResync delivers a resync snapshot or returns false when ctx is
+// cancelled. It does not wait for ResyncEvent.Ack; [listAndResync] waits
+// after a successful send.
 func (i *GenericInformer) sendResync(ctx context.Context, ev ResyncEvent) bool {
 	select {
 	case i.resyncCh <- ev:
@@ -337,18 +469,65 @@ func (i *GenericInformer) WaitUntilInitialized(ctx context.Context, timeout time
 	}
 }
 
+// bookmarkResourceVersion extracts the resourceVersion from a BOOKMARK
+// event object. BOOKMARKs may be unstructured or other metav1 objects.
+func bookmarkResourceVersion(obj runtime.Object) string {
+	switch t := obj.(type) {
+	case *unstructured.Unstructured:
+		return t.GetResourceVersion()
+	case metav1.Object:
+		return t.GetResourceVersion()
+	default:
+		return ""
+	}
+}
+
+// isExpiredResourceVersionError reports whether err means the watch
+// cursor is no longer usable and a fresh LIST is required.
+func isExpiredResourceVersionError(err error) bool {
+	return apierrors.IsResourceExpired(err) || apierrors.IsGone(err)
+}
+
+// isExpiredWatchObject reports whether a watch ERROR payload indicates
+// an expired/gone resourceVersion (410).
+func isExpiredWatchObject(obj runtime.Object) bool {
+	if obj == nil {
+		return false
+	}
+	if err, ok := obj.(error); ok {
+		return isExpiredResourceVersionError(err)
+	}
+	return isExpiredStatus(obj)
+}
+
+// isExpiredStatus reports whether obj is a metav1.Status with expired
+// or gone semantics (HTTP 410 or matching reason).
+func isExpiredStatus(obj runtime.Object) bool {
+	status, ok := obj.(*metav1.Status)
+	if !ok {
+		return false
+	}
+	if status.Code == 410 {
+		return true
+	}
+	return status.Reason == metav1.StatusReasonExpired || status.Reason == metav1.StatusReasonGone
+}
+
 // InformerManager manages the lifecycle of GenericInformer instances. It
 // reconciles running informers against a desired set of GVRs, starting new
-// informers and stopping removed ones.
+// informers and stopping removed ones. Each start assigns a new GVR process
+// generation so remove/re-add cannot share state with a closed generation.
 type InformerManager struct {
-	client    dynamic.Interface
-	discovery discovery.DiscoveryInterface
-	eventCh   chan<- ResourceEvent
-	resyncCh  chan<- ResyncEvent
-	removeCh  chan<- RemoveGVREvent
-	nsFilter  *NamespaceFilter
-	stoppers  map[schema.GroupVersionResource]context.CancelFunc
-	logger    *slog.Logger
+	client      dynamic.Interface
+	discovery   discovery.DiscoveryInterface
+	eventCh     chan<- ResourceEvent
+	resyncCh    chan<- ResyncEvent
+	removeCh    chan<- RemoveGVREvent
+	nsFilter    *NamespaceFilter
+	stoppers    map[schema.GroupVersionResource]context.CancelFunc
+	generations map[schema.GroupVersionResource]uint64
+	nextGen     uint64
+	logger      *slog.Logger
 
 	// informerWG tracks every ordinary and CRD informer goroutine so StopAll
 	// can await them after cancellation.
@@ -369,14 +548,15 @@ func NewInformerManager(
 	logger *slog.Logger,
 ) *InformerManager {
 	return &InformerManager{
-		client:    client,
-		discovery: disc,
-		eventCh:   eventCh,
-		resyncCh:  resyncCh,
-		removeCh:  removeCh,
-		nsFilter:  nsFilter,
-		stoppers:  make(map[schema.GroupVersionResource]context.CancelFunc),
-		logger:    logger,
+		client:      client,
+		discovery:   disc,
+		eventCh:     eventCh,
+		resyncCh:    resyncCh,
+		removeCh:    removeCh,
+		nsFilter:    nsFilter,
+		stoppers:    make(map[schema.GroupVersionResource]context.CancelFunc),
+		generations: make(map[schema.GroupVersionResource]uint64),
+		logger:      logger,
 	}
 }
 
@@ -385,6 +565,9 @@ func NewInformerManager(
 // (see discoverAndReconcile). Reconcile stops informers for removed GVRs
 // and starts informers for new ones. New informers are started serially
 // and each waits up to 10s for initialization to avoid memory spikes.
+// State transitions for a GVR are serialized here so reconnect, relist,
+// removal, and fast re-add cannot install two active generations for the
+// same GVR concurrently.
 func (m *InformerManager) Reconcile(ctx context.Context, desired []schema.GroupVersionResource) {
 	m.logger.Info("reconciling informers", "running", len(m.stoppers), "desired", len(desired))
 
@@ -401,15 +584,17 @@ func (m *InformerManager) Reconcile(ctx context.Context, desired []schema.GroupV
 			delete(desiredSet, gvr)
 		} else {
 			// No longer desired: stop the informer and tell the writer to
-			// drop in-memory state for this GVR (non-destructive to
+			// drop in-memory state for this generation (non-destructive to
 			// persisted inventory). StopAll does not take this path —
 			// shutdown is not a desired-set removal.
-			m.logger.Info("stopping informer", "gvr", gvr.String())
+			gen := m.generations[gvr]
+			m.logger.Info("stopping informer", "gvr", gvr.String(), "generation", gen)
 			stopper()
 			delete(m.stoppers, gvr)
+			delete(m.generations, gvr)
 			if m.removeCh != nil {
 				select {
-				case m.removeCh <- RemoveGVREvent{GVR: gvr}:
+				case m.removeCh <- RemoveGVREvent{GVR: gvr, Generation: gen}:
 				case <-ctx.Done():
 					return
 				}
@@ -419,10 +604,13 @@ func (m *InformerManager) Reconcile(ctx context.Context, desired []schema.GroupV
 
 	// Start new informers for the remaining desired GVRs.
 	for gvr := range desiredSet {
-		m.logger.Info("informer started", "gvr", gvr.String())
-		informer := NewInformer(m.client, gvr, m.eventCh, m.resyncCh, m.nsFilter, m.logger)
+		m.nextGen++
+		gen := m.nextGen
+		m.logger.Info("informer started", "gvr", gvr.String(), "generation", gen)
+		informer := NewInformerGeneration(m.client, gvr, gen, m.eventCh, m.resyncCh, m.nsFilter, m.logger)
 		informerCtx, cancel := context.WithCancel(ctx)
 		m.stoppers[gvr] = cancel
+		m.generations[gvr] = gen
 		m.startInformer(informer, informerCtx)
 		// Serialize startup to avoid memory spikes.
 		informer.WaitUntilInitialized(ctx, 10*time.Second)
@@ -431,6 +619,8 @@ func (m *InformerManager) Reconcile(ctx context.Context, desired []schema.GroupV
 	m.logger.Info("reconcile complete", "running", len(m.stoppers))
 }
 
+// startInformer runs informer.Run in a tracked goroutine so StopAll can
+// wait for it after cancellation.
 func (m *InformerManager) startInformer(informer *GenericInformer, ctx context.Context) {
 	m.informerWG.Add(1)
 	go func() {
@@ -447,6 +637,7 @@ func (m *InformerManager) StopAll(ctx context.Context) error {
 		m.logger.Info("stopping informer", "gvr", gvr.String())
 		stopper()
 		delete(m.stoppers, gvr)
+		delete(m.generations, gvr)
 	}
 
 	done := make(chan struct{})
@@ -477,6 +668,10 @@ func (m *InformerManager) RunContinuous(ctx context.Context, denyList, allowList
 	m.runContinuous(ctx, denyList, allowList, 10*time.Second)
 }
 
+// runContinuous is the testable implementation of [RunContinuous].
+// The CRD informer is discovery-only: its ResyncEvent.Ack values are
+// acknowledged locally so WaitUntilInitialized is not blocked waiting
+// for the inventory Writer.
 func (m *InformerManager) runContinuous(ctx context.Context, denyList, allowList []Resource, minReconcileInterval time.Duration) {
 	// Initial discovery and reconcile.
 	m.discoverAndReconcile(ctx, denyList, allowList)
@@ -484,10 +679,37 @@ func (m *InformerManager) runContinuous(ctx context.Context, denyList, allowList
 	// Start a CRD informer to detect custom resource changes.
 	crdEventCh := make(chan ResourceEvent, 64)
 	crdResyncCh := make(chan ResyncEvent, 4)
-	crdInformer := NewInformer(m.client, crdGVR, crdEventCh, crdResyncCh, nil, m.logger)
+	// CRD LIST writes are not persisted through the inventory Writer; ack
+	// them here and forward a signal so Run can wait for initialization
+	// without deadlocking on ResyncEvent.Ack.
+	crdResyncSignal := make(chan struct{}, 1)
+	m.nextGen++
+	crdInformer := NewInformerGeneration(m.client, crdGVR, m.nextGen, crdEventCh, crdResyncCh, nil, m.logger)
 
 	crdCtx, crdCancel := context.WithCancel(ctx)
 	defer crdCancel()
+	go func() {
+		for {
+			select {
+			case <-crdCtx.Done():
+				return
+			case rs, ok := <-crdResyncCh:
+				if !ok {
+					return
+				}
+				if rs.Ack != nil {
+					select {
+					case rs.Ack <- nil:
+					default:
+					}
+				}
+				select {
+				case crdResyncSignal <- struct{}{}:
+				default:
+				}
+			}
+		}
+	}()
 	m.startInformer(crdInformer, crdCtx)
 	crdInformer.WaitUntilInitialized(ctx, 10*time.Second)
 
@@ -519,7 +741,7 @@ func (m *InformerManager) runContinuous(ctx context.Context, denyList, allowList
 			// Drain any other CRD events that arrived simultaneously.
 			drainChannel(crdEventCh)
 
-		case <-crdResyncCh:
+		case <-crdResyncSignal:
 			// CRD resync (initial list complete) — trigger reconcile.
 			sinceLastReconcile := time.Since(lastReconcile)
 			if sinceLastReconcile >= minReconcileInterval {
