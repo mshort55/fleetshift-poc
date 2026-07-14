@@ -161,10 +161,11 @@ type InProcessIndexController struct {
 
 	mu      sync.Mutex
 	running map[domain.TargetID]runningTarget
-	// terminating suppresses in-process restarts while target cleanup is in
-	// progress. Durable draining on the target row is the restart-safe
-	// barrier; this map covers the in-process window where reconcile may
-	// still act on a pre-drain list snapshot or a stop is still in flight.
+	// terminating suppresses in-process restarts while OnTargetDraining
+	// is in progress. Durable draining on the target row is the
+	// restart-safe barrier; this map covers the in-process window where
+	// reconcile may still act on a pre-drain list snapshot or a stop is
+	// still in flight.
 	terminating map[domain.TargetID]struct{}
 	// targetOps serializes start/stop/OnTargetDraining for a single target so
 	// reconcile cannot restart an indexer while OnTargetDraining is stopping it.
@@ -234,7 +235,7 @@ func (c *InProcessIndexController) NotifyTargetReady(_ context.Context, target d
 
 // OnTargetDraining records in-memory terminating suppression, stops the
 // target's in-process indexer with a bounded timeout, and returns stop
-// failures so cleanup can retry. It serializes against reconcile
+// failures so callers can retry. It serializes against reconcile
 // start/stop for the same target.
 func (c *InProcessIndexController) OnTargetDraining(ctx context.Context, target domain.TargetInfo) error {
 	op := c.lockTarget(target.ID())
@@ -424,7 +425,7 @@ func (c *InProcessIndexController) reconcile(ctx context.Context) {
 		if _, terminating := c.terminating[id]; terminating {
 			c.mu.Unlock()
 			// Terminating was set while StartIndexer ran; stop immediately
-			// so cleanup does not race a newly started runner.
+			// so OnTargetDraining does not race a newly started runner.
 			if stopErr := c.stopIndexerBounded(ctx, target); stopErr != nil {
 				c.logger.Warn("stop indexer started during OnTargetDraining race failed",
 					"target", string(id),

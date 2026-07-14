@@ -409,34 +409,33 @@ func Test_DefaultDenyList(t *testing.T) {
 	}
 }
 
-// Test_TargetTermination verifies StopIndexer plus target indexed-inventory
-// cleanup removes all objects for the target. Edge DB cleanup is not
-// asserted: edges are not persisted.
-func Test_TargetTermination(t *testing.T) {
+// Test_StopIndexerLeavesInventory verifies StopIndexer stops watching
+// without deleting source-owned indexed inventory (cleanup is deferred).
+func Test_StopIndexerLeavesInventory(t *testing.T) {
 	f := setupE2E(t)
 
 	objs := listInventory(t, f.store)
 	if len(objs) == 0 {
-		t.Fatal("expected inventory objects before termination")
+		t.Fatal("expected inventory objects before stop")
 	}
 
 	ctx := context.Background()
 	if err := f.host.StopIndexer(ctx, f.target); err != nil {
 		t.Fatalf("StopIndexer: %v", err)
 	}
-
-	cleaner := kubeaddon.NewKubernetesTargetIndexedInventoryCleaner(
-		application.NewTargetInventoryCleanupService(f.store),
-	)
-	if err := cleaner.CleanupIndexedInventory(ctx, f.target); err != nil {
-		t.Fatalf("CleanupIndexedInventory: %v", err)
+	if f.host.HasIndexer(f.targetID) {
+		t.Fatal("expected indexer to be stopped")
 	}
 
+	remaining := 0
 	for _, obj := range listInventory(t, f.store) {
 		inv := obj.Inventory()
 		if inv != nil && inv.Labels()["fleetshift.target.id"] == string(f.targetID) {
-			t.Errorf("inventory object still present after termination: %s", obj.Name())
+			remaining++
 		}
+	}
+	if remaining == 0 {
+		t.Fatal("expected indexed inventory to remain after StopIndexer (cleanup deferred)")
 	}
 }
 
@@ -455,7 +454,10 @@ func Test_DeliveryRemoval(t *testing.T) {
 	f.awaitObjectGoneByPrefix(t, "Pod", "e2e-removal-")
 }
 
-// Test_CRDDeletion verifies CRD deletion cascades CR removal from inventory.
+// Test_CRDDeletion verifies plan-1 CRD delete behavior while indexing
+// is running: deleting a custom resource removes it via watch DELETE /
+// IsDelete. Deleting the CRD afterwards stops that GVR without a
+// synthesized collection wipe — other GVRs remain indexed.
 func Test_CRDDeletion(t *testing.T) {
 	f := setupE2E(t)
 
@@ -516,12 +518,31 @@ func Test_CRDDeletion(t *testing.T) {
 
 	f.awaitObjects(t, objectSpec{Kind: "Gadget", Name: "test-gadget"})
 
+	// Watch DELETE / IsDelete while the GVR is still being indexed.
+	err = f.dynClient.Resource(gadgetGVR).Namespace(f.namespace).Delete(ctx, "test-gadget", metav1.DeleteOptions{})
+	if err != nil {
+		t.Fatalf("delete Gadget: %v", err)
+	}
+	f.awaitObjectGone(t, "Gadget", "test-gadget")
+
+	// GVR disappearance is non-destructive: stop the informer, leave
+	// other collections alone (no DeleteCollection / collection wipe).
 	err = f.dynClient.Resource(crdGVR).Delete(ctx, "gadgets.test.fleetshift.io", metav1.DeleteOptions{})
 	if err != nil {
 		t.Fatalf("delete CRD: %v", err)
 	}
 
-	f.awaitObjectGone(t, "Gadget", "test-gadget")
+	foundNode := false
+	for _, obj := range listInventory(t, f.store) {
+		inv := obj.Inventory()
+		if inv != nil && inv.Labels()["k8s.kind"] == "Node" {
+			foundNode = true
+			break
+		}
+	}
+	if !foundNode {
+		t.Fatal("expected Node inventory to remain after non-destructive CRD/GVR removal")
+	}
 }
 
 // Test_EnrichedFields verifies schema-driven extracted fields on real
@@ -657,7 +678,6 @@ func Test_ControllerIndexesRegisteredTarget(t *testing.T) {
 	defer cancelRun()
 
 	reports := application.NewInventoryReportService(store)
-	subtrees := application.NewTargetInventoryCleanupService(store)
 	reporter := kubeaddon.NewDirectInventoryReporter(newE2EInventoryBackend(reports))
 	host := kubeaddon.NewKubernetesInProcessIndexHost(
 		runCtx,
@@ -704,11 +724,9 @@ func Test_ControllerIndexesRegisteredTarget(t *testing.T) {
 		slog.Default(),
 		kubeaddon.WithReconcileInterval(200*time.Millisecond),
 	)
-	cleaner := kubeaddon.NewKubernetesTargetIndexedInventoryCleaner(subtrees)
 	hooks := application.NewTargetOutputHookService(
 		store,
 		application.WithTargetRuntimeHooks(controller),
-		application.WithTargetIndexedInventoryCleaner(kubeaddon.TargetType, cleaner),
 	)
 
 	done := make(chan struct{})

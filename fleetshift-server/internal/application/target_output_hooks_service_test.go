@@ -32,20 +32,6 @@ func (n *recordingTargetRuntimeHooks) OnTargetDraining(_ context.Context, target
 	return n.drainErr
 }
 
-type recordingIndexedInventoryCleaner struct {
-	calls []domain.TargetInfo
-	err   error
-	order *[]string
-}
-
-func (c *recordingIndexedInventoryCleaner) CleanupIndexedInventory(_ context.Context, target domain.TargetInfo) error {
-	c.calls = append(c.calls, target)
-	if c.order != nil {
-		*c.order = append(*c.order, "cleaner:"+string(target.ID()))
-	}
-	return c.err
-}
-
 func testOutputHookTarget(targetType domain.TargetType) domain.TargetInfo {
 	return domain.TargetInfoFromSnapshot(domain.TargetInfoSnapshot{
 		ID:    "target-1",
@@ -103,18 +89,16 @@ func TestTargetOutputHookService_DefaultNoOpNotifier(t *testing.T) {
 	}
 }
 
-func TestTargetOutputHookService_BeforeTargetDeleted_DrainsThenCleans(t *testing.T) {
+func TestTargetOutputHookService_BeforeTargetDeleted_DrainsRuntime(t *testing.T) {
 	order := []string{}
 	store := testOutputHookStore(t)
 	target := testOutputHookTarget("vm")
 	seedOutputHookTarget(t, store, target)
 
 	notifier := &recordingTargetRuntimeHooks{order: &order}
-	cleaner := &recordingIndexedInventoryCleaner{order: &order}
 	svc := application.NewTargetOutputHookService(
 		store,
 		application.WithTargetRuntimeHooks(notifier),
-		application.WithTargetIndexedInventoryCleaner("vm", cleaner),
 	)
 
 	err := svc.BeforeTargetDeleted(context.Background(), target)
@@ -138,45 +122,27 @@ func TestTargetOutputHookService_BeforeTargetDeleted_DrainsThenCleans(t *testing
 	if len(notifier.drained) != 1 || notifier.drained[0].ID() != "target-1" {
 		t.Fatalf("OnTargetDraining calls = %v, want one call for target-1", notifier.drained)
 	}
-	if len(cleaner.calls) != 1 || cleaner.calls[0].ID() != "target-1" {
-		t.Fatalf("cleaner calls = %v, want one call for target-1", cleaner.calls)
-	}
-	want := []string{"draining:target-1", "cleaner:target-1"}
-	if len(order) != len(want) {
+	want := []string{"draining:target-1"}
+	if len(order) != len(want) || order[0] != want[0] {
 		t.Fatalf("order = %v, want %v", order, want)
-	}
-	for i := range want {
-		if order[i] != want[i] {
-			t.Fatalf("order = %v, want %v", order, want)
-		}
 	}
 }
 
-func TestTargetOutputHookService_BeforeTargetDeleted_OnTargetDrainingErrorBlocksCleaner(t *testing.T) {
+func TestTargetOutputHookService_BeforeTargetDeleted_OnTargetDrainingError(t *testing.T) {
 	store := testOutputHookStore(t)
 	target := testOutputHookTarget("vm")
 	seedOutputHookTarget(t, store, target)
 
 	drainErr := errors.New("stop timed out")
-	order := []string{}
-	notifier := &recordingTargetRuntimeHooks{drainErr: drainErr, order: &order}
-	cleaner := &recordingIndexedInventoryCleaner{order: &order}
+	notifier := &recordingTargetRuntimeHooks{drainErr: drainErr}
 	svc := application.NewTargetOutputHookService(
 		store,
 		application.WithTargetRuntimeHooks(notifier),
-		application.WithTargetIndexedInventoryCleaner("vm", cleaner),
 	)
 
 	err := svc.BeforeTargetDeleted(context.Background(), target)
 	if !errors.Is(err, drainErr) {
 		t.Fatalf("BeforeTargetDeleted error = %v, want OnTargetDraining error", err)
-	}
-	if len(cleaner.calls) != 0 {
-		t.Fatalf("cleaner calls = %v, want none when OnTargetDraining fails", cleaner.calls)
-	}
-	want := []string{"draining:target-1"}
-	if len(order) != len(want) || order[0] != want[0] {
-		t.Fatalf("order = %v, want %v", order, want)
 	}
 }
 
@@ -193,126 +159,6 @@ func TestTargetOutputHookService_BeforeTargetDeleted_IdempotentWhenAlreadyDraini
 	}
 }
 
-func TestTargetOutputHookService_BeforeTargetDeleted_UndeclaredTypeSkipsCleaner(t *testing.T) {
-	store := testOutputHookStore(t)
-	target := testOutputHookTarget("unmanaged")
-	seedOutputHookTarget(t, store, target)
-
-	notifier := &recordingTargetRuntimeHooks{}
-	cleaner := &recordingIndexedInventoryCleaner{}
-	svc := application.NewTargetOutputHookService(
-		store,
-		application.WithTargetRuntimeHooks(notifier),
-		application.WithTargetIndexedInventoryCleaner("vm", cleaner),
-	)
-
-	err := svc.BeforeTargetDeleted(context.Background(), target)
-	if err != nil {
-		t.Fatalf("BeforeTargetDeleted: %v", err)
-	}
-
-	if len(notifier.drained) != 1 {
-		t.Fatalf("OnTargetDraining calls = %v, want one call", notifier.drained)
-	}
-	if len(cleaner.calls) != 0 {
-		t.Fatalf("cleaner calls = %v, want none", cleaner.calls)
-	}
-}
-
-func TestTargetOutputHookService_BeforeTargetDeleted_NilCleanerFails(t *testing.T) {
-	store := testOutputHookStore(t)
-	target := testOutputHookTarget("vm")
-	seedOutputHookTarget(t, store, target)
-
-	notifier := &recordingTargetRuntimeHooks{}
-	svc := application.NewTargetOutputHookService(
-		store,
-		application.WithTargetRuntimeHooks(notifier),
-		application.WithTargetIndexedInventoryCleaner("vm", nil),
-	)
-
-	err := svc.BeforeTargetDeleted(context.Background(), target)
-	if !errors.Is(err, domain.ErrInvalidArgument) {
-		t.Fatalf("BeforeTargetDeleted error = %v, want ErrInvalidArgument", err)
-	}
-	if len(notifier.drained) != 1 {
-		t.Fatalf("OnTargetDraining calls = %v, want one call", notifier.drained)
-	}
-}
-
-func TestTargetOutputHookService_BeforeTargetDeleted_CleanerErrorFails(t *testing.T) {
-	store := testOutputHookStore(t)
-	target := testOutputHookTarget("vm")
-	seedOutputHookTarget(t, store, target)
-
-	cleanerErr := errors.New("cleanup failed")
-	svc := application.NewTargetOutputHookService(
-		store,
-		application.WithTargetIndexedInventoryCleaner("vm", &recordingIndexedInventoryCleaner{err: cleanerErr}),
-	)
-
-	err := svc.BeforeTargetDeleted(context.Background(), target)
-	if !errors.Is(err, cleanerErr) {
-		t.Fatalf("BeforeTargetDeleted error = %v, want wrapped cleaner error", err)
-	}
-}
-
-func TestTargetOutputHookService_WithTargetIndexedInventoryCleaners_RegistersEveryEntry(t *testing.T) {
-	store := testOutputHookStore(t)
-	kubernetesCleaner := &recordingIndexedInventoryCleaner{}
-	gcphcpCleaner := &recordingIndexedInventoryCleaner{}
-	svc := application.NewTargetOutputHookService(
-		store,
-		application.WithTargetIndexedInventoryCleaners(map[domain.TargetType]application.TargetIndexedInventoryCleaner{
-			"kubernetes": kubernetesCleaner,
-			"gcphcp":     gcphcpCleaner,
-		}),
-	)
-
-	for _, tt := range []domain.TargetType{"kubernetes", "gcphcp"} {
-		target := testOutputHookTarget(tt)
-		// Distinct IDs so Create does not collide across iterations.
-		target = domain.TargetInfoFromSnapshot(domain.TargetInfoSnapshot{
-			ID: domain.TargetID("target-" + string(tt)), Name: string(tt), Type: tt, State: domain.TargetStateReady,
-		})
-		seedOutputHookTarget(t, store, target)
-		if err := svc.BeforeTargetDeleted(context.Background(), target); err != nil {
-			t.Fatalf("BeforeTargetDeleted(%s): %v", tt, err)
-		}
-	}
-
-	if len(kubernetesCleaner.calls) != 1 {
-		t.Errorf("kubernetes cleaner calls = %d, want 1", len(kubernetesCleaner.calls))
-	}
-	if len(gcphcpCleaner.calls) != 1 {
-		t.Errorf("gcphcp cleaner calls = %d, want 1", len(gcphcpCleaner.calls))
-	}
-}
-
-func TestTargetOutputHookService_WithTargetIndexedInventoryCleaners_CopiesMap(t *testing.T) {
-	store := testOutputHookStore(t)
-	target := testOutputHookTarget("kubernetes")
-	seedOutputHookTarget(t, store, target)
-
-	cleaner := &recordingIndexedInventoryCleaner{}
-	cleaners := map[domain.TargetType]application.TargetIndexedInventoryCleaner{"kubernetes": cleaner}
-	svc := application.NewTargetOutputHookService(
-		store,
-		application.WithTargetIndexedInventoryCleaners(cleaners),
-	)
-
-	// Mutate the caller's map after construction; per this option's doc,
-	// the service must not be affected because it copies the map.
-	cleaners["kubernetes"] = nil
-
-	if err := svc.BeforeTargetDeleted(context.Background(), target); err != nil {
-		t.Fatalf("BeforeTargetDeleted: %v", err)
-	}
-	if len(cleaner.calls) != 1 {
-		t.Fatalf("cleaner calls = %d, want 1 (service must copy the map, not alias it)", len(cleaner.calls))
-	}
-}
-
 func TestTargetOutputHookService_BeforeTargetDeleted_DoesNotOverwriteProperties(t *testing.T) {
 	store := testOutputHookStore(t)
 	target := domain.TargetInfoFromSnapshot(domain.TargetInfoSnapshot{
@@ -324,7 +170,7 @@ func TestTargetOutputHookService_BeforeTargetDeleted_DoesNotOverwriteProperties(
 	})
 	seedOutputHookTarget(t, store, target)
 
-	// Simulate a concurrent property update after the cleanup plan snapshot.
+	// Simulate a concurrent property update after the drain snapshot.
 	ctx := context.Background()
 	tx, err := store.Begin(ctx)
 	if err != nil {
@@ -365,33 +211,26 @@ func TestTargetOutputHookService_BeforeTargetDeleted_DoesNotOverwriteProperties(
 	}
 }
 
-func TestTargetOutputHookService_BeforeTargetDeleted_MissingTargetContinuesCleanup(t *testing.T) {
+func TestTargetOutputHookService_BeforeTargetDeleted_MissingTargetContinues(t *testing.T) {
 	store := testOutputHookStore(t)
 	order := []string{}
 	notifier := &recordingTargetRuntimeHooks{order: &order}
-	cleaner := &recordingIndexedInventoryCleaner{order: &order}
 	svc := application.NewTargetOutputHookService(
 		store,
 		application.WithTargetRuntimeHooks(notifier),
-		application.WithTargetIndexedInventoryCleaner("vm", cleaner),
 	)
 
-	// Target row already gone (e.g. retry after partial cleanup).
+	// Target row already gone (e.g. retry after partial delete).
 	if err := svc.BeforeTargetDeleted(context.Background(), testOutputHookTarget("vm")); err != nil {
 		t.Fatalf("BeforeTargetDeleted: %v", err)
 	}
-	want := []string{"draining:target-1", "cleaner:target-1"}
-	if len(order) != len(want) {
+	want := []string{"draining:target-1"}
+	if len(order) != len(want) || order[0] != want[0] {
 		t.Fatalf("order = %v, want %v", order, want)
-	}
-	for i := range want {
-		if order[i] != want[i] {
-			t.Fatalf("order = %v, want %v", order, want)
-		}
 	}
 }
 
-func TestTargetOutputHookService_BeforeTargetDeleted_IllegalStateBlocksCleanup(t *testing.T) {
+func TestTargetOutputHookService_BeforeTargetDeleted_IllegalStateBlocks(t *testing.T) {
 	store := testOutputHookStore(t)
 	target := domain.TargetInfoFromSnapshot(domain.TargetInfoSnapshot{
 		ID: "target-1", Name: "target-1", Type: "vm", State: domain.TargetStateInitializing,
@@ -399,11 +238,9 @@ func TestTargetOutputHookService_BeforeTargetDeleted_IllegalStateBlocksCleanup(t
 	seedOutputHookTarget(t, store, target)
 
 	notifier := &recordingTargetRuntimeHooks{}
-	cleaner := &recordingIndexedInventoryCleaner{}
 	svc := application.NewTargetOutputHookService(
 		store,
 		application.WithTargetRuntimeHooks(notifier),
-		application.WithTargetIndexedInventoryCleaner("vm", cleaner),
 	)
 
 	err := svc.BeforeTargetDeleted(context.Background(), target)
@@ -413,27 +250,22 @@ func TestTargetOutputHookService_BeforeTargetDeleted_IllegalStateBlocksCleanup(t
 	if len(notifier.drained) != 0 {
 		t.Fatalf("OnTargetDraining calls = %v, want none when drain compare-and-swap fails", notifier.drained)
 	}
-	if len(cleaner.calls) != 0 {
-		t.Fatalf("cleaner calls = %v, want none when drain compare-and-swap fails", cleaner.calls)
-	}
 }
 
-func TestTargetOutputHookService_BeforeTargetDeleted_BeginFailureBlocksCleanup(t *testing.T) {
+func TestTargetOutputHookService_BeforeTargetDeleted_BeginFailureBlocks(t *testing.T) {
 	beginErr := errors.New("begin failed")
 	notifier := &recordingTargetRuntimeHooks{}
-	cleaner := &recordingIndexedInventoryCleaner{}
 	svc := application.NewTargetOutputHookService(
 		&beginFailStore{err: beginErr},
 		application.WithTargetRuntimeHooks(notifier),
-		application.WithTargetIndexedInventoryCleaner("vm", cleaner),
 	)
 
 	err := svc.BeforeTargetDeleted(context.Background(), testOutputHookTarget("vm"))
 	if !errors.Is(err, beginErr) {
 		t.Fatalf("BeforeTargetDeleted error = %v, want begin failure", err)
 	}
-	if len(notifier.drained) != 0 || len(cleaner.calls) != 0 {
-		t.Fatalf("OnTargetDraining/cleaner must not run after begin failure")
+	if len(notifier.drained) != 0 {
+		t.Fatalf("OnTargetDraining must not run after begin failure")
 	}
 }
 

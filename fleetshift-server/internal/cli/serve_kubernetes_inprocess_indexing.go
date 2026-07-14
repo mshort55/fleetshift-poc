@@ -29,10 +29,10 @@ func stopKubernetesIndexController(cancel context.CancelFunc, done <-chan struct
 }
 
 // newKubernetesInProcessIndexing wires the Kubernetes in-process index
-// controller, inventory reporter, and target indexed-inventory cleaner
-// for server composition. The returned hooks implement
-// [domain.TargetOutputHooks]; the controller is started separately by
-// the caller once the process is ready to serve.
+// controller and inventory reporter for server composition. The
+// returned hooks implement [domain.TargetOutputHooks]; the controller
+// is started separately by the caller once the process is ready to
+// serve.
 func newKubernetesInProcessIndexing(
 	ctx context.Context,
 	store domain.Store,
@@ -40,7 +40,6 @@ func newKubernetesInProcessIndexing(
 	logger *slog.Logger,
 ) (domain.TargetOutputHooks, *kubernetesaddon.InProcessIndexController) {
 	inventoryReportSvc := application.NewInventoryReportService(store)
-	targetInventoryCleanupSvc := application.NewTargetInventoryCleanupService(store)
 	reporter := kubernetesaddon.NewDirectInventoryReporter(
 		newDirectInventoryReportBackend(inventoryReportSvc),
 	)
@@ -54,10 +53,6 @@ func newKubernetesInProcessIndexing(
 	hooks := application.NewTargetOutputHookService(
 		store,
 		application.WithTargetRuntimeHooks(controller),
-		application.WithTargetIndexedInventoryCleaner(
-			kubernetesaddon.TargetType,
-			kubernetesaddon.NewKubernetesTargetIndexedInventoryCleaner(targetInventoryCleanupSvc),
-		),
 	)
 	return hooks, controller
 }

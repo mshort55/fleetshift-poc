@@ -94,7 +94,7 @@ func encodeResourceNameSegment(s string) string {
 // result is built with [domain.ParseResourceName] rather than cast
 // from a raw string, so a malformed identity (e.g. an empty UID) fails
 // here instead of producing an invalid name downstream. Scoping by
-// target and GVR gives resync and cleanup a natural collection/subtree
+// target and GVR gives same-process resync a natural collection
 // boundary; keying the leaf by UID rather than namespace/name means
 // deleting and recreating an object under the same namespace/name is
 // correctly treated as a new incarnation rather than an overwrite.
@@ -106,18 +106,6 @@ func ObjectResourceName(id KubernetesObjectIdentity) (domain.ResourceName, error
 	)
 	if err != nil {
 		return "", fmt.Errorf("kubernetes object resource name (target %q, gvr %q, uid %q): %w", id.TargetID, GVRKey(id.GVR), id.UID, err)
-	}
-	return name, nil
-}
-
-// TargetObjectSubtree returns the parsed parent resource name
-// "{TargetCollectionID}/{targetID}" under which every Kubernetes
-// object for targetID lives, for target-scoped subtree cleanup when a
-// target is torn down.
-func TargetObjectSubtree(targetID domain.TargetID) (domain.ResourceName, error) {
-	name, err := domain.ParseResourceName(string(TargetCollectionID) + "/" + encodeResourceNameSegment(string(targetID)))
-	if err != nil {
-		return "", fmt.Errorf("kubernetes target object subtree (target %q): %w", targetID, err)
 	}
 	return name, nil
 }
@@ -140,7 +128,7 @@ func ObjectCollectionName(targetID domain.TargetID, gvr schema.GroupVersionResou
 
 // ObjectLabels returns the initial set of Kubernetes identity labels
 // for id: target, GVR, kind, scope, namespace, name, and UID, for
-// filtering, grouping, and cleanup. Values are stored unencoded --
+// filtering and grouping. Values are stored unencoded --
 // unlike [ObjectResourceName]'s path segments, labels are not part of
 // a resource-name path, so there is nothing to escape. k8s.namespace
 // is omitted entirely for cluster-scoped objects rather than set to

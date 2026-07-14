@@ -1432,16 +1432,17 @@ func (r *ExtensionResourceRepo) batchReadCurrentReportedAliases(ctx context.Cont
 // Inventory hard-delete (IsDelete replacements)
 // ---------------------------------------------------------------------------
 
-// deleteInventoryResourcesByPredicate deletes extension_resources rows
+// hardDeleteExtensionResourcesByPredicate deletes extension_resources rows
 // matching whereSQL/args, running the same orphaned-alias-claim cleanup
 // [ExtensionResourceRepo.Delete] does, but treating zero matching rows
 // as success rather than [domain.ErrNotFound]. This is the shared hard-
 // delete shape [ExtensionResourceRepo.deleteInventoryReplacements]
-// needs for source-driven deletes, where a duplicate or already-absent
-// delete must not fail. whereSQL must reference extension_resources
-// columns unqualified, since it is reused verbatim against both the
-// unaliased DELETE and the alias-claim lookup JOIN below.
-func (r *ExtensionResourceRepo) deleteInventoryResourcesByPredicate(ctx context.Context, whereSQL string, args []any) error {
+// needs for source-driven IsDelete replacements, where a duplicate or
+// already-absent delete must not fail. whereSQL must reference
+// extension_resources columns unqualified, since it is reused verbatim
+// against both the unaliased DELETE and the alias-claim lookup JOIN
+// below.
+func (r *ExtensionResourceRepo) hardDeleteExtensionResourcesByPredicate(ctx context.Context, whereSQL string, args []any) error {
 	rows, err := r.DB.QueryContext(ctx,
 		`SELECT c.claim_id FROM resource_alias_contributions c
 		 JOIN extension_resources ON extension_resources.uid = c.source_extension_resource_uid
@@ -1493,7 +1494,7 @@ func (r *ExtensionResourceRepo) deleteInventoryReplacements(ctx context.Context,
 		)
 	}
 	whereSQL := fmt.Sprintf("(service_name, type_name, collection_name, resource_id) IN (%s)", strings.Join(placeholders, ", "))
-	return r.deleteInventoryResourcesByPredicate(ctx, whereSQL, args)
+	return r.hardDeleteExtensionResourcesByPredicate(ctx, whereSQL, args)
 }
 
 func (r *ExtensionResourceRepo) ListObservations(ctx context.Context, uid domain.ExtensionResourceUID, limit int) ([]domain.Observation, error) {

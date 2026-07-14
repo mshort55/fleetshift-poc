@@ -67,6 +67,32 @@ func seedManagedOnlyType(t *testing.T, store domain.Store, rt domain.ResourceTyp
 	}
 }
 
+// seedManagedPlusInventoryType registers an extension resource type
+// that supports both management and inventory reporting.
+func seedManagedPlusInventoryType(t *testing.T, store domain.Store, rt domain.ResourceType) {
+	t.Helper()
+	ctx := context.Background()
+	tx, err := store.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin tx: %v", err)
+	}
+	defer tx.Rollback()
+	relation := domain.NewRegisteredSelfTarget(domain.TargetID("addon-widget"), domain.ManifestType("api.test.widget"))
+	def := domain.NewExtensionResourceType(rt, "v1", "widgets", time.Now(),
+		domain.WithManagement(relation, domain.Signature{
+			Signer:         domain.FederatedIdentity{Subject: "addon-svc", Issuer: "https://issuer.test"},
+			ContentHash:    []byte("hash"),
+			SignatureBytes: []byte("sig"),
+		}),
+		domain.WithInventory())
+	if err := tx.ExtensionResources().CreateType(ctx, def); err != nil {
+		t.Fatalf("CreateType: %v", err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+}
+
 func getExtensionResource(t *testing.T, store domain.Store, name domain.ResourceName) *domain.ExtensionResource {
 	t.Helper()
 	ctx := context.Background()

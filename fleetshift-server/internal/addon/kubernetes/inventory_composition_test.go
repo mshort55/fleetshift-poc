@@ -242,11 +242,10 @@ func (l storeTargetListerForTest) ListTargets(ctx context.Context) ([]domain.Tar
 	return tx.Targets().List(ctx)
 }
 
-// TestStopBeforeCleanup_NoRecreateAfterSubtreeDelete proves the
-// terminating-hint → bounded stop → subtree delete ordering: with the
-// API still listing objects, inventory must stay empty after
-// BeforeTargetDeleted (the stopped indexer must not re-report).
-func TestStopBeforeCleanup_NoRecreateAfterSubtreeDelete(t *testing.T) {
+// TestBeforeTargetDeleted_StopsIndexerAndLeavesInventory proves that
+// BeforeTargetDeleted drains and stops the indexer without deleting
+// source-owned indexed inventory (cleanup is deferred).
+func TestBeforeTargetDeleted_StopsIndexerAndLeavesInventory(t *testing.T) {
 	store := &sqlite.Store{DB: sqlite.OpenTestDB(t)}
 	seedObjectType(t, store)
 
@@ -272,11 +271,9 @@ func TestStopBeforeCleanup_NoRecreateAfterSubtreeDelete(t *testing.T) {
 		slog.New(slog.DiscardHandler),
 		WithStopTimeout(2*time.Second),
 	)
-	cleaner := NewKubernetesTargetIndexedInventoryCleaner(application.NewTargetInventoryCleanupService(store))
 	hooks := application.NewTargetOutputHookService(
 		store,
 		application.WithTargetRuntimeHooks(controller),
-		application.WithTargetIndexedInventoryCleaner(TargetType, cleaner),
 	)
 
 	target := compositionTarget("prod", InventoryModeInProcess)
@@ -304,8 +301,6 @@ func TestStopBeforeCleanup_NoRecreateAfterSubtreeDelete(t *testing.T) {
 		return false
 	})
 
-	// Do not pre-stop the indexer: BeforeTargetDeleted must drain, stop it, then
-	// delete the subtree, while the fake API still has the pod.
 	if err := hooks.BeforeTargetDeleted(context.Background(), target); err != nil {
 		t.Fatalf("BeforeTargetDeleted: %v", err)
 	}
@@ -326,14 +321,19 @@ func TestStopBeforeCleanup_NoRecreateAfterSubtreeDelete(t *testing.T) {
 		t.Fatalf("target state = %q, want draining", gotTarget.State())
 	}
 
-	if got := objectsForTarget(listObjectInventory(t, store), "prod"); len(got) != 0 {
-		t.Fatalf("expected empty inventory after cleanup, got %d objects", len(got))
+	got := objectsForTarget(listObjectInventory(t, store), "prod")
+	if len(got) == 0 {
+		t.Fatal("expected indexed inventory to remain after BeforeTargetDeleted (cleanup deferred)")
 	}
-
-	// API still has the object; a still-running indexer would re-report it.
-	time.Sleep(300 * time.Millisecond)
-	if got := objectsForTarget(listObjectInventory(t, store), "prod"); len(got) != 0 {
-		t.Fatalf("inventory recreated after cleanup (%d objects); indexer was not stopped in time", len(got))
+	found := false
+	for _, obj := range got {
+		if obj.Name() == wantName {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("expected object %q to remain after deferred cleanup", wantName)
 	}
 }
 
@@ -655,11 +655,9 @@ func TestServeStyleComposition_ControllerIndexesRegisteredTarget(t *testing.T) {
 		slog.New(slog.DiscardHandler),
 		WithReconcileInterval(50*time.Millisecond),
 	)
-	cleaner := NewKubernetesTargetIndexedInventoryCleaner(application.NewTargetInventoryCleanupService(store))
 	hooks := application.NewTargetOutputHookService(
 		store,
 		application.WithTargetRuntimeHooks(controller),
-		application.WithTargetIndexedInventoryCleaner(TargetType, cleaner),
 	)
 
 	done := make(chan struct{})

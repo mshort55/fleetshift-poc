@@ -17,7 +17,7 @@
 // File naming in this package:
 //
 //   - delivery_* — DeliveryAgent and SSA applier
-//   - inventory_* — object identity, reporter, cleaner, and the
+//   - inventory_* — object identity, reporter, and the
 //     in-process indexing pipeline
 //   - index_schema* — which GVRs/fields to watch (indexer config,
 //     not the platform ExtensionResourceSchema)

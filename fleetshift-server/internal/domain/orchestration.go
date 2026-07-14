@@ -147,17 +147,6 @@ type DeliveryOutputCleanupPlan struct {
 	SecretRefs    []SecretRef
 }
 
-// TerminatingTargets is the input to
-// [OrchestrationWorkflowSpec.CleanupTargetIndexedInventory]: the
-// targets whose source-owned indexed inventory must be cleaned up
-// before their target rows are deleted. It carries only the targets,
-// not the rest of [DeliveryOutputCleanupPlan], because indexed
-// inventory cleanup has nothing to do with delivery-owned outputs
-// (secrets, delivery-owned inventory items) -- see that plan's doc.
-type TerminatingTargets struct {
-	Targets []TargetInfo
-}
-
 // OrchestrationWorkflowSpec is the fulfillment pipeline expressed as a
 // deterministic workflow. Each reconciliation loads the current state,
 // runs the full pipeline (or delete), and atomically completes. If
@@ -176,8 +165,8 @@ type OrchestrationWorkflowSpec struct {
 	Vault           Vault
 	Now             func() time.Time
 
-	// TargetOutputHooks handles post-registration hooks and pre-deletion
-	// cleanup for delivery-produced target outputs. Defaults to
+	// TargetOutputHooks handles post-registration hooks for
+	// delivery-produced target outputs. Defaults to
 	// [NoOpTargetOutputHooks].
 	TargetOutputHooks TargetOutputHooks
 
@@ -541,10 +530,9 @@ func (s *OrchestrationWorkflowSpec) RemoveFromTarget() Activity[RemoveInput, Rem
 }
 
 // PlanDeliveryOutputCleanup computes everything the later delete
-// cleanup activities need while delivery records, target rows, and
+// cleanup activity needs while delivery records, target rows, and
 // old delivery-owned inventory rows still exist, so
-// [OrchestrationWorkflowSpec.CleanupTargetIndexedInventory] and
-// [OrchestrationWorkflowSpec.CleanupDeliveryData] never need to
+// [OrchestrationWorkflowSpec.CleanupDeliveryData] never needs to
 // reconstruct cleanup inputs from partially deleted state. It does not
 // mutate persistent state. A target ID from a delivery-owned
 // inventory item whose target row is already gone is skipped, not
@@ -593,36 +581,13 @@ func (s *OrchestrationWorkflowSpec) PlanDeliveryOutputCleanup() Activity[Fulfill
 	})
 }
 
-// CleanupTargetIndexedInventory delegates pre-deletion handling to
-// [TargetOutputHooks] before target rows are deleted. The hook
-// implementation may send non-failing runtime hints and may delete
-// source-owned indexed inventory. Returning an error from the hook
-// blocks target row deletion, which happens later in
-// [OrchestrationWorkflowSpec.CleanupDeliveryData]. The activity is
-// idempotent as long as the configured hook implementation is
-// idempotent.
-func (s *OrchestrationWorkflowSpec) CleanupTargetIndexedInventory() Activity[TerminatingTargets, struct{}] {
-	return NewActivity("cleanup-target-indexed-inventory", func(ctx context.Context, in TerminatingTargets) (struct{}, error) {
-		for _, target := range in.Targets {
-			if err := s.targetOutputHooks().BeforeTargetDeleted(ctx, target); err != nil {
-				return struct{}{}, fmt.Errorf("cleanup terminating target %s: %w", target.ID(), err)
-			}
-		}
-		return struct{}{}, nil
-	})
-}
-
 // CleanupDeliveryData deletes delivery-owned outputs (provisioned
 // targets, inventory items, and referenced vault secrets) from the
-// plan and hard-deletes delivery records for the fulfillment. It must
-// run after [OrchestrationWorkflowSpec.CleanupTargetIndexedInventory]
-// has cleaned up source-owned indexed inventory for the planned
-// targets, so target row deletion never strands indexed inventory
-// behind a deleted target. It does not clean up source-owned indexed
-// inventory itself and does not construct any source-specific
-// resource names. The fulfillment row itself is NOT deleted here;
-// that responsibility belongs to an abstraction-specific cleanup
-// workflow such as [DeleteDeploymentCleanupWorkflow] or
+// plan and hard-deletes delivery records for the fulfillment. It does
+// not construct any source-specific resource names. The fulfillment
+// row itself is NOT deleted here; that responsibility belongs to an
+// abstraction-specific cleanup workflow such as
+// [DeleteDeploymentCleanupWorkflow] or
 // [DeleteManagedResourceCleanupWorkflow], which runs after receiving a
 // [DeleteCleanupCompleteSignal].
 func (s *OrchestrationWorkflowSpec) CleanupDeliveryData() Activity[DeliveryOutputCleanupPlan, struct{}] {
@@ -909,10 +874,6 @@ func (s *OrchestrationWorkflowSpec) Run(record Record, fulfillmentID Fulfillment
 			} else {
 				plan, err := RunActivity(record, s.PlanDeliveryOutputCleanup(), fulfillmentID)
 				if err != nil {
-					probe.Error(err)
-					return struct{}{}, s.releaseLockAndContinue(record, fulfillmentID, probe)
-				}
-				if _, err := RunActivity(record, s.CleanupTargetIndexedInventory(), TerminatingTargets{Targets: plan.Targets}); err != nil {
 					probe.Error(err)
 					return struct{}{}, s.releaseLockAndContinue(record, fulfillmentID, probe)
 				}

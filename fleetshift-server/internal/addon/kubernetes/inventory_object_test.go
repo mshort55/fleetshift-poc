@@ -110,35 +110,6 @@ func TestObjectResourceName(t *testing.T) {
 	})
 }
 
-func TestTargetObjectSubtree(t *testing.T) {
-	t.Run("BasicShape", func(t *testing.T) {
-		name, err := kubernetes.TargetObjectSubtree("prod")
-		if err != nil {
-			t.Fatalf("TargetObjectSubtree: %v", err)
-		}
-		if want := domain.ResourceName("clusters/prod"); name != want {
-			t.Fatalf("TargetObjectSubtree = %q, want %q", name, want)
-		}
-	})
-
-	t.Run("SlashBearingTargetIDIsEncoded", func(t *testing.T) {
-		name, err := kubernetes.TargetObjectSubtree("prod/us-east-1")
-		if err != nil {
-			t.Fatalf("TargetObjectSubtree: %v", err)
-		}
-		if want := domain.ResourceName("clusters/prod%2Fus-east-1"); name != want {
-			t.Fatalf("TargetObjectSubtree = %q, want %q", name, want)
-		}
-	})
-
-	t.Run("RejectsEmptyTargetID", func(t *testing.T) {
-		_, err := kubernetes.TargetObjectSubtree("")
-		if !errors.Is(err, domain.ErrInvalidArgument) {
-			t.Fatalf("TargetObjectSubtree error = %v, want ErrInvalidArgument", err)
-		}
-	})
-}
-
 func TestObjectCollectionName(t *testing.T) {
 	t.Run("BasicShape", func(t *testing.T) {
 		got, err := kubernetes.ObjectCollectionName("prod", schema.GroupVersionResource{

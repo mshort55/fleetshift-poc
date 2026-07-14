@@ -13,7 +13,7 @@ type TargetOutputHooks interface {
 	AfterTargetRegistered(ctx context.Context, target TargetInfo)
 
 	// BeforeTargetDeleted runs before the target row is deleted.
-	// Returning an error blocks target row deletion.
+	// Returning an error fails that caller.
 	BeforeTargetDeleted(ctx context.Context, target TargetInfo) error
 }
 

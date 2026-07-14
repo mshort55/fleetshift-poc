@@ -353,18 +353,6 @@ type InventoryDelta struct {
 	ReceivedAt time.Time
 }
 
-// InventorySubtreeRef identifies every inventory resource of one
-// resource type whose name lies below a parent resource-name subtree.
-// Parent is a parsed [ResourceName] such as "clusters/prod", not a raw
-// string prefix. Application-layer target inventory cleanup uses this
-// scope to issue [InventoryReplacement.IsDelete] entries through
-// ReplaceInventory; there is no dedicated repository subtree-delete
-// method.
-type InventorySubtreeRef struct {
-	ResourceType ResourceType
-	Parent       ResourceName
-}
-
 // ValidateInventoryReplacements validates a mixed
 // [InventoryReplacement] batch before any repository write:
 //

@@ -249,8 +249,8 @@ func TestNewKubernetesInProcessIndexing_WiresHooksAndController(t *testing.T) {
 		t.Fatalf("begin read: %v", err)
 	}
 	defer readTx.Rollback()
-	if _, err := readTx.ExtensionResources().Get(ctx, kubernetesaddon.ObjectResourceType.FullName(pod1)); !errors.Is(err, domain.ErrNotFound) {
-		t.Fatalf("Get after BeforeTargetDeleted err=%v, want ErrNotFound", err)
+	if _, err := readTx.ExtensionResources().Get(ctx, kubernetesaddon.ObjectResourceType.FullName(pod1)); err != nil {
+		t.Fatalf("Get after BeforeTargetDeleted: %v", err)
 	}
 }
 
