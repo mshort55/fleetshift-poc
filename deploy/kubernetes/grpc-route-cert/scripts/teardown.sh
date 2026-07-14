@@ -15,6 +15,10 @@ set -euo pipefail
 #   ./teardown.sh
 # ------------------------------------------------------------------
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=../../../scripts/common.sh
+source "$(cd "$SCRIPT_DIR/../../../scripts" && pwd)/common.sh"
+
 NAMESPACE="fleetshift"
 ROUTE_NAME="grpc"
 ISSUER_NAME="fleetshift-grpc-letsencrypt-prod"
@@ -97,7 +101,7 @@ EOF
 info "Checking prerequisites..."
 require_command oc
 require_command jq
-timeout 5 oc whoami &>/dev/null || error "Not logged in to OpenShift. Run 'oc login' first."
+require_oc_login
 
 if oc get route "${ROUTE_NAME}" -n "${NAMESPACE}" &>/dev/null; then
   info "Removing Route certificate integration from ${NAMESPACE}/${ROUTE_NAME}..."

@@ -27,6 +27,8 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 K8S_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 ROOT_DIR="$(cd "${K8S_DIR}/../.." && pwd)"
+# shellcheck source=../../scripts/common.sh
+source "$(cd "$SCRIPT_DIR/../../scripts" && pwd)/common.sh"
 NAMESPACE="fleetshift"
 
 is_truthy() {
@@ -46,7 +48,7 @@ echo ""
 
 # --- Preconditions ---
 command -v oc >/dev/null 2>&1 || { echo "ERROR: 'oc' CLI not found."; exit 1; }
-timeout 5 oc whoami &>/dev/null || { echo "ERROR: Not logged in to OpenShift. Run 'oc login' first."; exit 1; }
+require_oc_login
 [ -f "${ROOT_DIR}/.env" ] || { echo "ERROR: ${ROOT_DIR}/.env not found. Copy from .env.template."; exit 1; }
 
 # --- Generate config/secrets from .env ---

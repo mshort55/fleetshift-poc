@@ -21,13 +21,15 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 K8S_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
+# shellcheck source=../../scripts/common.sh
+source "$(cd "$SCRIPT_DIR/../../scripts" && pwd)/common.sh"
 NAMESPACE="fleetshift"
 
 echo "=== FleetShift Kubernetes Teardown ==="
 
 # --- Preconditions ---
 command -v oc >/dev/null 2>&1 || { echo "ERROR: 'oc' CLI not found."; exit 1; }
-timeout 5 oc whoami &>/dev/null || { echo "ERROR: Not logged in to OpenShift. Run 'oc login' first."; exit 1; }
+require_oc_login
 
 if ! oc get namespace "${NAMESPACE}" &>/dev/null; then
   echo "Namespace '${NAMESPACE}' not found. Nothing to tear down."
