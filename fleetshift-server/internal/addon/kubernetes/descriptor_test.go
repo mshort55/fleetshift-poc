@@ -38,10 +38,11 @@ func TestDescriptor_DeclaresDeliveryAndInventoryCapabilities(t *testing.T) {
 // object inventory schema. Most of these fields (ProtoPackage,
 // Singular, Plural) are never read back through
 // [domain.ExtensionResourceType] for an inventory-only schema -- the
-// platform only persists ResourceType/APIVersion/CollectionID and
-// skips schema activation entirely when Management is nil -- so an
-// AddonManager-level registration test cannot catch a typo in them.
-// This is the only test that can.
+// platform persists ResourceType/APIVersion/CollectionID and activates
+// inventory-only schemas for QueryResources scoping without a management
+// proto surface -- so an AddonManager-level registration test cannot
+// catch a typo in the unused-looking identity fields. This is the only
+// test that can.
 func TestInventorySchema_ObjectInventoryShape(t *testing.T) {
 	s := kubernetes.InventorySchema()
 

@@ -451,12 +451,14 @@ func TestAgent_Deliver_WiresObserverLogger(t *testing.T) {
 
 func TestAgent_Remove_WiresObserverLogger(t *testing.T) {
 	provider := newFakeProvider()
-	provider.clusters["my-cluster"] = nil
+	provider.clusters["fs--my-cluster"] = nil
 	reporter := newChannelReporter()
-	agent := newTestAgent(reporter, fakeFactory(provider))
+	agent, store := newTestAgent(reporter, provider)
+	store.SetForTest("fs--my-cluster", 1)
 
 	manifests := []domain.Manifest{{
-		Raw: json.RawMessage(`{"name":"my-cluster"}`),
+		ManifestType: kind.ClusterManifestType,
+		Raw:          json.RawMessage(`{"name":"my-cluster"}`),
 	}}
 
 	err := agent.Remove(context.Background(), domain.TargetInfoFromSnapshot(domain.TargetInfoSnapshot{}), "d1:t1", manifests, domain.DeliveryAuth{}, nil, 1)

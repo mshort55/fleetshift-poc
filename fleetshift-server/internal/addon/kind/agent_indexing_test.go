@@ -150,7 +150,7 @@ func TestAgent_Deliver_EnsureIndexerRetriesTransientThenSucceeds(t *testing.T) {
 	provider := newFakeProvider()
 	reporter := newChannelReporter()
 	runtime := &flakyEnsureIndexingRuntime{failTimes: 2}
-	agent := newTestAgent(reporter, fakeFactory(provider), kind.WithIndexingRuntime(runtime))
+	agent, _ := newTestAgent(reporter, provider, kind.WithIndexingRuntime(runtime))
 
 	err := agent.Deliver(
 		context.Background(),
@@ -184,7 +184,7 @@ func TestAgent_Deliver_ReportResultRetriesTransientThenSucceeds(t *testing.T) {
 	base := newChannelReporter()
 	reporter := &flakyReportResultReporter{channelReporter: base, failTimes: 2}
 	runtime := &recordingIndexingRuntime{}
-	agent := newTestAgent(reporter, fakeFactory(provider), kind.WithIndexingRuntime(runtime))
+	agent, _ := newTestAgent(reporter, provider, kind.WithIndexingRuntime(runtime))
 
 	err := agent.Deliver(
 		context.Background(),
@@ -388,7 +388,7 @@ func TestAgent_Deliver_PartialEnsureLeavesReadySiblings(t *testing.T) {
 		failTarget: "k8s-cluster-b",
 		failErr:    kubernetes.ErrStaleIndexerGeneration,
 	}
-	agent := newTestAgent(reporter, fakeFactory(provider), kind.WithIndexingRuntime(runtime))
+	agent, _ := newTestAgent(reporter, provider, kind.WithIndexingRuntime(runtime))
 
 	err := agent.Deliver(
 		context.Background(),

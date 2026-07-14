@@ -24,12 +24,11 @@ func Descriptor() domain.AddonDescriptor {
 
 // InventorySchema returns the extension resource schema for the generic
 // Kubernetes object inventory type. Every watched Kubernetes object,
-// regardless of kind, is reported under this one schema, so it carries
-// no management section: there is no per-object spec to fulfill, only
-// observed state. That also means it has no proto files to compile --
-// inventory-only schemas are registered as type definitions but never
-// passed to schema activation, so there is no dynamic API surface that
-// would need one.
+// regardless of kind, is reported under this one schema. It has no
+// management section (no per-object spec to fulfill, only observed
+// state) and no ProtoFiles to compile. Connect still registers a type
+// definition with Inventory set and Management nil, and activates the
+// schema so QueryResources can include the type in its activation scope.
 func InventorySchema() domain.ExtensionResourceSchema {
 	return domain.ExtensionResourceSchema{
 		ResourceType: ObjectResourceType,

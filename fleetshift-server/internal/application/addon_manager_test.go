@@ -1251,7 +1251,7 @@ func TestAddonManager_EnableKubernetesDescriptorRecordsCapabilities(t *testing.T
 	}
 }
 
-func TestAddonManager_ConnectKubernetesSchemaRegistersInventoryTypeWithoutActivation(t *testing.T) {
+func TestAddonManager_ConnectKubernetesSchemaRegistersAndActivatesInventoryType(t *testing.T) {
 	env := setupAddonManager(t)
 	ctx := context.Background()
 
@@ -1270,10 +1270,22 @@ func TestAddonManager_ConnectKubernetesSchemaRegistersInventoryTypeWithoutActiva
 		t.Errorf("state = %d, want %d (connected)", addon.State, domain.AddonStateConnected)
 	}
 
-	// Inventory-only schemas must NOT trigger schema activation (no
-	// dynamic API surface yet).
-	if env.activator.activatedCount() != 0 {
-		t.Errorf("activated count = %d, want 0 (inventory-only schema)", env.activator.activatedCount())
+	// Inventory-only schemas still activate so QueryResources can scope
+	// to activated types. Management remains nil.
+	if env.activator.activatedCount() != 1 {
+		t.Errorf("activated count = %d, want 1 (inventory-only schema)", env.activator.activatedCount())
+	}
+	if env.activator.activatedCount() == 1 {
+		got := env.activator.activated[0]
+		if got.ResourceType != kubernetesaddon.ObjectResourceType {
+			t.Errorf("activated resource type = %q, want %q", got.ResourceType, kubernetesaddon.ObjectResourceType)
+		}
+		if got.Inventory == nil {
+			t.Error("activated schema Inventory is nil, want non-nil")
+		}
+		if got.Management != nil {
+			t.Error("activated schema Management is non-nil, want nil")
+		}
 	}
 
 	typeDef, err := env.typeSvc.Get(ctx, kubernetesaddon.ObjectResourceType)
