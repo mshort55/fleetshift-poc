@@ -5,6 +5,7 @@ import (
 	"errors"
 	"log/slog"
 	"reflect"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -820,5 +821,94 @@ func TestIndexingRuntime_JoinInFlightEnsureIndexer(t *testing.T) {
 	}
 	if !h.HasIndexer("pm-join") {
 		t.Fatal("expected joined ensure to leave one ready indexer")
+	}
+}
+
+// TestIndexingRuntime_StopAllDuringClientBuild_DoesNotHangOnMissingDone
+// pins that StopAll during startReady (before cancel/done are published)
+// returns promptly and does not wait on a done channel that will never close.
+func TestIndexingRuntime_StopAllDuringClientBuild_DoesNotHangOnMissingDone(t *testing.T) {
+	unblock := make(chan struct{})
+	var blocked atomic.Bool
+	h := NewKubernetesInProcessIndexHost(
+		context.Background(),
+		nil,
+		&recordingReporter{},
+		fakeIndexerClients{
+			dynamic: func(*rest.Config) (dynamic.Interface, error) {
+				blocked.Store(true)
+				<-unblock
+				return newFakeDynamicClient(podsGVR()), nil
+			},
+			discovery: func(*rest.Config) (discovery.DiscoveryInterface, error) {
+				return newFakeDiscovery([]*metav1.APIResourceList{{
+					GroupVersion: "v1",
+					APIResources: []metav1.APIResource{
+						{Name: "pods", Verbs: metav1.Verbs{"get", "list", "watch"}},
+					},
+				}}), nil
+			},
+		},
+		slog.New(slog.DiscardHandler),
+	)
+
+	ensureErr := make(chan error, 1)
+	go func() {
+		ensureErr <- h.EnsureIndexer(context.Background(), testIndexInput("pm-clientbuild", 1, "tok"))
+	}()
+	awaitDiscoveryBlocked(t, &blocked)
+
+	stopErr := make(chan error, 1)
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		stopErr <- h.StopAll(ctx)
+	}()
+	// Let StopAll observe starting state with nil done before client build resumes.
+	time.Sleep(20 * time.Millisecond)
+	close(unblock)
+
+	if err := <-ensureErr; err == nil {
+		t.Fatal("expected EnsureIndexer to fail after StopAll during client build")
+	}
+	if err := <-stopErr; err != nil {
+		t.Fatalf("StopAll must not time out waiting for unpublished done: %v", err)
+	}
+	if h.HasIndexer("pm-clientbuild") {
+		t.Fatal("expected no tracked indexer after cancelled start")
+	}
+}
+
+// TestIndexingRuntime_ConcurrentEnsureAndStopAll exercises the cancel/done
+// publish path under concurrent EnsureIndexer and StopAll. Run with
+// go test -race to catch memory-model races on managedIndexer fields.
+func TestIndexingRuntime_ConcurrentEnsureAndStopAll(t *testing.T) {
+	h := testIndexingRuntime(t)
+	input := testIndexInput("pm-race", 1, "tok")
+
+	const rounds = 40
+	for range rounds {
+		var wg sync.WaitGroup
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			_ = h.EnsureIndexer(context.Background(), input)
+		}()
+		go func() {
+			defer wg.Done()
+			ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+			defer cancel()
+			_ = h.StopAll(ctx)
+		}()
+		wg.Wait()
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := h.StopAll(ctx); err != nil {
+		t.Fatalf("final StopAll: %v", err)
+	}
+	if h.HasIndexer("pm-race") {
+		t.Fatal("expected no indexer after concurrent ensure/stop rounds")
 	}
 }

@@ -248,13 +248,7 @@ func (i *GenericInformer) listAndResync(ctx context.Context) error {
 
 		// Pagination is controlled by the continue token. Optional
 		// remainingItemCount is not proof that no next page exists.
-		cont := ""
-		if metadata, ok := resources.UnstructuredContent()["metadata"].(map[string]any); ok {
-			if c, ok := metadata["continue"].(string); ok {
-				cont = c
-			}
-		}
-		if cont != "" {
+		if cont := resources.GetContinue(); cont != "" {
 			opts.Continue = cont
 			continue
 		}

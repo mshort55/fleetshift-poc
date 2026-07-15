@@ -77,7 +77,12 @@ func (ic *indexerDelegate) start(ctx context.Context) {
 
 	var nsFilter *NamespaceFilter
 	if ic.cfg.NamespaceFilter != nil {
-		nsFilter = NewNamespaceFilter(*ic.cfg.NamespaceFilter)
+		var err error
+		nsFilter, err = NewNamespaceFilter(*ic.cfg.NamespaceFilter)
+		if err != nil {
+			ic.logger.Error("invalid namespace filter config; indexing will not start", "error", err)
+			return
+		}
 	}
 
 	w := NewWriter(ic.targetID, ic.reporter, ic.edgeSink, schemaMap, ic.cfg.BatchInterval, ic.logger)

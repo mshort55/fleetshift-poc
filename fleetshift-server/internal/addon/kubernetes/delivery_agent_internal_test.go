@@ -353,7 +353,7 @@ func TestApplyManifests_ReportsProgress(t *testing.T) {
 	}
 }
 
-func TestDeleteManifests_PropagatesApplyBuildError(t *testing.T) {
+func TestDeleteManifests_EmptyManifestsSucceeds(t *testing.T) {
 	t.Parallel()
 	a := NewDeliveryAgent(nopReporterForInternal{})
 	// Invalid host still builds clients; empty manifests succeed.

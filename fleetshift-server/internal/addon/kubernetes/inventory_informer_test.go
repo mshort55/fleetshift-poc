@@ -368,7 +368,7 @@ func TestGenericInformer_ClusterScopedPassesThroughNamespaceFilter(t *testing.T)
 		t.Fatalf("failed to create fake node: %v", err)
 	}
 
-	nsFilter := NewNamespaceFilter(NamespaceFilterConfig{
+	nsFilter := mustNamespaceFilter(t, NamespaceFilterConfig{
 		IncludePatterns: []string{"prod-*"},
 	})
 

@@ -558,6 +558,31 @@ func TestErrorRecovery(t *testing.T) {
 	})
 }
 
+func TestApplyDeltaWithRetry_NoSleepAfterFinalFailure(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		mock := &recordingReporter{
+			applyDeltaFunc: func(context.Context, InventoryDeltaReport) error {
+				return errors.New("permanent failure")
+			},
+		}
+		w := newTestWriter(mock, nil, nil, time.Hour)
+
+		start := time.Now()
+		err := w.applyDeltaWithRetry(context.Background(), InventoryDeltaReport{
+			Upserts: []InventoryObjectReport{{Name: domain.ResourceName("clusters/t/objects/uid-1")}},
+		})
+		elapsed := time.Since(start)
+		if err == nil {
+			t.Fatal("expected permanent ApplyDelta failure")
+		}
+		// Backoff sleeps only between attempts: 1s + 2s. A sleep after the
+		// final attempt would push this to ~7s (extra 4s).
+		if elapsed != 3*time.Second {
+			t.Fatalf("elapsed = %v, want 3s (no backoff after final failed attempt)", elapsed)
+		}
+	})
+}
+
 func TestEdgeComputation_BuildEdges(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		testGVRWithEdges := schema.GroupVersionResource{Group: "", Version: "v1", Resource: "pods"}
@@ -1353,15 +1378,46 @@ func TestResync_PurgesStaleNodes(t *testing.T) {
 		w.ResyncCh() <- ResyncEvent{GVR: testGVR, Resources: []*unstructured.Unstructured{child}}
 		advanceAndWait(100 * time.Millisecond)
 
-		childUpdated := makeResource("uid-child", "child-deploy", "101")
-		childUpdated.Object["metadata"].(map[string]any)["ownerReferences"] = []any{
+		var edgeDeleted bool
+		for _, d := range edges.getDeltas() {
+			for _, e := range d.Deletes {
+				if e.EdgeType == EdgeOwnedBy && e.SourceUID == "uid-child" && e.DestUID == "uid-parent" {
+					edgeDeleted = true
+				}
+			}
+		}
+		if !edgeDeleted {
+			t.Fatal("expected ownedBy edge deletion from resync alone, without a follow-up object event")
+		}
+	})
+}
+
+func TestRemoveGVR_FlushesEdgeDeletes(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		mock := &recordingReporter{}
+		edges := &recordingEdgeSink{}
+		w := newTestWriter(mock, edges, nil, 100*time.Millisecond)
+
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		go w.Run(ctx)
+		synctest.Wait()
+
+		child := makeResource("uid-child", "child-deploy", "100")
+		child.Object["metadata"].(map[string]any)["ownerReferences"] = []any{
 			map[string]any{
 				"apiVersion": "apps/v1", "kind": "Deployment",
 				"name": "parent-deploy", "uid": "uid-parent", "controller": true,
 			},
 		}
-		w.EventCh() <- ResourceEvent{Op: EventUpdate, Resource: childUpdated, GVR: testGVR}
+		parent := makeResource("uid-parent", "parent-deploy", "200")
+
+		w.EventCh() <- ResourceEvent{Op: EventAdd, Resource: child, GVR: testGVR}
+		w.EventCh() <- ResourceEvent{Op: EventAdd, Resource: parent, GVR: testGVR}
 		advanceAndWait(250 * time.Millisecond)
+
+		w.RemoveCh() <- RemoveGVREvent{GVR: testGVR}
+		synctest.Wait()
 
 		var edgeDeleted bool
 		for _, d := range edges.getDeltas() {
@@ -1372,7 +1428,7 @@ func TestResync_PurgesStaleNodes(t *testing.T) {
 			}
 		}
 		if !edgeDeleted {
-			t.Fatal("expected ownedBy edge deletion after parent was purged by resync")
+			t.Fatal("expected ownedBy edge deletion from RemoveGVR without a follow-up object event")
 		}
 	})
 }

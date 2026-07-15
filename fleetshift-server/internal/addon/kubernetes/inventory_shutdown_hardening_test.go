@@ -197,37 +197,24 @@ func TestInformerManager_StopAllTimeout(t *testing.T) {
 }
 
 func TestDiscoverAndReconcile_SkipsWhenContextCanceled(t *testing.T) {
-	var called atomic.Bool
-	disc := &countingDiscovery{
-		fakeDiscoveryWithPreferred: newFakeDiscovery([]*metav1.APIResourceList{{
-			GroupVersion: "v1",
-			APIResources: []metav1.APIResource{
-				{Name: "pods", Verbs: metav1.Verbs{"get", "list", "watch"}},
-			},
-		}}),
-		called: &called,
-	}
-	mgr := NewInformerManager(nil, disc, make(chan ResourceEvent, 1), make(chan ResyncEvent, 1), nil, nil, slog.Default())
+	var disc callCountingDiscovery
+	disc.fakeDiscoveryWithPreferred = newFakeDiscovery([]*metav1.APIResourceList{{
+		GroupVersion: "v1",
+		APIResources: []metav1.APIResource{
+			{Name: "pods", Verbs: metav1.Verbs{"get", "list", "watch"}},
+		},
+	}})
+	mgr := NewInformerManager(nil, &disc, make(chan ResourceEvent, 1), make(chan ResyncEvent, 1), nil, nil, slog.Default())
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	mgr.discoverAndReconcile(ctx, nil, nil)
-	if called.Load() {
+	if disc.calls.Load() != 0 {
 		t.Fatal("ServerPreferredResources must not be called when ctx is already canceled")
 	}
 	if len(mgr.stoppers) != 0 {
 		t.Fatalf("expected no stoppers, got %d", len(mgr.stoppers))
 	}
-}
-
-type countingDiscovery struct {
-	*fakeDiscoveryWithPreferred
-	called *atomic.Bool
-}
-
-func (d *countingDiscovery) ServerPreferredResources() ([]*metav1.APIResourceList, error) {
-	d.called.Store(true)
-	return d.fakeDiscoveryWithPreferred.ServerPreferredResources()
 }
 
 func TestWriter_StopUsesProvidedFlushContext(t *testing.T) {

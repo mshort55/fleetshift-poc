@@ -196,7 +196,7 @@ func (w *Writer) Run(ctx context.Context) {
 			return
 
 		case ev := <-w.eventCh:
-			if !w.acceptGeneration(ev.GVR, ev.Generation) {
+			if !w.acceptGeneration(ctx, ev.GVR, ev.Generation) {
 				continue
 			}
 			uid := string(ev.Resource.GetUID())
@@ -227,7 +227,7 @@ func (w *Writer) Run(ctx context.Context) {
 			}
 
 		case rs := <-w.resyncCh:
-			if !w.acceptGeneration(rs.GVR, rs.Generation) {
+			if !w.acceptGeneration(ctx, rs.GVR, rs.Generation) {
 				ackResync(rs.Ack, errResyncGenerationClosed)
 				continue
 			}
@@ -247,7 +247,7 @@ func (w *Writer) Run(ctx context.Context) {
 					delete(pendingDeletes, uid)
 				}
 			}
-			w.closeGeneration(rm.GVR, rm.Generation)
+			w.closeGeneration(ctx, rm.GVR, rm.Generation)
 
 		case <-batchTicker.C:
 			// Failure keeps the entry in pendingResync for the next tick;
@@ -275,8 +275,9 @@ func writerShutdownFlushContext(ctx context.Context) (context.Context, context.C
 // acceptGeneration returns whether events for (gvr, gen) should be
 // processed. Generation 0 is untagged (tests) and always accepted for
 // an open GVR slot. A newer generation replaces an older open one; a
-// stale or closed generation is rejected.
-func (w *Writer) acceptGeneration(gvr schema.GroupVersionResource, gen uint64) bool {
+// stale or closed generation is rejected. When a newer generation
+// replaces an older one, edge diffs for dropped nodes are flushed.
+func (w *Writer) acceptGeneration(ctx context.Context, gvr schema.GroupVersionResource, gen uint64) bool {
 	if gen != 0 {
 		if closed, ok := w.closedGens[gvr]; ok && gen <= closed {
 			return false
@@ -314,6 +315,7 @@ func (w *Writer) acceptGeneration(gvr schema.GroupVersionResource, gen uint64) b
 			ackResync(p.ack, errResyncGenerationClosed)
 			delete(w.pendingResync, gvr)
 		}
+		_ = w.flushEdges(ctx)
 		return true
 	}
 	return false
@@ -321,7 +323,8 @@ func (w *Writer) acceptGeneration(gvr schema.GroupVersionResource, gen uint64) b
 
 // closeGeneration discards in-memory state for gen. If the writer has
 // already moved to a newer generation for gvr, the close is ignored.
-func (w *Writer) closeGeneration(gvr schema.GroupVersionResource, gen uint64) {
+// Edge deletions caused by the drop are flushed to the edge sink.
+func (w *Writer) closeGeneration(ctx context.Context, gvr schema.GroupVersionResource, gen uint64) {
 	st := w.gvrStates[gvr]
 	if st == nil {
 		if gen != 0 {
@@ -349,6 +352,7 @@ func (w *Writer) closeGeneration(gvr schema.GroupVersionResource, gen uint64) {
 		ackResync(p.ack, errResyncGenerationClosed)
 		delete(w.pendingResync, gvr)
 	}
+	_ = w.flushEdges(ctx)
 }
 
 // dropGVRMemory clears edge/node state for gvr without touching
@@ -444,12 +448,13 @@ func (w *Writer) flush(
 		return nil
 	}
 
-	edgeAdds, edgeDels, newEdges := w.diffEdges()
-
 	if w.reporter == nil {
+		if err := w.flushEdges(ctx); err != nil {
+			w.restoreUncommittedNodes(upsertedUIDs, prevNodes, prevEdgeFuncs, hadPrevNode, hadPrevEdgeFn)
+			return err
+		}
 		w.acknowledgeFlush(upsertedUIDs, deletedUIDs)
 		maps.Copy(sentVersions, newSentVersions)
-		w.previousEdges = newEdges
 		return nil
 	}
 
@@ -462,19 +467,31 @@ func (w *Writer) flush(
 		return err
 	}
 
+	if err := w.flushEdges(ctx); err != nil {
+		w.restoreUncommittedNodes(upsertedUIDs, prevNodes, prevEdgeFuncs, hadPrevNode, hadPrevEdgeFn)
+		return err
+	}
+
+	w.acknowledgeFlush(upsertedUIDs, deletedUIDs)
+	maps.Copy(sentVersions, newSentVersions)
+	return nil
+}
+
+// flushEdges diffs the current node/edge-func graph against previousEdges
+// and delivers any adds/deletes to the edge sink. previousEdges advances
+// only on success. Call after membership changes that are not already
+// covered by a pending object flush (resync success, GVR memory drop).
+func (w *Writer) flushEdges(ctx context.Context) error {
+	edgeAdds, edgeDels, newEdges := w.diffEdges()
 	if len(edgeAdds) > 0 || len(edgeDels) > 0 {
 		if err := w.edgeSink.ApplyEdgeDelta(ctx, domain.TargetID(w.targetID), EdgeDelta{
 			Adds:    edgeAdds,
 			Deletes: edgeDels,
 		}); err != nil {
 			w.logger.Warn("edge sink ApplyEdgeDelta failed", "error", err)
-			w.restoreUncommittedNodes(upsertedUIDs, prevNodes, prevEdgeFuncs, hadPrevNode, hadPrevEdgeFn)
 			return err
 		}
 	}
-
-	w.acknowledgeFlush(upsertedUIDs, deletedUIDs)
-	maps.Copy(sentVersions, newSentVersions)
 	w.previousEdges = newEdges
 	return nil
 }
@@ -545,6 +562,9 @@ func (w *Writer) applyDeltaWithRetry(ctx context.Context, delta InventoryDeltaRe
 		}
 		if ctx.Err() != nil {
 			return err
+		}
+		if attempt == 2 {
+			break
 		}
 
 		backoff := time.Duration(1<<attempt) * time.Second
@@ -647,6 +667,7 @@ func (w *Writer) sendResync(ctx context.Context, rs ResyncEvent) {
 	}
 	delete(w.pendingResync, rs.GVR)
 	w.applyResyncSuccess(rs.GVR, pending)
+	_ = w.flushEdges(ctx)
 	ackResync(pending.ack, nil)
 }
 
@@ -695,6 +716,7 @@ func (w *Writer) retryPendingResyncs(ctx context.Context) error {
 		}
 		delete(w.pendingResync, gvr)
 		w.applyResyncSuccess(gvr, pending)
+		_ = w.flushEdges(ctx)
 		ackResync(pending.ack, nil)
 	}
 	return firstErr

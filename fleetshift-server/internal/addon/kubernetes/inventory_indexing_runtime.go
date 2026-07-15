@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"maps"
 	"sync"
 	"time"
 
@@ -304,8 +303,6 @@ func (h *KubernetesInProcessIndexHost) startReady(
 	)
 
 	idxCtx, cancel := context.WithCancel(h.ctx)
-	entry.cancel = cancel
-	entry.done = ic.done
 
 	h.mu.Lock()
 	if h.shuttingDown || entry.intentionalStop || h.entries[id] != entry {
@@ -313,6 +310,10 @@ func (h *KubernetesInProcessIndexHost) startReady(
 		cancel()
 		return fmt.Errorf("indexer start cancelled for %s", id)
 	}
+	// Publish cancel/done only when the indexer goroutine will launch, so
+	// StopAll/stopLocked never wait on a done channel that will never close.
+	entry.cancel = cancel
+	entry.done = ic.done
 	entry.ready = true
 	entry.restartEligible = input.SecretRef != ""
 	entry.restartAttempts = 0
@@ -459,15 +460,27 @@ func (h *KubernetesInProcessIndexHost) StopAllIndexers(ctx context.Context) erro
 // unexpected-exit restart for the duration of the call, and waits for exit
 // bounded by ctx. After it returns, new EnsureIndexer calls are allowed again.
 func (h *KubernetesInProcessIndexHost) StopAll(ctx context.Context) error {
+	type stopHandle struct {
+		id     domain.TargetID
+		entry  *managedIndexer
+		cancel context.CancelFunc
+		done   <-chan struct{}
+	}
+
 	h.mu.Lock()
 	h.shuttingDown = true
-	entries := make(map[domain.TargetID]*managedIndexer, len(h.entries))
-	maps.Copy(entries, h.entries)
-	for _, entry := range entries {
+	handles := make([]stopHandle, 0, len(h.entries))
+	for id, entry := range h.entries {
 		entry.intentionalStop = true
 		if entry.readinessCancel != nil {
 			entry.readinessCancel()
 		}
+		handles = append(handles, stopHandle{
+			id:     id,
+			entry:  entry,
+			cancel: entry.cancel,
+			done:   entry.done,
+		})
 	}
 	h.mu.Unlock()
 	defer func() {
@@ -476,39 +489,40 @@ func (h *KubernetesInProcessIndexHost) StopAll(ctx context.Context) error {
 		h.mu.Unlock()
 	}()
 
-	if len(entries) == 0 {
+	if len(handles) == 0 {
 		return nil
 	}
 
-	for _, entry := range entries {
-		if entry.cancel != nil {
-			entry.cancel()
+	for _, handle := range handles {
+		if handle.cancel != nil {
+			handle.cancel()
 		}
 	}
 
 	type waitResult struct {
 		id       domain.TargetID
 		entry    *managedIndexer
+		done     <-chan struct{}
 		timedOut bool
 	}
-	results := make(chan waitResult, len(entries))
-	for id, entry := range entries {
-		go func(id domain.TargetID, entry *managedIndexer) {
-			if entry.done == nil {
-				results <- waitResult{id: id, entry: entry}
+	results := make(chan waitResult, len(handles))
+	for _, handle := range handles {
+		go func(handle stopHandle) {
+			if handle.done == nil {
+				results <- waitResult{id: handle.id, entry: handle.entry, done: handle.done}
 				return
 			}
 			select {
-			case <-entry.done:
-				results <- waitResult{id: id, entry: entry}
+			case <-handle.done:
+				results <- waitResult{id: handle.id, entry: handle.entry, done: handle.done}
 			case <-ctx.Done():
-				results <- waitResult{id: id, entry: entry, timedOut: true}
+				results <- waitResult{id: handle.id, entry: handle.entry, done: handle.done, timedOut: true}
 			}
-		}(id, entry)
+		}(handle)
 	}
 
 	var firstErr error
-	for range entries {
+	for range handles {
 		r := <-results
 		if !r.timedOut {
 			h.mu.Lock()
@@ -523,15 +537,15 @@ func (h *KubernetesInProcessIndexHost) StopAll(ctx context.Context) error {
 		}
 		// Leave the entry tracked until the indexer finishes so a concurrent
 		// EnsureIndexer cannot start a duplicate.
-		if r.entry.done != nil {
-			go func(id domain.TargetID, entry *managedIndexer) {
-				<-entry.done
+		if r.done != nil {
+			go func(id domain.TargetID, entry *managedIndexer, done <-chan struct{}) {
+				<-done
 				h.mu.Lock()
 				if cur, still := h.entries[id]; still && cur == entry {
 					delete(h.entries, id)
 				}
 				h.mu.Unlock()
-			}(r.id, r.entry)
+			}(r.id, r.entry, r.done)
 		} else {
 			h.mu.Lock()
 			if cur, still := h.entries[r.id]; still && cur == r.entry {

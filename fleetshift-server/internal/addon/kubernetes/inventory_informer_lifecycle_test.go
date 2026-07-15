@@ -180,7 +180,7 @@ func TestListAndResync_SkipsDisallowedNamespaces(t *testing.T) {
 
 	eventCh := make(chan ResourceEvent, 10)
 	resyncCh := make(chan ResyncEvent, 10)
-	filter := NewNamespaceFilter(NamespaceFilterConfig{IncludePatterns: []string{"prod-*"}})
+	filter := mustNamespaceFilter(t, NamespaceFilterConfig{IncludePatterns: []string{"prod-*"}})
 	inf := NewInformer(dyn, gvr, eventCh, resyncCh, filter, slog.Default())
 
 	gotResync := ackNextResync(resyncCh)
@@ -404,7 +404,7 @@ func TestWatch_NamespaceFilter(t *testing.T) {
 
 		eventCh := make(chan ResourceEvent, 10)
 		resyncCh := make(chan ResyncEvent, 10)
-		filter := NewNamespaceFilter(NamespaceFilterConfig{IncludePatterns: []string{"prod-*"}})
+		filter := mustNamespaceFilter(t, NamespaceFilterConfig{IncludePatterns: []string{"prod-*"}})
 		inf := NewInformer(dyn, gvr, eventCh, resyncCh, filter, slog.Default())
 		inf.watchResourceVersion = "1"
 
@@ -821,7 +821,8 @@ func TestRunContinuous_InitialReconcileThenCancel(t *testing.T) {
 func TestRunContinuous_CRDEventTriggersReconcile(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		gvr := podsGVR()
-		disc := newFakeDiscovery([]*metav1.APIResourceList{{
+		var disc callCountingDiscovery
+		disc.fakeDiscoveryWithPreferred = newFakeDiscovery([]*metav1.APIResourceList{{
 			GroupVersion: "v1",
 			APIResources: []metav1.APIResource{
 				{Name: "pods", Verbs: metav1.Verbs{"get", "list", "watch"}},
@@ -832,7 +833,7 @@ func TestRunContinuous_CRDEventTriggersReconcile(t *testing.T) {
 		resyncCh := make(chan ResyncEvent, 100)
 		stopAck := ackAllResyncs(resyncCh)
 		defer stopAck()
-		mgr := NewInformerManager(dyn, disc, eventCh, resyncCh, nil, nil, slog.Default())
+		mgr := NewInformerManager(dyn, &disc, eventCh, resyncCh, nil, nil, slog.Default())
 
 		ctx, cancel := context.WithCancel(context.Background())
 		done := make(chan struct{})
@@ -848,7 +849,10 @@ func TestRunContinuous_CRDEventTriggersReconcile(t *testing.T) {
 		time.Sleep(10 * time.Second)
 		synctest.Wait()
 
-		before := len(mgr.stoppers)
+		beforeCalls := disc.calls.Load()
+		if beforeCalls < 1 {
+			t.Fatalf("expected at least one discovery call before CRD event, got %d", beforeCalls)
+		}
 
 		crd := &unstructured.Unstructured{Object: map[string]any{
 			"apiVersion": "apiextensions.k8s.io/v1",
@@ -867,8 +871,12 @@ func TestRunContinuous_CRDEventTriggersReconcile(t *testing.T) {
 		time.Sleep(10 * time.Second)
 		synctest.Wait()
 
-		if len(mgr.stoppers) < before {
-			t.Fatalf("stoppers shrank after CRD reconcile: before=%d after=%d", before, len(mgr.stoppers))
+		afterCalls := disc.calls.Load()
+		if afterCalls != beforeCalls+1 {
+			t.Fatalf("discovery calls after CRD reconcile = %d, want %d (exactly one re-reconcile)", afterCalls, beforeCalls+1)
+		}
+		if _, ok := mgr.stoppers[gvr]; !ok {
+			t.Fatalf("expected pods informer after CRD reconcile, stoppers=%#v", mgr.stoppers)
 		}
 
 		cancel()
@@ -964,7 +972,7 @@ func TestWatch_NamespaceFilterOnModifyAndDelete(t *testing.T) {
 		})
 
 		eventCh := make(chan ResourceEvent, 10)
-		filter := NewNamespaceFilter(NamespaceFilterConfig{IncludePatterns: []string{"prod-*"}})
+		filter := mustNamespaceFilter(t, NamespaceFilterConfig{IncludePatterns: []string{"prod-*"}})
 		inf := NewInformer(dyn, gvr, eventCh, make(chan ResyncEvent, 10), filter, slog.Default())
 		inf.watchResourceVersion = "1"
 
@@ -1394,7 +1402,8 @@ func TestRunContinuous_ThrottleTimerFires(t *testing.T) {
 func TestRunContinuous_DuplicateCRDEventsWhilePending(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		gvr := podsGVR()
-		disc := newFakeDiscovery([]*metav1.APIResourceList{{
+		var disc callCountingDiscovery
+		disc.fakeDiscoveryWithPreferred = newFakeDiscovery([]*metav1.APIResourceList{{
 			GroupVersion: "v1",
 			APIResources: []metav1.APIResource{
 				{Name: "pods", Verbs: metav1.Verbs{"get", "list", "watch"}},
@@ -1405,7 +1414,7 @@ func TestRunContinuous_DuplicateCRDEventsWhilePending(t *testing.T) {
 		resyncCh := make(chan ResyncEvent, 100)
 		stopAck := ackAllResyncs(resyncCh)
 		defer stopAck()
-		mgr := NewInformerManager(dyn, disc, eventCh, resyncCh, nil, nil, slog.Default())
+		mgr := NewInformerManager(dyn, &disc, eventCh, resyncCh, nil, nil, slog.Default())
 
 		ctx, cancel := context.WithCancel(context.Background())
 		done := make(chan struct{})
@@ -1415,6 +1424,8 @@ func TestRunContinuous_DuplicateCRDEventsWhilePending(t *testing.T) {
 		}()
 		awaitRunContinuousReady()
 		synctest.Wait()
+
+		beforeCalls := disc.calls.Load()
 
 		for i, name := range []string{"a.example.com", "b.example.com"} {
 			crd := &unstructured.Unstructured{Object: map[string]any{
@@ -1432,8 +1443,19 @@ func TestRunContinuous_DuplicateCRDEventsWhilePending(t *testing.T) {
 			synctest.Wait()
 		}
 
+		// Still inside the throttle window: duplicate CRD events must coalesce
+		// into a pending timer, not trigger immediate re-reconciles.
+		if got := disc.calls.Load(); got != beforeCalls {
+			t.Fatalf("discovery calls while pending = %d, want %d (no immediate reconcile)", got, beforeCalls)
+		}
+
 		time.Sleep(10 * time.Second)
 		synctest.Wait()
+
+		afterCalls := disc.calls.Load()
+		if afterCalls != beforeCalls+1 {
+			t.Fatalf("discovery calls after throttle = %d, want %d (one coalesced reconcile)", afterCalls, beforeCalls+1)
+		}
 
 		cancel()
 		synctest.Wait()

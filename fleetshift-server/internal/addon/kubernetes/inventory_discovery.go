@@ -20,6 +20,9 @@ type Resource struct {
 // Watch-all mode (allowList empty): user deny → default deny → ALLOW.
 // Watch-selected mode (allowList non-empty): user deny → user allow (overrides default deny) → DENY.
 func IsResourceAllowed(group, kind string, allowList, userDenyList, defaultDenyList []Resource, logger *slog.Logger) bool {
+	if logger == nil {
+		logger = slog.Default()
+	}
 	if g, k, denied := IsResourceMatchingList(userDenyList, group, kind); denied {
 		logger.Debug("deny resource: matched user deny rule",
 			"group", group, "kind", kind, "ruleGroup", g, "ruleKind", k)
@@ -91,6 +94,9 @@ func FilterSupportedResources(supported map[schema.GroupVersionResource]struct{}
 // SupportedResources returns all GVRs on the cluster that support the WATCH verb.
 // It uses ServerPreferredResources to get the preferred API version for each resource.
 func SupportedResources(client discovery.DiscoveryInterface, logger *slog.Logger) (map[schema.GroupVersionResource]struct{}, error) {
+	if logger == nil {
+		logger = slog.Default()
+	}
 	apiResources, err := client.ServerPreferredResources()
 	if err != nil && apiResources == nil {
 		return nil, err

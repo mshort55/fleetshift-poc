@@ -1,6 +1,9 @@
 package kubernetes
 
-import "path/filepath"
+import (
+	"fmt"
+	"path/filepath"
+)
 
 // NamespaceFilterConfig controls which namespaces are included in indexing.
 // Glob patterns use filepath.Match syntax.
@@ -16,8 +19,20 @@ type NamespaceFilter struct {
 }
 
 // NewNamespaceFilter creates a NamespaceFilter from the given config.
-func NewNamespaceFilter(cfg NamespaceFilterConfig) *NamespaceFilter {
-	return &NamespaceFilter{config: cfg}
+// It validates every include/exclude glob up front so invalid patterns
+// fail at construction instead of silently changing match behavior.
+func NewNamespaceFilter(cfg NamespaceFilterConfig) (*NamespaceFilter, error) {
+	for _, pattern := range cfg.IncludePatterns {
+		if _, err := filepath.Match(pattern, ""); err != nil {
+			return nil, fmt.Errorf("invalid include pattern %q: %w", pattern, err)
+		}
+	}
+	for _, pattern := range cfg.ExcludePatterns {
+		if _, err := filepath.Match(pattern, ""); err != nil {
+			return nil, fmt.Errorf("invalid exclude pattern %q: %w", pattern, err)
+		}
+	}
+	return &NamespaceFilter{config: cfg}, nil
 }
 
 // IsNamespaceAllowed returns true if the namespace passes the filter.
@@ -34,7 +49,8 @@ func (f *NamespaceFilter) IsNamespaceAllowed(namespace string) bool {
 	if len(f.config.IncludePatterns) > 0 {
 		matched := false
 		for _, pattern := range f.config.IncludePatterns {
-			if ok, err := filepath.Match(pattern, namespace); err == nil && ok {
+			// Patterns are validated in NewNamespaceFilter.
+			if ok, _ := filepath.Match(pattern, namespace); ok {
 				matched = true
 				break
 			}
@@ -46,7 +62,7 @@ func (f *NamespaceFilter) IsNamespaceAllowed(namespace string) bool {
 
 	// Exclude check: namespace must NOT match any exclude pattern.
 	for _, pattern := range f.config.ExcludePatterns {
-		if ok, err := filepath.Match(pattern, namespace); err == nil && ok {
+		if ok, _ := filepath.Match(pattern, namespace); ok {
 			return false
 		}
 	}

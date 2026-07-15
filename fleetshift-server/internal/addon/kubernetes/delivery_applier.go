@@ -42,6 +42,24 @@ func newApplierFromConfig(cfg *rest.Config) (*applier, error) {
 	return &applier{client: dyn, mapper: mapper}, nil
 }
 
+// resolveResource maps obj to a dynamic ResourceInterface, defaulting
+// namespaced resources with an empty namespace to "default".
+func (a *applier) resolveResource(obj *unstructured.Unstructured) (dynamic.ResourceInterface, error) {
+	gvk := obj.GroupVersionKind()
+	mapping, err := a.mapper.RESTMapping(gvk.GroupKind(), gvk.Version)
+	if err != nil {
+		return nil, fmt.Errorf("resolve GVR for %s: %w", gvk, err)
+	}
+	if mapping.Scope.Name() == meta.RESTScopeNameNamespace {
+		ns := obj.GetNamespace()
+		if ns == "" {
+			ns = "default"
+		}
+		return a.client.Resource(mapping.Resource).Namespace(ns), nil
+	}
+	return a.client.Resource(mapping.Resource), nil
+}
+
 // apply performs a server-side apply of the given raw JSON manifest.
 // Namespaced resources default to the "default" namespace when unset.
 func (a *applier) apply(ctx context.Context, raw json.RawMessage) error {
@@ -50,21 +68,9 @@ func (a *applier) apply(ctx context.Context, raw json.RawMessage) error {
 		return fmt.Errorf("parse manifest: %w", err)
 	}
 
-	gvk := obj.GroupVersionKind()
-	mapping, err := a.mapper.RESTMapping(gvk.GroupKind(), gvk.Version)
+	dr, err := a.resolveResource(obj)
 	if err != nil {
-		return fmt.Errorf("resolve GVR for %s: %w", gvk, err)
-	}
-
-	var dr dynamic.ResourceInterface
-	if mapping.Scope.Name() == meta.RESTScopeNameNamespace {
-		ns := obj.GetNamespace()
-		if ns == "" {
-			ns = "default"
-		}
-		dr = a.client.Resource(mapping.Resource).Namespace(ns)
-	} else {
-		dr = a.client.Resource(mapping.Resource)
+		return err
 	}
 
 	data, err := json.Marshal(obj)
@@ -72,6 +78,9 @@ func (a *applier) apply(ctx context.Context, raw json.RawMessage) error {
 		return fmt.Errorf("marshal object: %w", err)
 	}
 
+	gvk := obj.GroupVersionKind()
+	// TODO: consider Force:true so FleetShift reclaims fields owned by other
+	// managers (kubectl, HPA, etc.). Without Force, SSA 409 conflicts fail delivery.
 	_, err = dr.Patch(ctx, obj.GetName(), "application/apply-patch+yaml", data, metav1.PatchOptions{
 		FieldManager: fieldManager,
 	})
@@ -90,23 +99,12 @@ func (a *applier) delete(ctx context.Context, raw json.RawMessage) error {
 		return fmt.Errorf("parse manifest: %w", err)
 	}
 
-	gvk := obj.GroupVersionKind()
-	mapping, err := a.mapper.RESTMapping(gvk.GroupKind(), gvk.Version)
+	dr, err := a.resolveResource(obj)
 	if err != nil {
-		return fmt.Errorf("resolve GVR for %s: %w", gvk, err)
+		return err
 	}
 
-	var dr dynamic.ResourceInterface
-	if mapping.Scope.Name() == meta.RESTScopeNameNamespace {
-		ns := obj.GetNamespace()
-		if ns == "" {
-			ns = "default"
-		}
-		dr = a.client.Resource(mapping.Resource).Namespace(ns)
-	} else {
-		dr = a.client.Resource(mapping.Resource)
-	}
-
+	gvk := obj.GroupVersionKind()
 	if err := dr.Delete(ctx, obj.GetName(), metav1.DeleteOptions{}); err != nil {
 		if apierrors.IsNotFound(err) {
 			return nil

@@ -94,6 +94,18 @@ type blockingDiscovery struct {
 	onBlock func()
 }
 
+// callCountingDiscovery counts ServerPreferredResources invocations.
+type callCountingDiscovery struct {
+	*fakeDiscoveryWithPreferred
+	calls atomic.Int64
+}
+
+// ServerPreferredResources increments the call counter, then delegates.
+func (d *callCountingDiscovery) ServerPreferredResources() ([]*metav1.APIResourceList, error) {
+	d.calls.Add(1)
+	return d.fakeDiscoveryWithPreferred.ServerPreferredResources()
+}
+
 // ServerPreferredResources blocks until unblock is closed, then delegates.
 func (d *blockingDiscovery) ServerPreferredResources() ([]*metav1.APIResourceList, error) {
 	if d.onBlock != nil {

@@ -1452,11 +1452,10 @@ func TestOrchestration_DeletePipeline_CleansUpOwnedOutputsAndSecrets(t *testing.
 }
 
 // TestOrchestration_DeletePipeline_MissingTargetRowForOwnedInventoryItem_SkipsNotFails
-// pins PlanDeliveryOutputCleanup's documented behavior: a delivery-owned
-// inventory item whose "target:{id}" points at a target row that is already
-// gone must be skipped, not treated as an error. The delivery-owned
-// inventory item itself is still deleted normally, since that deletion
-// does not depend on the target row's existence.
+// pins that a delivery-owned inventory item whose "target:{id}" points at a
+// target row that is already gone must be skipped, not treated as an error.
+// The delivery-owned inventory item itself is still deleted normally, since
+// that deletion does not depend on the target row's existence.
 func TestOrchestration_DeletePipeline_MissingTargetRowForOwnedInventoryItem_SkipsNotFails(t *testing.T) {
 	store, vault := setupStore(t)
 	seedFulfillmentAndDeployment(t, store, "deployments/d1", domain.FulfillmentSnapshot{
@@ -2915,123 +2914,6 @@ func TestOrchestration_DeletedFulfillment_StopsCleanly(t *testing.T) {
 	_, err := wf.Run(rec, domain.FulfillmentID("nonexistent"))
 	if err != nil {
 		t.Fatalf("Run should return nil for deleted fulfillment, got: %v", err)
-	}
-}
-
-// ---------------------------------------------------------------------------
-// Delete-pipeline delivery-output cleanup
-// ---------------------------------------------------------------------------
-
-func TestOrchestration_DeletePipeline_DeletesDeliveryOwnedOutputs(t *testing.T) {
-	store, vault := setupStore(t)
-	seedFulfillmentAndDeployment(t, store, "deployments/d1", domain.FulfillmentSnapshot{
-		Generation:        2,
-		ResolvedTargets:   []domain.TargetID{"gcphcp-provider"},
-		ManifestStrategy:  domain.ManifestStrategySpec{Type: domain.ManifestStrategyInline, Manifests: []domain.Manifest{{ManifestType: "api.gcphcp.cluster", Raw: json.RawMessage(`{"name":"guest-cluster"}`)}}},
-		PlacementStrategy: domain.PlacementStrategySpec{Type: domain.PlacementStrategyStatic, Targets: []domain.TargetID{"gcphcp-provider"}},
-		State:             domain.FulfillmentStateDeleting,
-	})
-	seedTargets(t, store, domain.TargetInfoFromSnapshot(domain.TargetInfoSnapshot{ID: "gcphcp-provider", Name: "gcphcp-provider", Type: "gcphcp"}))
-	seedDelivery(t, store, domain.DeliveryFromSnapshot(domain.DeliverySnapshot{
-		ID: "deployments/d1:gcphcp-provider", FulfillmentID: domain.FulfillmentID("deployments/d1"), TargetID: "gcphcp-provider",
-		Manifests: []domain.Manifest{{ManifestType: "api.gcphcp.cluster", Raw: json.RawMessage(`{"name":"guest-cluster"}`)}},
-		State:     domain.DeliveryStateDelivered,
-	}))
-	seedTargets(t, store, domain.TargetInfoFromSnapshot(domain.TargetInfoSnapshot{ID: "discovered-target", Name: "guest-cluster", Type: "vm"}))
-
-	ctx := testContext(t)
-	deliveryID := domain.DeliveryID("deployments/d1:gcphcp-provider")
-	tx, err := store.Begin(ctx)
-	if err != nil {
-		t.Fatalf("begin tx: %v", err)
-	}
-	defer tx.Rollback()
-	if err := tx.Inventory().Create(ctx, domain.InventoryItemFromSnapshot(domain.InventoryItemSnapshot{
-		ID: "target:discovered-target", Type: "vm", Name: "guest-cluster",
-		SourceDeliveryID: &deliveryID,
-	})); err != nil {
-		t.Fatalf("seed inventory item: %v", err)
-	}
-	if err := tx.Commit(); err != nil {
-		t.Fatalf("commit seeded output: %v", err)
-	}
-
-	events := make(chan domain.FulfillmentEvent, 16)
-	wf := newTestWorkflow(store, noopDelivery{events: events}, events, func(wf *domain.OrchestrationWorkflowSpec) {
-		wf.Vault = vault
-	})
-
-	rec := &simpleRecord{ctx: ctx, events: events}
-	if _, err := wf.Run(rec, domain.FulfillmentID("deployments/d1")); err != nil {
-		t.Fatalf("Run: %v", err)
-	}
-
-	readTx, err := store.BeginReadOnly(ctx)
-	if err != nil {
-		t.Fatalf("begin read tx: %v", err)
-	}
-	defer readTx.Rollback()
-	if _, err := readTx.Targets().Get(ctx, "discovered-target"); !errors.Is(err, domain.ErrNotFound) {
-		t.Fatalf("expected discovered-target to be deleted, got err=%v", err)
-	}
-	if _, err := readTx.Inventory().Get(ctx, "target:discovered-target"); !errors.Is(err, domain.ErrNotFound) {
-		t.Fatalf("expected delivery-owned inventory item to be deleted, got err=%v", err)
-	}
-}
-
-func TestOrchestration_DeletePipeline_DeletesDeliveryOwnedTarget(t *testing.T) {
-	store, vault := setupStore(t)
-	seedFulfillmentAndDeployment(t, store, "deployments/d1", domain.FulfillmentSnapshot{
-		Generation:        2,
-		ResolvedTargets:   []domain.TargetID{"gcphcp-provider"},
-		ManifestStrategy:  domain.ManifestStrategySpec{Type: domain.ManifestStrategyInline, Manifests: []domain.Manifest{{ManifestType: "api.gcphcp.cluster", Raw: json.RawMessage(`{"name":"guest-cluster"}`)}}},
-		PlacementStrategy: domain.PlacementStrategySpec{Type: domain.PlacementStrategyStatic, Targets: []domain.TargetID{"gcphcp-provider"}},
-		State:             domain.FulfillmentStateDeleting,
-	})
-	seedTargets(t, store,
-		domain.TargetInfoFromSnapshot(domain.TargetInfoSnapshot{ID: "gcphcp-provider", Name: "gcphcp-provider", Type: "gcphcp"}),
-		domain.TargetInfoFromSnapshot(domain.TargetInfoSnapshot{ID: "unmanaged-target", Name: "guest-cluster", Type: "unmanaged"}),
-	)
-	deliveryID := domain.DeliveryID("deployments/d1:gcphcp-provider")
-	seedDelivery(t, store, domain.DeliveryFromSnapshot(domain.DeliverySnapshot{
-		ID: deliveryID, FulfillmentID: domain.FulfillmentID("deployments/d1"), TargetID: "gcphcp-provider",
-		Manifests: []domain.Manifest{{ManifestType: "api.gcphcp.cluster", Raw: json.RawMessage(`{"name":"guest-cluster"}`)}},
-		State:     domain.DeliveryStateDelivered,
-	}))
-
-	ctx := testContext(t)
-	tx, err := store.Begin(ctx)
-	if err != nil {
-		t.Fatalf("begin tx: %v", err)
-	}
-	defer tx.Rollback()
-	if err := tx.Inventory().Create(ctx, domain.InventoryItemFromSnapshot(domain.InventoryItemSnapshot{
-		ID: "target:unmanaged-target", Type: "unmanaged", Name: "guest-cluster",
-		SourceDeliveryID: &deliveryID,
-	})); err != nil {
-		t.Fatalf("seed inventory item: %v", err)
-	}
-	if err := tx.Commit(); err != nil {
-		t.Fatalf("commit seeded output: %v", err)
-	}
-
-	events := make(chan domain.FulfillmentEvent, 16)
-	wf := newTestWorkflow(store, noopDelivery{events: events}, events, func(wf *domain.OrchestrationWorkflowSpec) {
-		wf.Vault = vault
-	})
-
-	rec := &simpleRecord{ctx: ctx, events: events}
-	if _, err := wf.Run(rec, domain.FulfillmentID("deployments/d1")); err != nil {
-		t.Fatalf("Run: %v", err)
-	}
-
-	readTx, err := store.BeginReadOnly(ctx)
-	if err != nil {
-		t.Fatalf("begin read tx: %v", err)
-	}
-	defer readTx.Rollback()
-	if _, err := readTx.Targets().Get(ctx, "unmanaged-target"); !errors.Is(err, domain.ErrNotFound) {
-		t.Fatalf("expected unmanaged target to be deleted, got err=%v", err)
 	}
 }
 
