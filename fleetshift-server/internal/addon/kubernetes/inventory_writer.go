@@ -87,7 +87,11 @@ type Writer struct {
 	currentNodes  map[string]inventoryNode
 	edgeFuncs     map[string]func(NodeStore) []Edge
 	previousEdges map[edgeKey]Edge
-	logger        *slog.Logger
+	// edgeDirty is set when flushEdges fails after membership has already
+	// advanced (resync / GVR drop). The batch ticker retries until the
+	// edge sink accepts the delta; inventory/resync ACK is not blocked.
+	edgeDirty bool
+	logger    *slog.Logger
 
 	// extractObserved, when non-nil, replaces [ExtractObservedResource]
 	// for flush/resync. Tests use this to simulate extract failures.
@@ -189,6 +193,7 @@ func (w *Writer) Run(ctx context.Context) {
 		// pendingResync until process teardown drops it.
 		_ = w.retryPendingResyncs(flushCtx)
 		w.flush(flushCtx, pendingUpserts, pendingUpsertGVR, pendingDeletes, sentVersions)
+		_ = w.retryDirtyEdges(flushCtx)
 	}
 
 	for {
@@ -264,6 +269,9 @@ func (w *Writer) Run(ctx context.Context) {
 				pendingUpsertGVR = make(map[string]schema.GroupVersionResource)
 				pendingDeletes = make(map[string]schema.GroupVersionResource)
 			}
+			// Retry edge deltas that failed after inventory/resync already
+			// committed; empty object flushes do not call flushEdges.
+			_ = w.retryDirtyEdges(ctx)
 		}
 	}
 }
@@ -481,6 +489,7 @@ func (w *Writer) flush(
 	if w.reporter == nil {
 		if err := w.flushEdges(ctx); err != nil {
 			w.restoreUncommittedNodes(upsertedUIDs, prevNodes, prevEdgeFuncs, hadPrevNode, hadPrevEdgeFn)
+			w.edgeDirty = false
 			return err
 		}
 		w.acknowledgeFlush(upsertedUIDs, deletedUIDs)
@@ -499,6 +508,10 @@ func (w *Writer) flush(
 
 	if err := w.flushEdges(ctx); err != nil {
 		w.restoreUncommittedNodes(upsertedUIDs, prevNodes, prevEdgeFuncs, hadPrevNode, hadPrevEdgeFn)
+		// Membership was rolled back; object pending will retry inventory
+		// and edges together. Clear dirty so the ticker does not flush
+		// edges against the restored (pre-batch) graph.
+		w.edgeDirty = false
 		return err
 	}
 
@@ -512,10 +525,15 @@ func (w *Writer) flush(
 // only on success. Call after membership changes that are not already
 // covered by a pending object flush (resync success, GVR memory drop).
 //
+// On failure edgeDirty is set so the batch ticker can retry even when
+// there is no pending object work. Callers that roll back membership
+// after failure must clear edgeDirty themselves.
+//
 // NoopEdgeSink short-circuits: edge computation is skipped while edges
 // are not persisted, avoiding full-graph work on every flush/resync.
 func (w *Writer) flushEdges(ctx context.Context) error {
 	if _, noop := w.edgeSink.(NoopEdgeSink); noop {
+		w.edgeDirty = false
 		return nil
 	}
 	edgeAdds, edgeDels, newEdges := w.diffEdges()
@@ -525,11 +543,22 @@ func (w *Writer) flushEdges(ctx context.Context) error {
 			Deletes: edgeDels,
 		}); err != nil {
 			w.logger.Warn("edge sink ApplyEdgeDelta failed", "error", err)
+			w.edgeDirty = true
 			return err
 		}
 	}
 	w.previousEdges = newEdges
+	w.edgeDirty = false
 	return nil
+}
+
+// retryDirtyEdges re-attempts flushEdges when a prior call failed after
+// membership had already advanced. No-op when edgeDirty is false.
+func (w *Writer) retryDirtyEdges(ctx context.Context) error {
+	if !w.edgeDirty {
+		return nil
+	}
+	return w.flushEdges(ctx)
 }
 
 // restoreUncommittedNodes rolls back currentNodes/edgeFuncs for UIDs that
@@ -727,6 +756,8 @@ func (w *Writer) sendResync(ctx context.Context, rs ResyncEvent) {
 	}
 	delete(w.pendingResync, rs.GVR)
 	w.applyResyncSuccess(rs.GVR, pending)
+	// Inventory LIST is committed; ACK so WATCH can start. Edge sink
+	// failures are retried via edgeDirty on the batch ticker.
 	_ = w.flushEdges(ctx)
 	ackResync(pending.ack, nil)
 }
@@ -785,6 +816,8 @@ func (w *Writer) retryPendingResyncs(ctx context.Context) error {
 		}
 		delete(w.pendingResync, gvr)
 		w.applyResyncSuccess(gvr, pending)
+		// Same as sendResync: inventory commits and ACK without waiting
+		// on the edge sink; edgeDirty drives ticker retry.
 		_ = w.flushEdges(ctx)
 		ackResync(pending.ack, nil)
 	}

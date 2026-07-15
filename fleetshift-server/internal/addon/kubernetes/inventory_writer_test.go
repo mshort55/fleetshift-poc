@@ -1969,6 +1969,186 @@ func (s *failingEdgeSink) ApplyEdgeDelta(context.Context, domain.TargetID, EdgeD
 	return s.err
 }
 
+// toggleEdgeSink fails while fail is true, then records deltas when healthy.
+type toggleEdgeSink struct {
+	mu     sync.Mutex
+	fail   bool
+	deltas []EdgeDelta
+}
+
+func (s *toggleEdgeSink) setFail(v bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.fail = v
+}
+
+func (s *toggleEdgeSink) ApplyEdgeDelta(_ context.Context, _ domain.TargetID, delta EdgeDelta) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.fail {
+		return context.DeadlineExceeded
+	}
+	s.deltas = append(s.deltas, delta)
+	return nil
+}
+
+func (s *toggleEdgeSink) getDeltas() []EdgeDelta {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]EdgeDelta, len(s.deltas))
+	copy(out, s.deltas)
+	return out
+}
+
+// TestResync_EdgeSinkFailureAcksAndRetriesOnTicker verifies inventory
+// resync ACK is not blocked by a failing edge sink, and that edgeDirty
+// causes a ticker retry once the sink recovers — even with an empty
+// object batch.
+func TestResync_EdgeSinkFailureAcksAndRetriesOnTicker(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		mock := &recordingReporter{}
+		sink := &toggleEdgeSink{fail: true}
+		w := newTestWriter(mock, sink, nil, 100*time.Millisecond)
+
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		go w.Run(ctx)
+		synctest.Wait()
+
+		child := makeResource("uid-child", "child-deploy", "100")
+		child.Object["metadata"].(map[string]any)["ownerReferences"] = []any{
+			map[string]any{
+				"apiVersion": "apps/v1", "kind": "ReplicaSet",
+				"name": "parent-rs", "uid": "uid-parent", "controller": true,
+			},
+		}
+		parent := &unstructured.Unstructured{Object: map[string]any{
+			"apiVersion": "apps/v1", "kind": "ReplicaSet",
+			"metadata": map[string]any{
+				"uid": "uid-parent", "name": "parent-rs", "namespace": "default",
+				"resourceVersion": "200", "creationTimestamp": "2025-06-01T12:00:00Z",
+			},
+		}}
+
+		ack := make(chan error, 1)
+		w.ResyncCh() <- ResyncEvent{
+			GVR:       testGVR,
+			Resources: []*unstructured.Unstructured{child, parent},
+			Ack:       ack,
+		}
+		synctest.Wait()
+
+		select {
+		case err := <-ack:
+			if err != nil {
+				t.Fatalf("resync ACK = %v, want nil despite edge sink failure", err)
+			}
+		default:
+			t.Fatal("resync must ACK after inventory commit without waiting on edges")
+		}
+		if !w.edgeDirty {
+			t.Fatal("expected edgeDirty after failed post-resync flushEdges")
+		}
+		if len(w.previousEdges) != 0 {
+			t.Fatalf("previousEdges must not advance on edge failure, got %d", len(w.previousEdges))
+		}
+		if len(mock.getDeltas()) == 0 {
+			t.Fatal("expected inventory ApplyDelta from resync")
+		}
+		if len(sink.getDeltas()) != 0 {
+			t.Fatal("edge sink must not record deltas while failing")
+		}
+
+		sink.setFail(false)
+		advanceAndWait(150 * time.Millisecond)
+
+		if w.edgeDirty {
+			t.Fatal("edgeDirty must clear after successful ticker retry")
+		}
+		var found bool
+		for _, d := range sink.getDeltas() {
+			for _, e := range d.Adds {
+				if e.EdgeType == EdgeOwnedBy && e.SourceUID == "uid-child" && e.DestUID == "uid-parent" {
+					found = true
+				}
+			}
+		}
+		if !found {
+			t.Fatal("ticker retry must deliver OwnedBy edge after sink recovers")
+		}
+		if len(w.previousEdges) == 0 {
+			t.Fatal("previousEdges must advance after successful edge retry")
+		}
+	})
+}
+
+// TestRemoveGVR_EdgeSinkFailureRetriesOnTicker verifies RemoveGVR still
+// drops in-memory membership when edges fail, and edgeDirty retries the
+// resulting edge deletes on the next tick.
+func TestRemoveGVR_EdgeSinkFailureRetriesOnTicker(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		mock := &recordingReporter{}
+		sink := &toggleEdgeSink{}
+		w := newTestWriter(mock, sink, nil, 100*time.Millisecond)
+
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		go w.Run(ctx)
+		synctest.Wait()
+
+		child := makeResource("uid-child", "child-deploy", "100")
+		child.Object["metadata"].(map[string]any)["ownerReferences"] = []any{
+			map[string]any{
+				"apiVersion": "apps/v1", "kind": "ReplicaSet",
+				"name": "parent-rs", "uid": "uid-parent", "controller": true,
+			},
+		}
+		parent := &unstructured.Unstructured{Object: map[string]any{
+			"apiVersion": "apps/v1", "kind": "ReplicaSet",
+			"metadata": map[string]any{
+				"uid": "uid-parent", "name": "parent-rs", "namespace": "default",
+				"resourceVersion": "200", "creationTimestamp": "2025-06-01T12:00:00Z",
+			},
+		}}
+		w.EventCh() <- ResourceEvent{Op: EventAdd, Resource: child, GVR: testGVR}
+		w.EventCh() <- ResourceEvent{Op: EventAdd, Resource: parent, GVR: testGVR}
+		advanceAndWait(250 * time.Millisecond)
+		if len(sink.getDeltas()) == 0 {
+			t.Fatal("precondition: expected OwnedBy edge after add flush")
+		}
+		if len(w.previousEdges) == 0 {
+			t.Fatal("precondition: previousEdges must be set")
+		}
+
+		sink.setFail(true)
+		w.RemoveCh() <- RemoveGVREvent{GVR: testGVR}
+		synctest.Wait()
+		if !w.edgeDirty {
+			t.Fatal("expected edgeDirty after failed post-RemoveGVR flushEdges")
+		}
+		if _, ok := w.currentNodes["uid-child"]; ok {
+			t.Fatal("RemoveGVR must drop in-memory nodes even when edge flush fails")
+		}
+
+		sink.setFail(false)
+		advanceAndWait(150 * time.Millisecond)
+		if w.edgeDirty {
+			t.Fatal("edgeDirty must clear after successful retry")
+		}
+		var sawDelete bool
+		for _, d := range sink.getDeltas() {
+			for _, e := range d.Deletes {
+				if e.EdgeType == EdgeOwnedBy && e.SourceUID == "uid-child" && e.DestUID == "uid-parent" {
+					sawDelete = true
+				}
+			}
+		}
+		if !sawDelete {
+			t.Fatal("ticker retry must deliver OwnedBy edge delete after RemoveGVR")
+		}
+	})
+}
+
 func TestResync_SkipsExtractionFailure(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		mock := &recordingReporter{}
