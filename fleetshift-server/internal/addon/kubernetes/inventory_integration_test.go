@@ -184,7 +184,7 @@ func Test_DeployWorkload(t *testing.T) {
 
 	f.deliver(t, "nginx-e2e-deploy", nginxDeployment("nginx-e2e", f.namespace, 1))
 
-	objs := f.awaitRunningPod(t, "nginx-e2e-")
+	objs := f.awaitRunningWorkload(t, "nginx-e2e", "nginx-e2e-")
 	if findByKindNamePrefix(objs, "Pod", "nginx-e2e-") == nil {
 		t.Fatal("missing Pod inventory")
 	}
@@ -555,7 +555,7 @@ func Test_EnrichedFields(t *testing.T) {
 	f := setupE2E(t)
 
 	f.deliver(t, "enriched-deploy", nginxDeployment("e2e-enriched", f.namespace, 1))
-	objs := f.awaitRunningPod(t, "e2e-enriched-")
+	objs := f.awaitRunningWorkload(t, "e2e-enriched", "e2e-enriched-")
 
 	for _, obj := range objs {
 		inv := obj.Inventory()
@@ -1143,6 +1143,34 @@ func (f *e2eFixture) awaitObjects(t *testing.T, specs ...objectSpec) []*domain.E
 func (f *e2eFixture) awaitRunningPod(t *testing.T, namePrefix string) []*domain.ExtensionResource {
 	t.Helper()
 	return awaitInventoryMatch(t, f.store, func(objs []*domain.ExtensionResource) bool {
+		for _, obj := range objs {
+			inv := obj.Inventory()
+			if inv == nil {
+				continue
+			}
+			if inv.Labels()["k8s.kind"] == "Pod" && strings.HasPrefix(inv.Labels()["k8s.name"], namePrefix) {
+				extracted := parseExtracted(t, inv)
+				if phase, _ := extracted["phase"].(string); phase == "Running" {
+					return true
+				}
+			}
+		}
+		return false
+	}, 90*time.Second)
+}
+
+// awaitRunningWorkload waits until Deployment, ReplicaSet, and a Running
+// Pod are all present. A Running Pod alone can race ahead of RS/Deploy
+// indexing on slower CI.
+func (f *e2eFixture) awaitRunningWorkload(t *testing.T, deployName, namePrefix string) []*domain.ExtensionResource {
+	t.Helper()
+	return awaitInventoryMatch(t, f.store, func(objs []*domain.ExtensionResource) bool {
+		if findByKindName(objs, "Deployment", deployName) == nil {
+			return false
+		}
+		if findByKindNamePrefix(objs, "ReplicaSet", namePrefix) == nil {
+			return false
+		}
 		for _, obj := range objs {
 			inv := obj.Inventory()
 			if inv == nil {
