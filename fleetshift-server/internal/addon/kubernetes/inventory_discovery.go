@@ -17,46 +17,50 @@ type Resource struct {
 
 // IsResourceAllowed checks whether a resource passes the allow/deny filter.
 //
+// resource is the plural API resource name (e.g. "pods", "deployments"),
+// not a Kubernetes Kind (e.g. "Pod").
+//
 // Watch-all mode (allowList empty): user deny → default deny → ALLOW.
 // Watch-selected mode (allowList non-empty): user deny → user allow (overrides default deny) → DENY.
-func IsResourceAllowed(group, kind string, allowList, userDenyList, defaultDenyList []Resource, logger *slog.Logger) bool {
+func IsResourceAllowed(group, resource string, allowList, userDenyList, defaultDenyList []Resource, logger *slog.Logger) bool {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	if g, k, denied := IsResourceMatchingList(userDenyList, group, kind); denied {
+	if g, r, denied := IsResourceMatchingList(userDenyList, group, resource); denied {
 		logger.Debug("deny resource: matched user deny rule",
-			"group", group, "kind", kind, "ruleGroup", g, "ruleKind", k)
+			"group", group, "resource", resource, "ruleGroup", g, "ruleResource", r)
 		return false
 	}
 
 	if len(allowList) == 0 {
-		if g, k, denied := IsResourceMatchingList(defaultDenyList, group, kind); denied {
+		if g, r, denied := IsResourceMatchingList(defaultDenyList, group, resource); denied {
 			logger.Debug("deny resource: matched default deny rule",
-				"group", group, "kind", kind, "ruleGroup", g, "ruleKind", k)
+				"group", group, "resource", resource, "ruleGroup", g, "ruleResource", r)
 			return false
 		}
 		return true
 	}
 
-	if g, k, allowed := IsResourceMatchingList(allowList, group, kind); allowed {
+	if g, r, allowed := IsResourceMatchingList(allowList, group, resource); allowed {
 		logger.Debug("allow resource: matched allow rule",
-			"group", group, "kind", kind, "ruleGroup", g, "ruleKind", k)
+			"group", group, "resource", resource, "ruleGroup", g, "ruleResource", r)
 		return true
 	}
 
 	logger.Debug("deny resource: not in allow list",
-		"group", group, "kind", kind)
+		"group", group, "resource", resource)
 	return false
 }
 
-// IsResourceMatchingList checks whether the given group and kind match any
-// entry in resourceList. Wildcard "*" matches any group or kind.
-func IsResourceMatchingList(resourceList []Resource, group, kind string) (string, string, bool) {
+// IsResourceMatchingList checks whether the given group and plural API
+// resource name match any entry in resourceList. Wildcard "*" matches
+// any group or resource.
+func IsResourceMatchingList(resourceList []Resource, group, resource string) (string, string, bool) {
 	for _, r := range resourceList {
 		for _, g := range r.ApiGroups {
-			for _, k := range r.Resources {
-				if (g == "*" || g == group) && (k == "*" || k == kind) {
-					return g, k, true
+			for _, res := range r.Resources {
+				if (g == "*" || g == group) && (res == "*" || res == resource) {
+					return g, res, true
 				}
 			}
 		}
@@ -126,7 +130,6 @@ func SupportedResources(client discovery.DiscoveryInterface, logger *slog.Logger
 				}
 			}
 		}
-
 		if len(watchResources) > 0 {
 			watchLists = append(watchLists, &metav1.APIResourceList{
 				GroupVersion: apiList.GroupVersion,

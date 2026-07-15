@@ -180,3 +180,26 @@ func awaitDiscoveryBlocked(t *testing.T, blocked *atomic.Bool) {
 		}
 	}
 }
+
+// awaitIndexerIntentionalStop waits until StopIndexer/stopLocked has marked
+// the entry intentionalStop (and cancelled readiness). Callers use this
+// instead of a fixed sleep before unblocking discovery, so EnsureIndexer
+// cannot race ahead and succeed.
+func awaitIndexerIntentionalStop(t *testing.T, h *KubernetesInProcessIndexHost, id domain.TargetID) {
+	t.Helper()
+	deadline := time.After(2 * time.Second)
+	for {
+		h.mu.Lock()
+		entry, ok := h.entries[id]
+		stopped := ok && entry.intentionalStop
+		h.mu.Unlock()
+		if stopped {
+			return
+		}
+		select {
+		case <-deadline:
+			t.Fatal("timed out waiting for intentional stop on " + string(id))
+		case <-time.After(5 * time.Millisecond):
+		}
+	}
+}

@@ -177,6 +177,10 @@ func TestValidateInventoryReplacements_RejectsDeletePayloadAndDuplicates(t *test
 	if err != nil {
 		t.Fatalf("NewAlias: %v", err)
 	}
+	ready, err := NewCondition("Ready", ConditionTrue, "AllGood", "ok", time.Unix(0, 0))
+	if err != nil {
+		t.Fatalf("NewCondition: %v", err)
+	}
 
 	cases := []struct {
 		name string
@@ -195,6 +199,10 @@ func TestValidateInventoryReplacements_RejectsDeletePayloadAndDuplicates(t *test
 		{"observation", []InventoryReplacement{{
 			ResourceType: "inv.fleetshift.io/Node", Name: name, IsDelete: true,
 			Observation: &obs,
+		}}},
+		{"conditions", []InventoryReplacement{{
+			ResourceType: "inv.fleetshift.io/Node", Name: name, IsDelete: true,
+			Conditions: []Condition{ready},
 		}}},
 		{"candidate uid", []InventoryReplacement{{
 			ResourceType: "inv.fleetshift.io/Node", Name: name, IsDelete: true,

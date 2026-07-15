@@ -151,6 +151,32 @@ func TestDirectInventoryReporter_ApplyDelta_ForcesIsDeleteOnDeletes(t *testing.T
 	}
 }
 
+func TestDirectInventoryReporter_ApplyDelta_ForcesIsDeleteFalseOnUpserts(t *testing.T) {
+	// Writer should leave IsDelete false, but the reporter must still
+	// clear it so a mis-tagged upsert cannot become a delete.
+	fake := &recordingInventoryReportBackend{}
+	reporter := kubernetes.NewDirectInventoryReporter(fake)
+	name := domain.ResourceName("clusters/prod/apiResources/core~v1~pods/objects/uid-1")
+
+	err := reporter.ApplyDelta(context.Background(), kubernetes.InventoryDeltaReport{
+		Upserts: []kubernetes.InventoryObjectReport{{
+			Name:     name,
+			IsDelete: true,
+			Labels:   map[string]string{"k8s.uid": "uid-1"},
+		}},
+	})
+	if err != nil {
+		t.Fatalf("ApplyDelta: %v", err)
+	}
+	got := fake.replaceBatchCalls[0].reports
+	if len(got) != 1 || got[0].Name != name || got[0].IsDelete {
+		t.Fatalf("ReplaceBatch reports = %#v, want forced IsDelete=false for %q", got, name)
+	}
+	if !reflect.DeepEqual(got[0].Labels, map[string]string{"k8s.uid": "uid-1"}) {
+		t.Fatalf("ReplaceBatch labels = %#v, want upsert labels preserved", got[0].Labels)
+	}
+}
+
 func TestDirectInventoryReporter_ApplyDelta_PropagatesReplaceBatchError(t *testing.T) {
 	wantErr := errors.New("replace failed")
 	fake := &recordingInventoryReportBackend{replaceBatchErr: wantErr}

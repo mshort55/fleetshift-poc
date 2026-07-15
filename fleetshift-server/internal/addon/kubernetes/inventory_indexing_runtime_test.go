@@ -761,9 +761,10 @@ func TestIndexingRuntime_StopDuringReadiness(t *testing.T) {
 	go func() {
 		stopErr <- h.StopIndexer(context.Background(), "pm-readystop")
 	}()
-	// Let StopIndexer observe starting state and wait on readyWait, then unblock
-	// discovery so the ensure attempt can finish as cancelled.
-	time.Sleep(20 * time.Millisecond)
+	// Wait until StopIndexer has marked intentionalStop (and cancelled
+	// readiness) before unblocking discovery, so EnsureIndexer cannot
+	// race ahead and succeed.
+	awaitIndexerIntentionalStop(t, h, "pm-readystop")
 	close(unblock)
 
 	if err := <-stopErr; err != nil {

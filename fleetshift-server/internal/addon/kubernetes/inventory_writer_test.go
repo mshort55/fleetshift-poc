@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -1547,6 +1549,75 @@ func TestWriter_NoopEdgeSinkKeepsInventoryWritesSuccessful(t *testing.T) {
 	})
 }
 
+// TestWriter_NoopEdgeSinkSkipsEdgeDiff ensures flushEdges short-circuits
+// for NoopEdgeSink: edge computation is skipped and previousEdges stays
+// empty even when objects would otherwise produce OwnedBy edges.
+func TestWriter_NoopEdgeSinkSkipsEdgeDiff(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		mock := &recordingReporter{}
+		w := newTestWriter(mock, NoopEdgeSink{}, nil, 100*time.Millisecond)
+
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		go w.Run(ctx)
+		synctest.Wait()
+
+		child := makeResource("uid-child", "child-deploy", "100")
+		child.Object["metadata"].(map[string]any)["ownerReferences"] = []any{
+			map[string]any{
+				"apiVersion": "apps/v1", "kind": "ReplicaSet",
+				"name": "parent-rs", "uid": "uid-parent", "controller": true,
+			},
+		}
+		parent := &unstructured.Unstructured{Object: map[string]any{
+			"apiVersion": "apps/v1", "kind": "ReplicaSet",
+			"metadata": map[string]any{
+				"uid": "uid-parent", "name": "parent-rs", "namespace": "default",
+				"resourceVersion": "200", "creationTimestamp": "2025-06-01T12:00:00Z",
+			},
+		}}
+		w.EventCh() <- ResourceEvent{Op: EventAdd, Resource: child, GVR: testGVR}
+		w.EventCh() <- ResourceEvent{Op: EventAdd, Resource: parent, GVR: testGVR}
+		advanceAndWait(250 * time.Millisecond)
+
+		if len(mock.getDeltas()) == 0 {
+			t.Fatal("expected inventory ApplyDelta with NoopEdgeSink")
+		}
+		if len(w.previousEdges) != 0 {
+			t.Fatalf("NoopEdgeSink must skip edge diff; previousEdges=%d want 0", len(w.previousEdges))
+		}
+		if len(w.currentNodes) == 0 {
+			t.Fatal("expected currentNodes populated so a real sink would have edges to diff")
+		}
+	})
+}
+
+// TestWriter_flushEdges_NoopSkipsDiffEvenWithEdgeFuncs is a direct unit
+// check: with edgeFuncs that would produce edges, flushEdges on
+// NoopEdgeSink returns without advancing previousEdges.
+func TestWriter_flushEdges_NoopSkipsDiffEvenWithEdgeFuncs(t *testing.T) {
+	w := NewWriter("target-1", &recordingReporter{}, NoopEdgeSink{}, nil, time.Hour, discardLogger)
+	w.currentNodes["uid-a"] = inventoryNode{UID: "uid-a", Kind: "Pod", Name: "a"}
+	w.currentNodes["uid-b"] = inventoryNode{UID: "uid-b", Kind: "ReplicaSet", Name: "b"}
+	w.edgeFuncs["uid-a"] = func(NodeStore) []Edge {
+		return []Edge{{
+			EdgeType:  EdgeOwnedBy,
+			SourceUID: "uid-a",
+			DestUID:   "uid-b",
+			DestKind:  "ReplicaSet",
+		}}
+	}
+	// Poison previousEdges so accidental diff+commit would be visible.
+	w.previousEdges = map[edgeKey]Edge{}
+
+	if err := w.flushEdges(context.Background()); err != nil {
+		t.Fatalf("flushEdges: %v", err)
+	}
+	if len(w.previousEdges) != 0 {
+		t.Fatalf("NoopEdgeSink flushEdges must not commit edges, got %d", len(w.previousEdges))
+	}
+}
+
 // TestResync_EmptySnapshotDeletesReportedUIDs verifies a later empty
 // LIST emits IsDelete only for UIDs acknowledged in this generation's
 // ReportedUIDs (same-process omission reconciliation — not a DB
@@ -1932,6 +2003,86 @@ func TestResync_SkipsExtractionFailure(t *testing.T) {
 	})
 }
 
+// TestResync_ListedExtractFailureDoesNotDelete verifies a previously
+// reported UID that is still present in the LIST but fails extraction
+// is not treated as omitted: no IsDelete, ReportedUIDs and currentNodes
+// keep the prior entry.
+func TestResync_ListedExtractFailureDoesNotDelete(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		mock := &recordingReporter{}
+		w := newTestWriter(mock, nil, nil, 100*time.Millisecond)
+
+		var failKeep atomic.Bool
+		w.extractObserved = func(r *unstructured.Unstructured, entry SchemaEntry, targetID string) (InventoryObjectReport, inventoryNode, error) {
+			if failKeep.Load() && string(r.GetUID()) == "uid-keep" {
+				return InventoryObjectReport{}, inventoryNode{}, errors.New("forced extract failure")
+			}
+			return ExtractObservedResource(r, entry, targetID)
+		}
+
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		go w.Run(ctx)
+		synctest.Wait()
+
+		w.EventCh() <- ResourceEvent{
+			Op: EventAdd, Resource: makeResource("uid-keep", "deploy-keep", "100"), GVR: testGVR,
+		}
+		advanceAndWait(250 * time.Millisecond)
+		if len(mock.getDeltas()) == 0 {
+			t.Fatal("precondition: expected initial upsert")
+		}
+		if _, ok := w.currentNodes["uid-keep"]; !ok {
+			t.Fatal("precondition: uid-keep must be in currentNodes")
+		}
+		mock.mu.Lock()
+		mock.deltas = nil
+		mock.mu.Unlock()
+
+		failKeep.Store(true)
+		w.ResyncCh() <- ResyncEvent{
+			GVR: testGVR,
+			Resources: []*unstructured.Unstructured{
+				makeResource("uid-keep", "deploy-keep", "200"),
+				makeResource("uid-ok", "deploy-ok", "201"),
+			},
+		}
+		advanceAndWait(100 * time.Millisecond)
+
+		for _, d := range mock.getDeltas() {
+			for _, del := range d.delta.Deletes {
+				if strings.Contains(string(del.Name), "uid-keep") {
+					t.Fatalf("listed extract failure must not emit IsDelete for uid-keep, got %+v", del)
+				}
+			}
+		}
+		var sawOK bool
+		for _, d := range mock.getDeltas() {
+			for _, u := range d.delta.Upserts {
+				if u.Labels["k8s.uid"] == "uid-ok" {
+					sawOK = true
+				}
+				if u.Labels["k8s.uid"] == "uid-keep" {
+					t.Fatal("failed extract must not upsert uid-keep")
+				}
+			}
+		}
+		if !sawOK {
+			t.Fatal("sibling uid-ok must still upsert")
+		}
+		st := w.gvrStates[testGVR]
+		if st == nil {
+			t.Fatal("expected gvr state")
+		}
+		if _, ok := st.ReportedUIDs["uid-keep"]; !ok {
+			t.Fatal("ReportedUIDs must preserve uid-keep after listed extract failure")
+		}
+		if _, ok := w.currentNodes["uid-keep"]; !ok {
+			t.Fatal("currentNodes must preserve uid-keep after listed extract failure")
+		}
+	})
+}
+
 func TestRemoveGVR_NilReporterIsNoop(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		// Drive RemoveGVR through Run, then join before reading currentNodes.
@@ -2272,6 +2423,189 @@ func TestWriter_FastReAddAdoptsNewerGeneration(t *testing.T) {
 		advanceAndWait(250 * time.Millisecond)
 		if got := len(mock.getDeltas()); got != before {
 			t.Fatalf("stale gen-1 event flushed: deltas %d -> %d", before, got)
+		}
+	})
+}
+
+// TestWriter_FastReAddDropsPendingUpsertsFromPriorGeneration verifies that
+// unflushed gen-1 upserts are discarded when a gen-2 event adopts the GVR,
+// so a later flush cannot resurrect prior-generation inventory.
+func TestWriter_FastReAddDropsPendingUpsertsFromPriorGeneration(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		mock := &recordingReporter{}
+		// Long interval so gen-1 stays pending until after gen-2 adopts.
+		w := newTestWriter(mock, nil, nil, 10*time.Second)
+
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		go w.Run(ctx)
+		synctest.Wait()
+
+		w.EventCh() <- ResourceEvent{
+			Op: EventAdd, Resource: makeResource("uid-old", "deploy-old", "100"),
+			GVR: testGVR, Generation: 1,
+		}
+		synctest.Wait()
+		if len(mock.getDeltas()) != 0 {
+			t.Fatal("precondition: gen-1 upsert must still be pending")
+		}
+
+		w.EventCh() <- ResourceEvent{
+			Op: EventAdd, Resource: makeResource("uid-new", "deploy-new", "200"),
+			GVR: testGVR, Generation: 2,
+		}
+		advanceAndWait(11 * time.Second)
+
+		var sawOld, sawNew bool
+		for _, d := range mock.getDeltas() {
+			for _, u := range d.delta.Upserts {
+				switch u.Labels["k8s.uid"] {
+				case "uid-old":
+					sawOld = true
+				case "uid-new":
+					sawNew = true
+				}
+			}
+		}
+		if sawOld {
+			t.Fatal("gen-1 pending upsert must not flush after gen-2 adopt")
+		}
+		if !sawNew {
+			t.Fatal("gen-2 upsert must flush after adopt")
+		}
+		if st := w.gvrStates[testGVR]; st == nil || st.Generation != 2 {
+			t.Fatalf("expected gen 2 state, got %+v", st)
+		}
+		if _, ok := w.gvrStates[testGVR].ReportedUIDs["uid-old"]; ok {
+			t.Fatal("gen-1 UID must not appear in gen-2 ReportedUIDs")
+		}
+	})
+}
+
+// TestWriter_FastReAddDropsPendingDeletesFromPriorGeneration verifies that
+// unflushed gen-1 deletes are discarded on gen-2 adopt, so a later flush
+// cannot delete inventory that still belongs to the newer generation.
+func TestWriter_FastReAddDropsPendingDeletesFromPriorGeneration(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		mock := &recordingReporter{}
+		w := newTestWriter(mock, nil, nil, 10*time.Second)
+
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		go w.Run(ctx)
+		synctest.Wait()
+
+		// Establish gen-1 baseline with a flushed upsert.
+		w.EventCh() <- ResourceEvent{
+			Op: EventAdd, Resource: makeResource("uid-keep", "deploy-keep", "100"),
+			GVR: testGVR, Generation: 1,
+		}
+		advanceAndWait(11 * time.Second)
+		if len(mock.getDeltas()) == 0 {
+			t.Fatal("precondition: expected gen-1 upsert flush")
+		}
+		mock.mu.Lock()
+		mock.deltas = nil
+		mock.mu.Unlock()
+
+		// Gen-1 delete stays pending under the long batch interval.
+		w.EventCh() <- ResourceEvent{
+			Op: EventDelete, Resource: makeResource("uid-keep", "deploy-keep", "100"),
+			GVR: testGVR, Generation: 1,
+		}
+		synctest.Wait()
+
+		// Gen-2 re-add of the same UID adopts and must drop the pending delete.
+		w.EventCh() <- ResourceEvent{
+			Op: EventAdd, Resource: makeResource("uid-keep", "deploy-keep", "200"),
+			GVR: testGVR, Generation: 2,
+		}
+		advanceAndWait(11 * time.Second)
+
+		for _, d := range mock.getDeltas() {
+			for _, del := range d.delta.Deletes {
+				if del.IsDelete {
+					t.Fatalf("gen-1 pending delete must not flush after gen-2 adopt, got %+v", del)
+				}
+			}
+			for _, u := range d.delta.Upserts {
+				if u.Labels["k8s.uid"] == "uid-keep" && u.IsDelete {
+					t.Fatal("upsert side must not carry IsDelete for uid-keep")
+				}
+			}
+		}
+		var sawUpsert bool
+		for _, d := range mock.getDeltas() {
+			for _, u := range d.delta.Upserts {
+				if u.Labels["k8s.uid"] == "uid-keep" {
+					sawUpsert = true
+				}
+			}
+		}
+		if !sawUpsert {
+			t.Fatal("gen-2 upsert for uid-keep must flush after adopt")
+		}
+	})
+}
+
+// TestWriter_FastReAddDropsPendingOnlyForAdoptedGVR verifies other GVRs'
+// pending work survives when one GVR adopts a newer generation.
+func TestWriter_FastReAddDropsPendingOnlyForAdoptedGVR(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		rsGVR := schema.GroupVersionResource{Group: "apps", Version: "v1", Resource: "replicasets"}
+		schemaBoth := map[schema.GroupVersionResource]SchemaEntry{
+			testGVR: {GVR: testGVR, Kind: "Deployment"},
+			rsGVR:   {GVR: rsGVR, Kind: "ReplicaSet"},
+		}
+		mock := &recordingReporter{}
+		w := newTestWriter(mock, nil, schemaBoth, 10*time.Second)
+
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		go w.Run(ctx)
+		synctest.Wait()
+
+		w.EventCh() <- ResourceEvent{
+			Op: EventAdd, Resource: makeResource("uid-deploy", "deploy-1", "100"),
+			GVR: testGVR, Generation: 1,
+		}
+		rs := &unstructured.Unstructured{Object: map[string]any{
+			"apiVersion": "apps/v1", "kind": "ReplicaSet",
+			"metadata": map[string]any{
+				"uid": "uid-rs", "name": "rs-1", "namespace": "default",
+				"resourceVersion": "200", "creationTimestamp": "2025-06-01T12:00:00Z",
+			},
+		}}
+		w.EventCh() <- ResourceEvent{Op: EventAdd, Resource: rs, GVR: rsGVR, Generation: 1}
+		synctest.Wait()
+
+		w.EventCh() <- ResourceEvent{
+			Op: EventAdd, Resource: makeResource("uid-deploy-2", "deploy-2", "300"),
+			GVR: testGVR, Generation: 2,
+		}
+		advanceAndWait(11 * time.Second)
+
+		var sawDeploy1, sawDeploy2, sawRS bool
+		for _, d := range mock.getDeltas() {
+			for _, u := range d.delta.Upserts {
+				switch u.Labels["k8s.uid"] {
+				case "uid-deploy":
+					sawDeploy1 = true
+				case "uid-deploy-2":
+					sawDeploy2 = true
+				case "uid-rs":
+					sawRS = true
+				}
+			}
+		}
+		if sawDeploy1 {
+			t.Fatal("adopted GVR must drop prior-generation pending upsert")
+		}
+		if !sawDeploy2 {
+			t.Fatal("new generation upsert must flush")
+		}
+		if !sawRS {
+			t.Fatal("unrelated GVR pending upsert must survive adopt")
 		}
 	})
 }

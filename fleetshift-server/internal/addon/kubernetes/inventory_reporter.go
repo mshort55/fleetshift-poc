@@ -77,15 +77,18 @@ func NewDirectInventoryReporter(backend InventoryReportBackend) *DirectInventory
 
 // ApplyDelta writes upserts and deletes through one mixed
 // ReplaceBatch. An empty delta returns nil without calling the backend
-// -- idle empty flushes are not heartbeats. Delete entries are forced
-// to IsDelete true so a mis-tagged writer entry cannot become an
-// accidental upsert.
+// -- idle empty flushes are not heartbeats. Upsert entries are forced
+// to IsDelete false and delete entries to IsDelete true so a mis-tagged
+// writer entry cannot flip sides.
 func (r *DirectInventoryReporter) ApplyDelta(ctx context.Context, delta InventoryDeltaReport) error {
 	if len(delta.Upserts) == 0 && len(delta.Deletes) == 0 {
 		return nil
 	}
 	reports := make([]InventoryObjectReport, 0, len(delta.Upserts)+len(delta.Deletes))
-	reports = append(reports, delta.Upserts...)
+	for _, up := range delta.Upserts {
+		up.IsDelete = false
+		reports = append(reports, up)
+	}
 	for _, del := range delta.Deletes {
 		reports = append(reports, InventoryObjectReport{
 			Name:     del.Name,

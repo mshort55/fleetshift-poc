@@ -181,7 +181,7 @@ func TestIsResourceMatchingList_WildcardGroup(t *testing.T) {
 		t.Error("expected match with wildcard group")
 	}
 	if g != "*" || k != "pods" {
-		t.Errorf("unexpected match values: group=%s, kind=%s", g, k)
+		t.Errorf("unexpected match values: group=%s, resource=%s", g, k)
 	}
 }
 
