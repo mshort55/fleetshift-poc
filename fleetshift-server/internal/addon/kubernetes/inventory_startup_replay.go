@@ -66,7 +66,7 @@ func ReplayPersistedIndexers(
 		}
 		input, ok, err := indexRuntimeInputFromTarget(ctx, vault, target)
 		if err != nil {
-			logger.Warn("startup replay skipped target; credential resolve failed",
+			logger.Warn("startup replay skipped target",
 				"target", string(target.ID()),
 				"error", err,
 			)
@@ -124,6 +124,13 @@ func indexRuntimeInputFromTarget(
 		return IndexRuntimeInput{}, false, nil
 	}
 
+	// Permanent target-property errors before credential retries so
+	// vault-backed targets with bad cluster names fail fast.
+	clusterResourceName, err := clusterResourceNameFromTarget(target)
+	if err != nil {
+		return IndexRuntimeInput{}, false, err
+	}
+
 	var lastErr error
 	var token []byte
 	var secretRef domain.SecretRef
@@ -143,11 +150,6 @@ func indexRuntimeInputFromTarget(
 	}
 	if len(token) == 0 {
 		return IndexRuntimeInput{}, false, nil
-	}
-
-	clusterResourceName, err := clusterResourceNameFromTarget(target)
-	if err != nil {
-		return IndexRuntimeInput{}, false, err
 	}
 
 	input, err := NewIndexRuntimeInput(

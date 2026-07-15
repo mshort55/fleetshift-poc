@@ -108,6 +108,46 @@ func TestReplayPersistedIndexers_SkipsMissingClusterResourceName(t *testing.T) {
 	}
 }
 
+func TestIndexRuntimeInputFromTarget_ValidatesClusterNameBeforeVault(t *testing.T) {
+	vault := &countingVault{}
+	target := domain.NewTargetInfo(
+		"replay-no-cluster-vault",
+		TargetType,
+		"Test Cluster",
+		domain.TargetStateReady,
+		nil,
+		map[string]string{
+			PropAPIServer:              "https://example",
+			PropServiceAccountTokenRef: "targets/replay-no-cluster-vault/sa-token",
+		},
+		nil,
+	)
+	_, ok, err := indexRuntimeInputFromTarget(context.Background(), vault, target)
+	if ok {
+		t.Fatal("expected ok=false for missing cluster_resource_name")
+	}
+	if !errors.Is(err, domain.ErrInvalidArgument) {
+		t.Fatalf("error = %v, want ErrInvalidArgument", err)
+	}
+	if vault.gets != 0 {
+		t.Fatalf("vault.Get calls = %d, want 0 before permanent config error", vault.gets)
+	}
+}
+
+// countingVault records Get calls for ordering assertions.
+type countingVault struct {
+	gets int
+}
+
+func (v *countingVault) Get(context.Context, domain.SecretRef) ([]byte, error) {
+	v.gets++
+	return nil, domain.ErrNotFound
+}
+
+func (v *countingVault) Put(context.Context, domain.SecretRef, []byte) error { return nil }
+
+func (v *countingVault) Delete(context.Context, domain.SecretRef) error { return nil }
+
 func TestReplayPersistedIndexers_SkipsMalformedClusterResourceName(t *testing.T) {
 	host := testIndexingRuntime(t)
 	target := domain.NewTargetInfo(
