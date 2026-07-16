@@ -659,9 +659,10 @@ func Test_LabelIndexing(t *testing.T) {
 			if _, ok := inv.Labels()["kubernetes.io/os"]; !ok {
 				t.Error("node missing kubernetes.io/os localLabel")
 			}
-			break
+			return
 		}
 	}
+	t.Fatal("no Node found to assert kubernetes.io/os localLabel")
 }
 
 // Test_EnsureIndexerIndexesTarget wires EnsureIndexer against the kind
