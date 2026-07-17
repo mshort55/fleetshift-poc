@@ -431,7 +431,11 @@ All other resources discovered on the cluster receive base extraction only — i
 
 ### Runtime schema extensibility
 
-The two-tier model and allow/deny configuration address the core extensibility gap for controlling what is watched. However, enriched extraction rules (JSONPath fields, hooks) are compiled into the binary. Whether enriched schema entries should be configurable at runtime — via target properties, a configuration API, or a custom resource — remains open. Allow/deny lists and namespace filters are modeled in index config, but producers currently start with the default schema only, so runtime allow/deny/namespace overrides from target properties are not yet wired. Also consider whether CEL should be used in addition to JSONPath (platform already utilizes CEL), or whether we should completely replace JSONPath with CEL.
+The two-tier model and allow/deny configuration address the core extensibility gap for controlling what is watched. However, enriched extraction rules (JSONPath fields, hooks) are compiled into the binary. Whether enriched schema entries should be configurable at runtime — via a configuration API, a custom resource, or similar — remains open. Allow/deny lists and namespace filters are modeled in index config, but producers currently start with the default schema only, so runtime allow/deny/namespace overrides are not yet wired.
+
+Where that config lives matters. Storing index filters or schema on target properties is a poor fit today: Kind and GCP HCP rebuild target properties on every delivery (full replace, not merge), so operator-set indexing config would be wiped on the next reconcile. An addon-level config (applied to every kubernetes target, similar to the GCP HCP addon config file pattern) avoids that clobber; per-target overrides likely need a different durable mechanism than the properties map. Also consider whether CEL should be used in addition to JSONPath (platform already utilizes CEL), or whether we should completely replace JSONPath with CEL.
+
+If enriched schema becomes runtime-configurable, the platform needs extraction guardrails for sensitive built-ins. The compiled default schema intentionally extracts no fields from Secrets and ConfigMaps. A configurable schema must not allow callers to pull `data` (or equivalent) into observation — for example by denying custom field extraction on those types, or by an explicit trust/authorization model that makes such extraction safe.
 
 ### Edge querying / persistence
 
@@ -453,6 +457,26 @@ A platform-persisted checkpoint per GVR per target — last successfully process
 
 When a GVR leaves the desired set, or when an indexer is stopped / a target is deleted, persisted inventory for that scope is not deleted. GVR removal drops in-memory state only. Target-scoped indexed inventory cleanup after target deletion is deferred. Restoring offline, owner-validated subtree cleanup (or an equivalent) remains open work.
 
+### Producer indexing handshake durability
+
+Producers call `EnsureIndexer` before reporting `Delivered`, and a one-shot startup replay recovers indexers after server restart from persisted targets with resolvable vault credentials. The happy path and the ordinary failure path are sound: if `EnsureIndexer` fails, the producer reports `Failed` and FleetShift's durable workflow redelivers. That is not the open gap.
+
+What remains open are crash and signal windows around that handshake:
+
+- **Startup-replay miss**: a kubernetes target committed after the replay's final list scan stays unindexed until a later `EnsureIndexer` or process restart + replay. Replay is one-shot; it does not poll.
+- **Crash after Ensure, before terminal `ReportResult`**: the in-process indexer dies with the server. The Kind cluster may already exist, but delivery is not terminal, outputs are not committed, and startup replay has nothing to list. The workflow is still waiting for completion. GCP HCP can resume via `RecoverActiveDeliveries`; Kind does not yet have that parity, so this window can stall until some other recovery path lands.
+- **Non-atomic `ReportResult` commit vs workflow signal**: delivery state is persisted, then the fulfillment signal is sent in a separate step. If the process dies after committing `Delivered` but before the signal is observed, `ProcessDeliveryOutputs` (vault + target registration) may never run. Startup replay cannot start an indexer without those outputs. By contrast, once a completion signal is durably in workflow history, a failed or interrupted `ProcessDeliveryOutputs` activity is retried by the workflow — that case does not depend on startup replay.
+
+Deferred target-scoped cleanup amplifies the worst windows: inventory written by a briefly running indexer can remain if teardown or handshake recovery never cleans it up.
+
+### Kind same-generation token remint restarts the indexer
+
+On a same-generation Kind Deliver (cluster already owned; no recreate), `ensureCluster` still mints a new platform ServiceAccount token via TokenRequest. Producer `EnsureIndexer` then sees a fingerprint change because the runtime fingerprint digests raw credential bytes, and stop-and-replaces a healthy indexer. Options include reusing a resolvable vault-backed token on same-generation ensure, fingerprinting by secret-ref identity (with a clear credential-rotation story), or skipping `EnsureIndexer` when fingerprint-relevant inputs are unchanged. Any fix should stay consistent with GCP HCP's Ensure path and vault-backed unexpected-exit restart.
+
+### Logical object naming and incarnation
+
+Shipped identity uses a UID leaf under a GVR key (`…/apiResources/{gvrKey}/objects/{uid}`). A separate design explores moving to logical names keyed by cluster + GroupResource + scope + namespace + name, with Kubernetes UID as source incarnation rather than the path leaf, replace-incarnation on UID change at the same logical name, discovery as scope authority, and a virtual Namespace hierarchy parent. That product shift — including how hard-delete / replace-if-still-current fences persist across retries and writer restart — remains open. Prefer resolving it as one umbrella decision (with the logical-object-naming design as the detailed contract) rather than landing UID-leaf semantics as permanent.
+
 ### Informer startup serialization at scale
 
 The current serialized startup (one informer at a time, with initialization timeout) works for a bounded set of GVRs. With watch-all mode on a large cluster (200-400+ GVRs), serialized startup could take significant time. A bounded-parallelism approach (e.g., start N informers concurrently) may be needed, balanced against memory spike risk during initial LIST phases.
@@ -465,10 +489,13 @@ The writer's error recovery relies on retaining failed batches for retry on the 
 
 The implementation stores only the latest observation and current conditions per inventory object — a single observation payload, a conditions set, and freshness timestamps. Platform observation/condition history tables exist but are not populated synchronously by inventory reports. The current single-snapshot model is sufficient for point-in-time inventory queries but cannot answer "when did this resource last change state" or "how long has this condition been degraded" without additional work.
 
-
 ### Annotation collection policy
 
 Annotation handling needs a deliberate decision. Today the base observation stores the object's annotations uncapped in metadata, while an unused schema opt-in can also store a size-capped, noise-stripped copy under `extracted`. That dual path should not stand. Options to choose among include: collect no annotations at all; or keep annotations with a size limit and always drop known-large noise such as `kubectl.kubernetes.io/last-applied-configuration`. Revisit storage cost, sensitivity, and query value before locking a policy.
+
+### Inventory write-path performance
+
+Indexer flush volume makes platform inventory replace/delete performance part of the indexing experience. Open platform-store work includes coalescing redundant source events / suppressing no-op row updates, and evaluating mixed upsert+delete batching (dedicated mixed SQL and/or native pgx pipelining) without regressing specialized upsert-only plans. This is repository/hot-path work, not addon extraction logic, but it bounds how large a watched cluster the in-process path can sustain.
 
 ### Addon-to-addon communication for schema and edge extensibility
 
