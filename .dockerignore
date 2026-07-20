@@ -19,12 +19,11 @@ bin
 **/bin/
 poc
 docs
-# Exclude deploy artifacts from image build context, but keep the shared
-# GCP HCP renderer and all-in-one entrypoint required by Dockerfile.fleetshift.
-deploy/**
-!deploy/scripts/
-!deploy/scripts/render-gcphcp-config.sh
-!deploy/scripts/fleetshift-aio-entrypoint.sh
+# Exclude deploy harnesses from the image build context, but keep
+# deploy/scripts/ (renderer + all-in-one entrypoint for Dockerfile.fleetshift).
+deploy/podman
+deploy/kubernetes
+deploy/keycloak
 proto
 data
 *.md

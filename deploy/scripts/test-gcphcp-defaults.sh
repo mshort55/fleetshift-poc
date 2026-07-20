@@ -231,8 +231,8 @@ run_aio() {
     HOME="$HOME" \
     RENDER_GCPHCP_CONFIG="${RENDERER}" \
     GCPHCP_CONFIG_OUT="${TMP_ROOT}/aio-gcphcp.yaml" \
-    "${env_args[@]}" \
-    "$ENTRYPOINT" "${cmd_args[@]}" >"$outfile" 2>"${outfile}.err"
+    ${env_args[@]+"${env_args[@]}"} \
+    "$ENTRYPOINT" ${cmd_args[@]+"${cmd_args[@]}"} >"$outfile" 2>"${outfile}.err"
   AIO_STATUS=$?
   set -e
   AIO_OUT="$(cat "$outfile")"
