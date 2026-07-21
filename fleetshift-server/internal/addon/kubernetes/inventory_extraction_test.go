@@ -1233,6 +1233,47 @@ func TestExtractObservedResource_EmptyClusterResourceNameRejected(t *testing.T) 
 	}
 }
 
+func TestExtractObservedResource_RejectsScopeNamespaceMismatch(t *testing.T) {
+	t.Run("namespaced scope requires namespace", func(t *testing.T) {
+		r := &unstructured.Unstructured{
+			Object: map[string]any{
+				"apiVersion": "v1",
+				"kind":       "Pod",
+				"metadata": map[string]any{
+					"uid":  "pod-uid",
+					"name": "my-pod",
+					// namespace intentionally omitted
+					"creationTimestamp": "2025-01-01T00:00:00Z",
+				},
+			},
+		}
+		entry := SchemaEntry{GVR: schema.GroupVersionResource{Version: "v1", Resource: "pods"}}
+		_, _, err := ExtractObservedResource(r, entry, testClusterResourceName("target-1"), ObjectScopeNamespaced)
+		if !errors.Is(err, domain.ErrInvalidArgument) {
+			t.Fatalf("error = %v, want ErrInvalidArgument", err)
+		}
+	})
+	t.Run("cluster scope rejects namespace", func(t *testing.T) {
+		r := &unstructured.Unstructured{
+			Object: map[string]any{
+				"apiVersion": "v1",
+				"kind":       "Node",
+				"metadata": map[string]any{
+					"uid":               "node-uid",
+					"name":              "worker-1",
+					"namespace":         "default",
+					"creationTimestamp": "2025-01-01T00:00:00Z",
+				},
+			},
+		}
+		entry := SchemaEntry{GVR: schema.GroupVersionResource{Version: "v1", Resource: "nodes"}}
+		_, _, err := ExtractObservedResource(r, entry, testClusterResourceName("target-1"), ObjectScopeCluster)
+		if !errors.Is(err, domain.ErrInvalidArgument) {
+			t.Fatalf("error = %v, want ErrInvalidArgument", err)
+		}
+	})
+}
+
 func TestExtractObservedResource_ClusterScoped(t *testing.T) {
 	r := &unstructured.Unstructured{
 		Object: map[string]any{

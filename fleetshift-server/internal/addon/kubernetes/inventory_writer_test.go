@@ -228,6 +228,81 @@ func TestDelete_MapsToApplyDeltaDeletesWithObjectResourceName(t *testing.T) {
 	})
 }
 
+// TestDelete_FallsBackToReportedNamesWhenTombstoneCannotName verifies that a
+// watch delete whose metadata cannot form ObjectResourceName (here: namespaced
+// scope with empty namespace) still deletes the previously acknowledged name.
+func TestDelete_FallsBackToReportedNamesWhenTombstoneCannotName(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		mock := &recordingReporter{}
+		w := newTestWriter(mock, nil, nil, 100*time.Millisecond)
+
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		go w.Run(ctx)
+		synctest.Wait()
+
+		w.EventCh() <- ResourceEvent{
+			Op: EventAdd, Resource: makeResource("uid-keep", "deploy-keep", "100"),
+			GVR: testGVR, Scope: ObjectScopeNamespaced,
+		}
+		advanceAndWait(250 * time.Millisecond)
+		wantName := mustObjectName(t, "target-1", "uid-keep", testGVR)
+		if len(mock.getDeltas()) == 0 {
+			t.Fatal("precondition: expected upsert")
+		}
+		mock.mu.Lock()
+		mock.deltas = nil
+		mock.mu.Unlock()
+
+		tombstone := makeResource("uid-keep", "deploy-keep", "200")
+		tombstone.SetNamespace("") // breaks NewScopeNamespace for namespaced scope
+		w.EventCh() <- ResourceEvent{
+			Op: EventDelete, Resource: tombstone, GVR: testGVR, Scope: ObjectScopeNamespaced,
+		}
+		advanceAndWait(250 * time.Millisecond)
+
+		var found bool
+		for _, d := range mock.getDeltas() {
+			for _, del := range d.delta.Deletes {
+				if del.Name == wantName && del.IsDelete {
+					found = true
+				}
+			}
+		}
+		if !found {
+			t.Fatalf("expected IsDelete for acknowledged name %s after incomplete tombstone, got %+v",
+				wantName, mock.getDeltas())
+		}
+	})
+}
+
+// TestDelete_SkipsWhenNoQueuedOrAcknowledgedName verifies deletes that cannot
+// be named from the event and were never acknowledged are dropped.
+func TestDelete_SkipsWhenNoQueuedOrAcknowledgedName(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		mock := &recordingReporter{}
+		w := newTestWriter(mock, nil, nil, 100*time.Millisecond)
+
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		go w.Run(ctx)
+		synctest.Wait()
+
+		tombstone := makeResource("uid-unknown", "deploy-x", "1")
+		tombstone.SetNamespace("")
+		w.EventCh() <- ResourceEvent{
+			Op: EventDelete, Resource: tombstone, GVR: testGVR, Scope: ObjectScopeNamespaced,
+		}
+		advanceAndWait(250 * time.Millisecond)
+
+		for _, d := range mock.getDeltas() {
+			if len(d.delta.Deletes) != 0 || len(d.delta.Upserts) != 0 {
+				t.Fatalf("expected no ApplyDelta work for unnameable unknown UID, got %+v", d.delta)
+			}
+		}
+	})
+}
+
 func TestResync_MapsToApplyDelta(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		mock := &recordingReporter{}

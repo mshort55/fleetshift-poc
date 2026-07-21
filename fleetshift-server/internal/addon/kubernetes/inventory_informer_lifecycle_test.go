@@ -155,6 +155,9 @@ func TestListAndResync_EmitsAddsAndResync(t *testing.T) {
 		if ev.Op != EventAdd || ev.Resource.GetUID() != "uid-1" {
 			t.Fatalf("unexpected event: %+v", ev)
 		}
+		if ev.Scope != ObjectScopeNamespaced {
+			t.Fatalf("event.Scope = %q, want namespaced", ev.Scope)
+		}
 	default:
 		t.Fatal("expected EventAdd")
 	}
@@ -162,8 +165,49 @@ func TestListAndResync_EmitsAddsAndResync(t *testing.T) {
 	if rs.GVR != gvr || len(rs.Resources) != 1 {
 		t.Fatalf("unexpected resync: %+v", rs)
 	}
+	if rs.Scope != ObjectScopeNamespaced {
+		t.Fatalf("resync.Scope = %q, want namespaced", rs.Scope)
+	}
 	if inf.resourceIndex["uid-1"] != "10" {
 		t.Fatalf("resourceIndex = %#v", inf.resourceIndex)
+	}
+}
+
+func TestListAndResync_EmitsBoundClusterScope(t *testing.T) {
+	gvr := schema.GroupVersionResource{Group: "", Version: "v1", Resource: "nodes"}
+	dyn := newFakeDynamicClient(gvr)
+	node := &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": "v1",
+		"kind":       "Node",
+		"metadata": map[string]any{
+			"uid":             "node-uid",
+			"name":            "worker-1",
+			"resourceVersion": "1",
+		},
+	}}
+	if _, err := dyn.Resource(gvr).Create(context.Background(), node, metav1.CreateOptions{}); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+
+	eventCh := make(chan ResourceEvent, 10)
+	resyncCh := make(chan ResyncEvent, 10)
+	inf := NewInformer(dyn, gvr, ObjectScopeCluster, eventCh, resyncCh, nil, slog.Default())
+
+	gotResync := ackNextResync(resyncCh)
+	if err := inf.listAndResync(context.Background()); err != nil {
+		t.Fatalf("listAndResync: %v", err)
+	}
+	select {
+	case ev := <-eventCh:
+		if ev.Scope != ObjectScopeCluster {
+			t.Fatalf("event.Scope = %q, want cluster", ev.Scope)
+		}
+	default:
+		t.Fatal("expected EventAdd")
+	}
+	rs := <-gotResync
+	if rs.Scope != ObjectScopeCluster {
+		t.Fatalf("resync.Scope = %q, want cluster", rs.Scope)
 	}
 }
 

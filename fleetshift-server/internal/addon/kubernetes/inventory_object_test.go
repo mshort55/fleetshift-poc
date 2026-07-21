@@ -166,10 +166,24 @@ func TestGroupResourceKey(t *testing.T) {
 	}
 }
 
-func TestParseGroupResourceKey_RejectsNonCanonical(t *testing.T) {
-	_, err := kubernetes.ParseGroupResourceKey("deployments.apps.")
-	if !errors.Is(err, domain.ErrInvalidArgument) {
-		t.Fatalf("error = %v, want ErrInvalidArgument", err)
+func TestParseGroupResourceKey_Rejects(t *testing.T) {
+	tests := []struct {
+		name string
+		key  string
+	}{
+		{"Empty", ""},
+		{"LeadingDot", ".apps"},
+		{"TrailingDot", "deployments.apps."},
+		{"TrailingDotCore", "pods."},
+		{"Subresource", "pods/status"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := kubernetes.ParseGroupResourceKey(tc.key)
+			if !errors.Is(err, domain.ErrInvalidArgument) {
+				t.Fatalf("ParseGroupResourceKey(%q) error = %v, want ErrInvalidArgument", tc.key, err)
+			}
+		})
 	}
 }
 
@@ -241,6 +255,47 @@ func TestObjectResourceName(t *testing.T) {
 		}
 	})
 
+	t.Run("SlashBearingNamespaceIsEncoded", func(t *testing.T) {
+		name, err := kubernetes.ObjectResourceName(kubernetes.KubernetesObjectIdentity{
+			ClusterResourceName: "clusters/prod",
+			GVR:                 schema.GroupVersionResource{Group: "", Version: "v1", Resource: "pods"},
+			ScopeNamespace:      mustTestScopeNamespace(t, kubernetes.ObjectScopeNamespaced, "team/a"),
+			UID:                 "uid-1",
+		})
+		if err != nil {
+			t.Fatalf("ObjectResourceName: %v", err)
+		}
+		want := domain.ResourceName("clusters/prod/namespaces/team%2Fa/apiResources/pods/objects/uid-1")
+		if name != want {
+			t.Fatalf("ObjectResourceName = %q, want %q", name, want)
+		}
+	})
+
+	t.Run("VersionlessKeyIgnoresAPIVersion", func(t *testing.T) {
+		v1 := schema.GroupVersionResource{Group: "apps", Version: "v1", Resource: "deployments"}
+		v1beta1 := schema.GroupVersionResource{Group: "apps", Version: "v1beta1", Resource: "deployments"}
+		sn := mustTestScopeNamespace(t, kubernetes.ObjectScopeNamespaced, "default")
+		nameV1, err := kubernetes.ObjectResourceName(kubernetes.KubernetesObjectIdentity{
+			ClusterResourceName: "clusters/prod", GVR: v1, ScopeNamespace: sn, UID: "uid-1",
+		})
+		if err != nil {
+			t.Fatalf("ObjectResourceName v1: %v", err)
+		}
+		nameBeta, err := kubernetes.ObjectResourceName(kubernetes.KubernetesObjectIdentity{
+			ClusterResourceName: "clusters/prod", GVR: v1beta1, ScopeNamespace: sn, UID: "uid-1",
+		})
+		if err != nil {
+			t.Fatalf("ObjectResourceName v1beta1: %v", err)
+		}
+		if nameV1 != nameBeta {
+			t.Fatalf("version change renamed object: v1=%q v1beta1=%q", nameV1, nameBeta)
+		}
+		want := domain.ResourceName("clusters/prod/namespaces/default/apiResources/deployments.apps/objects/uid-1")
+		if nameV1 != want {
+			t.Fatalf("ObjectResourceName = %q, want %q", nameV1, want)
+		}
+	})
+
 	t.Run("RejectsEmptyUID", func(t *testing.T) {
 		_, err := kubernetes.ObjectResourceName(kubernetes.KubernetesObjectIdentity{
 			ClusterResourceName: "clusters/prod",
@@ -287,6 +342,28 @@ func TestObjectCollectionName(t *testing.T) {
 		want := domain.CollectionName("clusters/prod/namespaces/default/apiResources/deployments.apps/objects")
 		if got != want {
 			t.Fatalf("ObjectCollectionName = %q, want %q", got, want)
+		}
+	})
+
+	t.Run("ClusterScopedShape", func(t *testing.T) {
+		got, err := kubernetes.ObjectCollectionName("clusters/prod", mustTestScopeNamespace(t, kubernetes.ObjectScopeCluster, ""), schema.GroupVersionResource{
+			Group: "", Version: "v1", Resource: "nodes",
+		})
+		if err != nil {
+			t.Fatalf("ObjectCollectionName: %v", err)
+		}
+		want := domain.CollectionName("clusters/prod/apiResources/nodes/objects")
+		if got != want {
+			t.Fatalf("ObjectCollectionName = %q, want %q", got, want)
+		}
+	})
+
+	t.Run("RejectsZeroScopeNamespace", func(t *testing.T) {
+		_, err := kubernetes.ObjectCollectionName("clusters/prod", kubernetes.ScopeNamespace{}, schema.GroupVersionResource{
+			Version: "v1", Resource: "pods",
+		})
+		if !errors.Is(err, domain.ErrInvalidArgument) {
+			t.Fatalf("ObjectCollectionName error = %v, want ErrInvalidArgument", err)
 		}
 	})
 

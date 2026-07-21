@@ -90,6 +90,35 @@ func TestSupportedResources_WatchableOnly(t *testing.T) {
 	}
 }
 
+func TestSupportedResources_ClusterScopedWatchable(t *testing.T) {
+	disc := newFakeDiscovery([]*metav1.APIResourceList{
+		{
+			GroupVersion: "v1",
+			APIResources: []metav1.APIResource{
+				{Name: "nodes", Namespaced: false, Verbs: metav1.Verbs{"get", "list", "watch"}},
+				{Name: "pods", Namespaced: true, Verbs: metav1.Verbs{"get", "list", "watch"}},
+			},
+		},
+	})
+
+	result, err := SupportedResources(disc, slog.Default())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	nodes := schema.GroupVersionResource{Group: "", Version: "v1", Resource: "nodes"}
+	pods := schema.GroupVersionResource{Group: "", Version: "v1", Resource: "pods"}
+	if desc, ok := result[nodes]; !ok {
+		t.Fatal("expected nodes in result")
+	} else if desc.Scope != ObjectScopeCluster {
+		t.Fatalf("nodes scope = %q, want cluster", desc.Scope)
+	}
+	if desc, ok := result[pods]; !ok {
+		t.Fatal("expected pods in result")
+	} else if desc.Scope != ObjectScopeNamespaced {
+		t.Fatalf("pods scope = %q, want namespaced", desc.Scope)
+	}
+}
+
 func TestSupportedResources_EmptyList(t *testing.T) {
 	disc := newFakeDiscovery([]*metav1.APIResourceList{})
 
