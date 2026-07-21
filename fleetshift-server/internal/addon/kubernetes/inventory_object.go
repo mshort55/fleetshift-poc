@@ -17,10 +17,11 @@ import (
 // ObjectResourceType is the single [domain.ResourceType] used to
 // report every watched Kubernetes object, regardless of GVR or kind.
 // One generic type means new CRDs and API versions never require
-// registering a new FleetShift resource type; GVR, kind, namespace,
-// and name are instead carried in the object's resource name and
-// observation payload. Built from [AddonID] rather than a
-// separate literal, so its service-name prefix can never drift from
+// registering a new FleetShift resource type. Object identity is split
+// across the resource name (cluster, optional namespace, versionless
+// group-resource, UID) and the observation payload (apiVersion, kind,
+// metadata.name, and related fields). Built from [AddonID] rather than
+// a separate literal, so its service-name prefix can never drift from
 // the addon-ownership rule the platform validates against.
 const ObjectResourceType domain.ResourceType = domain.ResourceType(AddonID) + "/Object"
 
@@ -36,10 +37,14 @@ const ObjectResourceType domain.ResourceType = domain.ResourceType(AddonID) + "/
 // where clusterResourceID is [KubernetesObjectIdentity.ClusterResourceName].ID().
 // ObjectCollectionID is also the schema CollectionID in [InventorySchema].
 const (
-	ClusterCollectionID      domain.CollectionID = "clusters"
-	NamespaceCollectionID   domain.CollectionID = "namespaces"
+	// ClusterCollectionID is the managed-cluster parent collection ("clusters").
+	ClusterCollectionID domain.CollectionID = "clusters"
+	// NamespaceCollectionID is the Kubernetes namespace branch ("namespaces").
+	NamespaceCollectionID domain.CollectionID = "namespaces"
+	// APIResourceCollectionID is the versionless group-resource branch ("apiResources").
 	APIResourceCollectionID domain.CollectionID = "apiResources"
-	ObjectCollectionID      domain.CollectionID = "objects"
+	// ObjectCollectionID is the object leaf collection ("objects").
+	ObjectCollectionID domain.CollectionID = "objects"
 )
 
 // ObjectScope is the discovery-authoritative scope of a Kubernetes
@@ -80,8 +85,9 @@ type ScopeNamespace struct {
 	namespace string
 }
 
-// NewScopeNamespace returns a concrete scope/namespace pair.
-// scope must be a concrete [ObjectScope]; namespace must agree with it.
+// NewScopeNamespace returns a concrete [ScopeNamespace].
+// scope must be [ObjectScopeNamespaced] or [ObjectScopeCluster];
+// namespace must be non-empty for namespaced scope and empty for cluster scope.
 func NewScopeNamespace(scope ObjectScope, namespace string) (ScopeNamespace, error) {
 	scope, err := ParseObjectScope(string(scope))
 	if err != nil {
@@ -107,17 +113,22 @@ func NewScopeNamespace(scope ObjectScope, namespace string) (ScopeNamespace, err
 // watched Kubernetes object's [domain.ResourceName] and observation
 // payload. Both are derived from the same identity so they never
 // disagree about which object they describe.
-//
-// ClusterResourceName is the managed cluster resource (e.g.
-// "clusters/c1") whose ID becomes the object-name parent segment.
-// ScopeNamespace binds discovery scope to object metadata.namespace.
 type KubernetesObjectIdentity struct {
+	// ClusterResourceName is the managed cluster (e.g. "clusters/c1")
+	// whose ID becomes the object-name parent segment.
 	ClusterResourceName domain.ResourceName
-	GVR                 schema.GroupVersionResource
-	ScopeNamespace      ScopeNamespace
-	Kind                string
-	Name                string
-	UID                 string
+	// GVR is the API resource the object was watched through. Only the
+	// group/resource pair is used for naming; version is observation-only.
+	GVR schema.GroupVersionResource
+	// ScopeNamespace is the discovery scope bound to metadata.namespace.
+	// Construct via [NewScopeNamespace]; the zero value is rejected by naming.
+	ScopeNamespace ScopeNamespace
+	// Kind is the object's Kubernetes kind (observation metadata).
+	Kind string
+	// Name is the object's metadata.name (observation metadata; not a name path segment).
+	Name string
+	// UID is the object's metadata.uid and the inventory resource-name leaf.
+	UID string
 }
 
 // GroupResourceKey returns the canonical versionless key for gr:
@@ -180,7 +191,9 @@ func encodeResourceNameSegment(s string) string {
 }
 
 // ObjectResourceName returns the canonical Kubernetes object resource
-// name for the intermediate UID-leaf contract:
+// name. The leaf is always the object UID so delete/recreate under the
+// same namespace/name is a new inventory row. Requires a non-zero
+// [ScopeNamespace] and a flat [ClusterCollectionID] parent.
 //
 //	namespaced: clusters/{cluster}/namespaces/{ns}/apiResources/{grKey}/objects/{uid}
 //	cluster:    clusters/{cluster}/apiResources/{grKey}/objects/{uid}
@@ -213,9 +226,9 @@ func ObjectResourceName(id KubernetesObjectIdentity) (domain.ResourceName, error
 	return name, nil
 }
 
-// ObjectCollectionName returns the exact inventory collection for
-// clusterResourceName + scopeNamespace + gvr. This matches
-// [ObjectResourceName]'s parent collection.
+// ObjectCollectionName returns the parent collection of
+// [ObjectResourceName] for clusterResourceName + scopeNamespace + gvr
+// (everything except the UID leaf). Requires a non-zero [ScopeNamespace].
 func ObjectCollectionName(clusterResourceName domain.ResourceName, scopeNamespace ScopeNamespace, gvr schema.GroupVersionResource) (domain.CollectionName, error) {
 	if err := requireClusterResourceName(clusterResourceName); err != nil {
 		return "", fmt.Errorf("kubernetes object collection name (cluster %q): %w", clusterResourceName, err)
@@ -288,12 +301,12 @@ func ObjectLabels(obj *unstructured.Unstructured) map[string]string {
 
 // ObjectObservation returns the base observation payload for id: the
 // Kubernetes API identity it was watched through (group/version/
-// resource/scope, taken from id since obj's own apiVersion/kind
-// strings don't carry resource plural or scope), the object's own
-// apiVersion/kind/metadata as observed, and extracted (the
-// schema-hook-computed enrichment for this object's kind, or an empty
-// object when none applies). extracted is passed through opaquely;
-// this function does not interpret it.
+// resource from id.GVR and scope from id.ScopeNamespace — obj's own
+// apiVersion/kind strings don't carry resource plural or scope), the
+// object's own apiVersion/kind/metadata as observed, and extracted
+// (schema-hook enrichment, or an empty object when none applies).
+// extracted is passed through opaquely; this function does not
+// interpret it.
 //
 // metadata.labels are omitted here: they are projected into
 // [ObjectLabels] / resource.localLabels instead, matching how

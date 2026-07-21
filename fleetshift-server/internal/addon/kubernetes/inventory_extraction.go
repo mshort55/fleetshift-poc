@@ -28,9 +28,9 @@ import (
 // inventory node for selector matching.
 //
 // clusterResourceName is the managed cluster (clusters/{id}) used for
-// the object resource-name parent. scope is discovery-authoritative
-// and must agree with metadata.namespace; it is never inferred from
-// the object.
+// the object resource-name parent. scope is discovery-authoritative and
+// is combined with metadata.namespace via [NewScopeNamespace]; it is
+// never inferred from the object.
 func ExtractObservedResource(
 	r *unstructured.Unstructured,
 	entry SchemaEntry,

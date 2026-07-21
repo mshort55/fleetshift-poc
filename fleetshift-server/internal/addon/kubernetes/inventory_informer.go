@@ -41,6 +41,8 @@ type ResourceEvent struct {
 
 // ResyncEvent carries the full resource set for a GVR after an informer
 // completes a LIST (initial generation LIST or expired-cursor relist).
+// Scope is the discovery-authoritative scope bound when the informer
+// generation started; it is never inferred from object metadata.
 // When Ack is non-nil, the writer must send one result (nil on success)
 // after the LIST write commits or the generation ends; the informer
 // waits for that ack before starting WATCH so the cursor is only used
@@ -59,8 +61,10 @@ type ResyncEvent struct {
 // RemoveGVREvent signals that a GVR generation is no longer being
 // indexed (for example it left the desired set). The writer drops
 // in-memory state for that generation only; persisted inventory is left
-// unchanged. Informer shutdown / StopAll must not emit this event —
-// stopping the process is not a source-of-truth GVR removal.
+// unchanged. Scope is the discovery scope that was bound on the removed
+// generation (currently unused by the writer). Informer shutdown /
+// StopAll must not emit this event — stopping the process is not a
+// source-of-truth GVR removal.
 type RemoveGVREvent struct {
 	GVR        schema.GroupVersionResource
 	Scope      ObjectScope
@@ -117,7 +121,9 @@ func NewInformer(
 
 // NewInformerGeneration is like [NewInformer] but assigns an explicit GVR
 // process generation to every emitted ResourceEvent and ResyncEvent so the
-// writer can reject late deliveries after that generation closes.
+// writer can reject late deliveries after that generation closes. scope is
+// copied onto every emitted event as the discovery-authoritative
+// [ObjectScope] for that generation.
 func NewInformerGeneration(
 	client dynamic.Interface,
 	gvr schema.GroupVersionResource,
@@ -537,9 +543,11 @@ type InformerManager struct {
 	nsFilter    *NamespaceFilter
 	stoppers    map[schema.GroupVersionResource]context.CancelFunc
 	generations map[schema.GroupVersionResource]uint64
-	scopes      map[schema.GroupVersionResource]ObjectScope
-	nextGen     uint64
-	logger      *slog.Logger
+	// scopes records the discovery [ObjectScope] bound when each GVR
+	// informer generation started (copied onto RemoveGVREvent).
+	scopes  map[schema.GroupVersionResource]ObjectScope
+	nextGen uint64
+	logger  *slog.Logger
 
 	// informerWG tracks every ordinary and CRD informer goroutine so StopAll
 	// can await them after cancellation.

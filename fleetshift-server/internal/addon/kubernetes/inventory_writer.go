@@ -33,9 +33,10 @@ type gvrState struct {
 	ReportedUIDs map[string]domain.ResourceName
 }
 
-// pendingDelete is one queued watch delete awaiting flush. Name is the
-// exact inventory resource name when known at queue time; when empty,
-// flush resolves it from ReportedUIDs.
+// pendingDelete is one queued watch delete awaiting flush.
+// Name is the exact inventory resource name resolved at queue time from
+// the event (scope + metadata) or, failing that, from ReportedUIDs.
+// Flush skips the delete when Name is still empty.
 type pendingDelete struct {
 	GVR  schema.GroupVersionResource
 	Name domain.ResourceName
@@ -489,6 +490,8 @@ func (w *Writer) flush(
 	var deleteReports []InventoryObjectReport
 	deletedUIDs := make(map[string]schema.GroupVersionResource)
 	for uid, pending := range deletes {
+		// Name is normally filled by queueDelete; keep a ReportedUIDs
+		// fallback for empty Names that somehow reach flush.
 		name := pending.Name
 		if name == "" {
 			if st := w.gvrStates[pending.GVR]; st != nil {
@@ -786,9 +789,9 @@ func (w *Writer) sendResync(ctx context.Context, rs ResyncEvent) {
 	ackResync(pending.ack, nil)
 }
 
-// observeResource extracts a report+node, using [Writer.extractObserved]
-// when set (tests) and [ExtractObservedResource] otherwise. Scope must
-// come from the discovery-bound event/resync; there is no schema fallback.
+// observeResource extracts a report+node via [ExtractObservedResource],
+// or [Writer.extractObserved] when tests replace it. scope must come from
+// the discovery-bound event/resync; there is no schema fallback.
 func (w *Writer) observeResource(r *unstructured.Unstructured, entry SchemaEntry, scope ObjectScope) (InventoryObjectReport, inventoryNode, error) {
 	if w.extractObserved != nil {
 		return w.extractObserved(r, entry, w.clusterResourceName, scope)
@@ -796,8 +799,9 @@ func (w *Writer) observeResource(r *unstructured.Unstructured, entry SchemaEntry
 	return ExtractObservedResource(r, entry, w.clusterResourceName, scope)
 }
 
-// queueDelete builds a pending watch delete using the event's bound scope
-// and object metadata when possible, otherwise the acknowledged name.
+// queueDelete builds a [pendingDelete] with the exact inventory name when
+// it can be formed from the event's bound scope and object metadata, or
+// from the last acknowledged name in ReportedUIDs.
 func (w *Writer) queueDelete(gvr schema.GroupVersionResource, scope ObjectScope, obj *unstructured.Unstructured) pendingDelete {
 	uid := ""
 	namespace := ""
@@ -877,16 +881,19 @@ func (w *Writer) retryPendingResyncs(ctx context.Context) error {
 	return firstErr
 }
 
+// schemaEntry returns the enrichment schema for gvr, or a minimal entry
+// that only carries GVR when the schema has no row (discovery-only
+// watches still need GVR for [ObjectResourceName]).
 func (w *Writer) schemaEntry(gvr schema.GroupVersionResource) SchemaEntry {
 	entry := w.schema[gvr]
-	// Missing schema entries still need the watched GVR on the entry so
-	// extraction can build ObjectResourceName / labels correctly.
 	if entry.GVR.Empty() {
 		entry.GVR = gvr
 	}
 	return entry
 }
 
+// diffEdges computes edge adds/deletes by comparing BuildEdges and
+// common ownedBy edges for currentNodes against previousEdges.
 func (w *Writer) diffEdges() (adds, dels []Edge, newEdges map[edgeKey]Edge) {
 	ns := buildNodeStore(w.currentNodes)
 	newEdges = make(map[edgeKey]Edge)

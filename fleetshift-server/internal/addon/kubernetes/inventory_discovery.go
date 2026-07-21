@@ -1,9 +1,9 @@
 package kubernetes
 
 import (
-	"slices"
 	"fmt"
 	"log/slog"
+	"slices"
 	"strings"
 
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -19,17 +19,20 @@ type Resource struct {
 }
 
 // DiscoveredAPIResource is one watchable API resource selected from
-// discovery, including the discovery-authoritative scope used for
-// inventory naming. Scope is never inferred from object metadata.
-// Construct via [NewDiscoveredAPIResource].
+// discovery, including the discovery-authoritative [ObjectScope] used
+// for inventory naming. Scope is never inferred from object metadata.
+// Construct via [NewDiscoveredAPIResource]; zero values are not usable.
 type DiscoveredAPIResource struct {
-	GVR   schema.GroupVersionResource
+	// GVR is the preferred group/version/resource to watch.
+	GVR schema.GroupVersionResource
+	// Scope is discovery's APIResource.Namespaced mapping
+	// ([ObjectScopeNamespaced] or [ObjectScopeCluster]).
 	Scope ObjectScope
 }
 
 // NewDiscoveredAPIResource constructs a [DiscoveredAPIResource] for a
-// concrete GVR and discovery scope. Invalid GVR/scope combinations
-// return an error rather than a partially usable value.
+// non-empty, non-subresource GVR and a concrete discovery [ObjectScope].
+// It also requires a valid [GroupResourceKey] for the GVR's group/resource.
 func NewDiscoveredAPIResource(gvr schema.GroupVersionResource, scope ObjectScope) (DiscoveredAPIResource, error) {
 	if gvr.Empty() {
 		return DiscoveredAPIResource{}, fmt.Errorf("%w: discovered API resource requires a non-empty GVR", domain.ErrInvalidArgument)
