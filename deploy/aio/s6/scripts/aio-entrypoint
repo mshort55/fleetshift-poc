@@ -1,7 +1,9 @@
 #!/bin/sh
 # Map LOG_LEVEL to s6 verbosity, then exec /init so s6 remains PID 1.
+# Trim matches aioinit.ResolveLogLevel (TrimSpace; empty becomes error).
 set -eu
 
+LOG_LEVEL=$(printf '%s' "${LOG_LEVEL-}" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
 LOG_LEVEL=${LOG_LEVEL:-error}
 case "$LOG_LEVEL" in
   error) S6_VERBOSITY=0 ;;
